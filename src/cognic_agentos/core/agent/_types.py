@@ -38,10 +38,11 @@ AgentDispatchRefusalReason = Literal[
     "agent_grant_not_requested",
 ]
 
-#: Terminal states of one governed agent run (3 values). Dispatch refusals do
+#: Terminal states of one governed agent run (4 values). Dispatch refusals do
 #: NOT terminate a run (they return to the LLM as tool messages); terminal
-#: ``refused`` is reserved for run-level bounds.
-AgentRunTerminalState = Literal["completed", "refused", "failed"]
+#: ``refused`` is reserved for run-level bounds. ``pending_approval`` is the
+#: governed-write proposal terminal: no further model round runs.
+AgentRunTerminalState = Literal["completed", "refused", "failed", "pending_approval"]
 
 # --- Frozen public dataclasses ----------------------------------------------
 
@@ -108,6 +109,7 @@ class AgentAskResult:
     refusal_reason: AgentDispatchRefusalReason | None
     prompt_tokens: int
     completion_tokens: int
+    approval_request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

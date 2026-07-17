@@ -1219,13 +1219,14 @@ def _project_kill_switch_reverted(snapshot: AppendedDecisionSnapshot) -> KillSwi
 # ---------------------------------------------------------------------------
 # M8 A12 (ADR-027 + ADR-020) — agent.run.* typed projectors
 # ---------------------------------------------------------------------------
-# Five chain decision_types (the A10 dispatch row + the four A11 run rows)
-# wire to four of the seven FROZEN agent_run model stubs:
+# Six chain decision_types (the A10 dispatch row + five run-terminal rows)
+# wire to five of the seven FROZEN agent_run model stubs:
 #   agent.run.started   → AgentRunStarted
 #   agent.run.dispatch  → AgentRunProgress   (the per-dispatch progress signal)
 #   agent.run.completed → AgentRunCompleted
 #   agent.run.refused   → AgentRunFailed     (see the projector docstring)
 #   agent.run.failed    → AgentRunFailed
+#   agent.run.pending_approval → AgentRunPaused
 #
 # The rows are ALREADY digest-only per A10/A11 (ADR-027 §f — sha256 digests +
 # byte counts; question/answer/args plaintext never enters a payload), so the
@@ -1353,6 +1354,32 @@ def _project_agent_run_failed(snapshot: AppendedDecisionSnapshot) -> AgentRunFai
     )
 
 
+def _project_agent_run_pending_approval(
+    snapshot: AppendedDecisionSnapshot,
+) -> AgentRunPaused:
+    """M8.5-D D2 — pending approval is a paused governed run.
+
+    The frozen family has no pending type. ``AgentRunPaused`` is the closest
+    existing state model; the payload's approval request id distinguishes the
+    governed checkpoint without changing the public event taxonomy.
+    """
+    return AgentRunPaused(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="paused",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
 #: Exact-match dispatch table from DH `decision_type` → typed projector.
 #: Prefix-matched `rbac.*` falls out of this map and into the dispatcher's
 #: prefix check below; `escalation.opened` falls out into the scoped subagent
@@ -1391,6 +1418,7 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     "agent.run.completed": _project_agent_run_completed,
     "agent.run.refused": _project_agent_run_refused,
     "agent.run.failed": _project_agent_run_failed,
+    "agent.run.pending_approval": _project_agent_run_pending_approval,
 }
 
 
@@ -1554,13 +1582,14 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         # Sprint 13.6 T3 — kill_switch family wired (ADR-018).
         KillSwitchFlipped,
         KillSwitchReverted,
-        # M8 A12 (ADR-027 + ADR-020) — agent_run family wired classes.
-        # AgentRunCancelled / AgentRunPaused / AgentRunResumed stay schema-only
-        # stubs (no chain row projects them yet), so they are NOT members.
+        # M8 A12 + M8.5-D D2 — agent_run family wired classes.
+        # AgentRunCancelled / AgentRunResumed stay schema-only stubs (no chain
+        # row projects them yet), so they are NOT members.
         AgentRunStarted,
         AgentRunProgress,
         AgentRunCompleted,
         AgentRunFailed,
+        AgentRunPaused,
     }
 )
 

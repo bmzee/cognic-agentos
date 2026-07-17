@@ -116,7 +116,7 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             assert evt.type == "rbac_denied"
 
     def test_table_keyset_pinned(self) -> None:
-        """Drift detector — the 17 exact-match keys are the only allowed
+        """Drift detector — the 18 exact-match keys are the only allowed
         Wave-1 vocabulary on the typed-dispatch table (4 frontend_action +
         policy.decision_evaluated + the 2 subagent entries wired in Sprint
         11b T9 + the 4 memory.* entries wired in Sprint 11.5c T6 + the 2
@@ -149,6 +149,7 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             "agent.run.completed",
             "agent.run.refused",
             "agent.run.failed",
+            "agent.run.pending_approval",
         }
 
 

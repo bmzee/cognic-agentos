@@ -224,6 +224,7 @@ def build_conversation_routes() -> APIRouter:
             agent_run_id=result.agent_run_id,
             terminal_state=result.terminal_state,
             refusal_reason=result.refusal_reason,
+            approval_request_id=result.approval_request_id,
         )
 
     @router.post("/{conversation_id}/close", response_model=ConversationResponse)
@@ -368,6 +369,7 @@ def build_conversation_routes() -> APIRouter:
                     completion_tokens=turn.completion_tokens,
                     created_at=turn.created_at,
                     erased_at=turn.erased_at,
+                    approval_request_id=turn.approval_request_id,
                 )
                 for turn in page.turns
             ],

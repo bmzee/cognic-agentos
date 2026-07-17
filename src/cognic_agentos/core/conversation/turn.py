@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from cognic_agentos.core.agent._types import (
     AgentDispatchRefusalReason,
@@ -90,6 +90,8 @@ class _StoreLike(Protocol):
         actor_id: str,
         request_id: str,
         claim_id: uuid.UUID,
+        approval_request_id: str | None = None,
+        turn_kind: Literal["exchange", "system"] = "exchange",
     ) -> uuid.UUID: ...
 
     async def release_claim(
@@ -124,6 +126,7 @@ class TurnResult:
     agent_run_id: str
     terminal_state: AgentRunTerminalState
     refusal_reason: AgentDispatchRefusalReason | None
+    approval_request_id: str | None = None
 
 
 class ConversationTurnExecutor:
@@ -232,6 +235,8 @@ class ConversationTurnExecutor:
                 actor_id=actor_subject,
                 request_id=f"{_TURN_REQUEST_ID_PREFIX}{uuid.uuid4().hex}",
                 claim_id=claim.claim_id,
+                approval_request_id=result.approval_request_id,
+                turn_kind="exchange",
             )
             return TurnResult(
                 turn_id=turn_id,
@@ -240,6 +245,7 @@ class ConversationTurnExecutor:
                 agent_run_id=result.run_id,
                 terminal_state=result.terminal_state,
                 refusal_reason=result.refusal_reason,
+                approval_request_id=result.approval_request_id,
             )
         finally:
             # 6. Always release OUR OWN lease (fenced by claim_id): if the claim

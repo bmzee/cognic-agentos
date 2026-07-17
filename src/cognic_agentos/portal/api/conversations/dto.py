@@ -66,6 +66,7 @@ class TurnResponse(BaseModel):
     agent_run_id: str
     terminal_state: AgentRunTerminalState
     refusal_reason: AgentDispatchRefusalReason | None
+    approval_request_id: str | None = None
 
 
 class ConversationSummaryResponse(BaseModel):
@@ -105,6 +106,7 @@ class TranscriptTurnResponse(BaseModel):
     completion_tokens: int
     created_at: datetime
     erased_at: datetime | None
+    approval_request_id: str | None = None
 
 
 class TranscriptResponse(BaseModel):

@@ -105,6 +105,7 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         "_project_agent_run_completed",
         "_project_agent_run_refused",
         "_project_agent_run_failed",
+        "_project_agent_run_pending_approval",
         "_build_decision_audit_for_dh_snapshot",
     }
 )

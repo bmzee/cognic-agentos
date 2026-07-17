@@ -62,10 +62,10 @@ def test_agent_dispatch_refusal_reason_has_exactly_eight_values() -> None:
     }
 
 
-def test_agent_run_terminal_state_has_exactly_three_values() -> None:
+def test_agent_run_terminal_state_has_exactly_four_values() -> None:
     values = get_args(AgentRunTerminalState)
-    assert len(values) == 3
-    assert set(values) == {"completed", "refused", "failed"}
+    assert len(values) == 4
+    assert set(values) == {"completed", "refused", "failed", "pending_approval"}
 
 
 # --------------------------------------------------------------------------- #

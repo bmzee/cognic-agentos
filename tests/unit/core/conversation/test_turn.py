@@ -41,21 +41,33 @@ _SUBJECT = "s1"
 class _SpyLoop:
     """Records every ``ask`` kwargs dict; returns a canned result."""
 
-    def __init__(self, *, prompt_tokens: int = 3, completion_tokens: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        prompt_tokens: int = 3,
+        completion_tokens: int = 2,
+        terminal_state: str = "completed",
+        answer: str = "Acme Corp",
+        approval_request_id: str | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self._pt = prompt_tokens
         self._ct = completion_tokens
+        self._terminal_state = terminal_state
+        self._answer = answer
+        self._approval_request_id = approval_request_id
 
     async def ask(self, **kw: Any) -> AgentAskResult:
         self.calls.append(kw)
         return AgentAskResult(
             run_id="agent-run-1",
-            terminal_state="completed",
-            answer="Acme Corp",
+            terminal_state=self._terminal_state,  # type: ignore[arg-type]
+            answer=self._answer,
             steps_used=1,
             refusal_reason=None,
             prompt_tokens=self._pt,
             completion_tokens=self._ct,
+            approval_request_id=self._approval_request_id,
         )
 
 
@@ -214,6 +226,42 @@ async def test_second_turn_replays_the_first(db: AsyncEngine) -> None:
     assert [p.role for p in prior] == ["user", "assistant"]
     assert prior[0].content == "who?"
     assert prior[1].content == "Acme Corp"
+
+
+async def test_pending_exchange_persists_id_and_replays_as_context(db: AsyncEngine) -> None:
+    import sqlalchemy as sa
+
+    from cognic_agentos.core.conversation.storage import _conversation_turns
+
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    store = ConversationStore(db)
+    cid = await _conversation(store)
+    pending_loop = _SpyLoop(
+        terminal_state="pending_approval",
+        answer="Requested approval — #a1b2, pending.",
+        approval_request_id=approval_id,
+    )
+    pending = await _post(_executor(store, pending_loop), cid, "apply leave")
+
+    assert pending.approval_request_id == approval_id
+    async with db.connect() as conn:
+        row = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.approval_request_id,
+                    _conversation_turns.c.turn_kind,
+                ).where(_conversation_turns.c.turn_id == pending.turn_id)
+            )
+        ).one()
+    assert row.approval_request_id == approval_id
+    assert row.turn_kind == "exchange"
+
+    followup = _SpyLoop()
+    await _post(_executor(store, followup), cid, "status?")
+    assert [(turn.role, turn.content) for turn in followup.calls[0]["prior_context"]] == [
+        ("user", "apply leave"),
+        ("assistant", "Requested approval — #a1b2, pending."),
+    ]
 
 
 async def test_real_token_counts_accumulate_into_the_conversation(db: AsyncEngine) -> None:

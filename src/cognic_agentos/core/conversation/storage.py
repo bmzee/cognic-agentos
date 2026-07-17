@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -119,6 +119,8 @@ _conversation_turns = Table(
     Column("completion_tokens", Integer(), nullable=False, server_default="0"),
     Column("created_at", _TS, nullable=False),
     Column("erased_at", _TS, nullable=True),
+    Column("approval_request_id", String(64), nullable=True),
+    Column("turn_kind", String(16), nullable=False, server_default="exchange"),
     # M8.5-B (migration 0016): the hop-1 correlation column — the SAME
     # request_id the caller (ConversationTurnExecutor) minted for this turn's
     # conversation.turn_completed chain row, persisted atomically with it.
@@ -275,6 +277,8 @@ class ConversationStore:
                 prompt_tokens=r["prompt_tokens"],
                 completion_tokens=r["completion_tokens"],
                 created_at=r["created_at"],
+                approval_request_id=r["approval_request_id"],
+                turn_kind=r["turn_kind"],
             )
             for _, r in sorted(by_seq.items())
         ]
@@ -395,6 +399,8 @@ class ConversationStore:
         actor_id: str,
         request_id: str,
         claim_id: uuid.UUID,
+        approval_request_id: str | None = None,
+        turn_kind: Literal["exchange", "system"] = "exchange",
     ) -> uuid.UUID:
         """Persist the turn + append ``conversation.turn_completed`` atomically.
 
@@ -459,6 +465,8 @@ class ConversationStore:
                     # appends carries this SAME caller-minted request_id — one
                     # atomic commit; a duplicate rolls back turn AND chain row.
                     turn_completed_request_id=request_id,
+                    approval_request_id=approval_request_id,
+                    turn_kind=turn_kind,
                 )
             )
             await conn.execute(

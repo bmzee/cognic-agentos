@@ -1,9 +1,10 @@
 """M8 A12 (ADR-027 + ADR-020) — agent.run.* decision-history typed projectors.
 
 A11 emits ``agent.run.started`` / ``agent.run.completed`` / ``agent.run.refused``
-/ ``agent.run.failed`` decision rows (plus A10's ``agent.run.dispatch``). A12
-wires the five decision_types into ``_DECISION_HISTORY_TYPED_PROJECTORS`` so
-replay + SSE surface them as typed ``agent_run`` events.
+/ ``agent.run.failed`` decision rows (plus A10's ``agent.run.dispatch``).
+M8.5-D adds ``agent.run.pending_approval``; all six decision types wire into
+``_DECISION_HISTORY_TYPED_PROJECTORS`` so replay + SSE surface typed
+``agent_run`` events.
 
 Pins (mirroring the snapshot-harness pattern of
 ``test_ui_events_dh_replay_snapshot.py`` + the per-type assertions of
@@ -21,10 +22,10 @@ Pins (mirroring the snapshot-harness pattern of
     ``feedback_count_enum_values_via_ast_not_regex``)
   - existing-entries-untouched pin: the 12 pre-A12 table entries still map to
     their pre-A12 projector functions
-  - table-count pin: 12 → 17
-  - ``_TYPED_PROJECTION_CLASSES``: the 4 wired agent_run classes are members
-    (the module contract comment's clause (c)); the 3 still-stub classes
-    (Cancelled/Paused/Resumed) stay excluded
+  - table-count pin: 12 → 18
+  - ``_TYPED_PROJECTION_CLASSES``: the 5 wired agent_run classes are members
+    (the module contract comment's clause (c)); the 2 still-stub classes
+    (Cancelled/Resumed) stay excluded
 """
 
 from __future__ import annotations
@@ -104,6 +105,11 @@ _REFUSED_PAYLOAD: dict[str, Any] = {
 _FAILED_PAYLOAD: dict[str, Any] = {
     **_COMPLETED_PAYLOAD,
     "error_class": "TimeoutError",
+}
+
+_PENDING_PAYLOAD: dict[str, Any] = {
+    **_COMPLETED_PAYLOAD,
+    "approval_request_id": "a1b2c3d4-1111-4222-8333-444455556666",
 }
 
 
@@ -221,6 +227,20 @@ class TestAgentRunProjectorPerDecisionType:
         assert evt.data == _FAILED_PAYLOAD
         assert evt.event_id == _expected_event_id(sequence=13, type_="failed")
 
+    def test_agent_run_pending_approval_projects_onto_paused_model(self) -> None:
+        snap = _make_snapshot(
+            decision_type="agent.run.pending_approval",
+            payload=dict(_PENDING_PAYLOAD),
+            sequence=14,
+        )
+        evt = _project_typed_decision_history(snap)
+        assert isinstance(evt, AgentRunPaused)
+        assert evt.family == "agent_run"
+        assert evt.type == "paused"
+        assert evt.run_id == _RUN_ID
+        assert evt.data == _PENDING_PAYLOAD
+        assert evt.event_id == _expected_event_id(sequence=14, type_="paused")
+
 
 class TestRefusedVsFailedDisambiguation:
     """Same model class; the distinguishing surface is the payload keyset
@@ -336,10 +356,11 @@ class TestDispatchTableAfterA12:
         "agent.run.completed": "_project_agent_run_completed",
         "agent.run.refused": "_project_agent_run_refused",
         "agent.run.failed": "_project_agent_run_failed",
+        "agent.run.pending_approval": "_project_agent_run_pending_approval",
     }
 
-    def test_table_count_is_seventeen(self) -> None:
-        assert len(_DECISION_HISTORY_TYPED_PROJECTORS) == 17
+    def test_table_count_is_eighteen(self) -> None:
+        assert len(_DECISION_HISTORY_TYPED_PROJECTORS) == 18
 
     def test_pre_a12_entries_untouched(self) -> None:
         for decision_type, projector_name in self._PRE_A12_ENTRIES.items():
@@ -364,19 +385,25 @@ class TestDispatchTableAfterA12:
 
 
 class TestTypedProjectionClassesMembership:
-    """The 4 A12-wired classes join ``_TYPED_PROJECTION_CLASSES`` (the module
-    contract's clause (c) — the ContextVar capture filter); the 3 still-stub
+    """The 5 wired classes join ``_TYPED_PROJECTION_CLASSES`` (the module
+    contract's clause (c) — the ContextVar capture filter); the 2 still-stub
     classes stay excluded (no chain row emits them)."""
 
     def test_wired_agent_run_classes_are_members(self) -> None:
-        for cls in (AgentRunStarted, AgentRunProgress, AgentRunCompleted, AgentRunFailed):
+        for cls in (
+            AgentRunStarted,
+            AgentRunProgress,
+            AgentRunCompleted,
+            AgentRunFailed,
+            AgentRunPaused,
+        ):
             assert cls in _TYPED_PROJECTION_CLASSES, (
                 f"{cls.__name__} missing from _TYPED_PROJECTION_CLASSES; the table's "
                 "drift comment requires (c) class membership for every wired projector"
             )
 
     def test_stub_agent_run_classes_stay_excluded(self) -> None:
-        for cls in (AgentRunCancelled, AgentRunPaused, AgentRunResumed):
+        for cls in (AgentRunCancelled, AgentRunResumed):
             assert cls not in _TYPED_PROJECTION_CLASSES, (
                 f"{cls.__name__} is in _TYPED_PROJECTION_CLASSES but no chain row "
                 "projects it — model-only stubs stay excluded until their owning task"

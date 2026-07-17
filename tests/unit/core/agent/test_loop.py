@@ -42,7 +42,7 @@ from cognic_agentos.core.agent._types import (
     LoadedAgentRecord,
     PriorTurn,
 )
-from cognic_agentos.core.agent.dispatch import AgentDispatcher
+from cognic_agentos.core.agent.dispatch import AgentDispatcher, AgentToolApprovalPending
 from cognic_agentos.core.agent.loop import (
     AgentLoop,
     AgentRecordLoader,
@@ -254,15 +254,31 @@ class _StubAssignments:
 
 
 class _StubEntitlements:
-    def __init__(self, *, entitled: frozenset[str], scopes: dict[str, DataScope]) -> None:
+    def __init__(
+        self,
+        *,
+        entitled: frozenset[str],
+        scopes: dict[str, DataScope],
+        action_entitled: bool,
+    ) -> None:
         self._entitled = entitled
         self._scopes = scopes
+        self._action_entitled = action_entitled
 
     async def entitled_scope_ids(self, *, tenant_id: str, subject: str) -> frozenset[str]:
         return self._entitled
 
     async def resolve_scope(self, *, tenant_id: str, scope_id: str) -> DataScope | None:
         return self._scopes.get(scope_id)
+
+    async def entitled_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        tool_identity: str,
+    ) -> bool:
+        return self._action_entitled
 
 
 class _StubOPAEngine:
@@ -285,8 +301,14 @@ class _StubOPAEngine:
 class _SpyToolProxy:
     """AgentToolProxy conformer recording every call; configurable result."""
 
-    def __init__(self, *, result: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        result: dict[str, Any] | None = None,
+        exc: Exception | None = None,
+    ) -> None:
         self._result = result if result is not None else {"rows": []}
+        self._exc = exc
         self.calls: list[dict[str, Any]] = []
 
     async def call_tool(
@@ -311,6 +333,8 @@ class _SpyToolProxy:
                 "approval_request_id": approval_request_id,
             }
         )
+        if self._exc is not None:
+            raise self._exc
         return self._result
 
 
@@ -411,15 +435,21 @@ def _harness(
     run_wall_clock_s: float = _WALL_CLOCK_S,
     clock: Callable[[], float] | None = None,
     tool_capability_classes: Mapping[str, str] | None = None,
+    action_entitled: bool = False,
+    proxy_exc: Exception | None = None,
 ) -> _Harness:
     rec = record if record is not None else _record()
     loader = _StubRecordLoader({(_TENANT, _AGENT_ID): rec} if agent_known else {})
     assignments = _StubAssignments(
         granted if granted is not None else _DEFAULT_GRANTED, exc=assignments_exc
     )
-    entitlements = _StubEntitlements(entitled=entitled, scopes=scopes or {})
+    entitlements = _StubEntitlements(
+        entitled=entitled,
+        scopes=scopes or {},
+        action_entitled=action_entitled,
+    )
     opa = _StubOPAEngine(allow=allow)
-    proxy = _SpyToolProxy()
+    proxy = _SpyToolProxy(exc=proxy_exc)
     reader = _SpySkillReader(
         bodies=bodies
         if bodies is not None
@@ -570,6 +600,79 @@ class TestHappyPath:
         note = json.loads(h.memory.api.remember_calls[0]["value"])
         assert note["scope_ids_used"] == [_SCOPE_ID]
         assert note["skills_read"] == []
+
+
+class TestPendingApprovalTerminal:
+    async def test_pending_action_terminates_after_exactly_one_completion(
+        self, db: AsyncEngine
+    ) -> None:
+        approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+        h = _harness(
+            db,
+            responses=[
+                _resp(
+                    "model-authored proposal must not become the confirmation",
+                    tool_calls=(_tc("other_tool", amount=10),),
+                    usage={"prompt_tokens": 7, "completion_tokens": 3},
+                ),
+                _resp("a second completion would violate the pending terminal"),
+            ],
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_entitled=True,
+            proxy_exc=AgentToolApprovalPending(
+                approval_request_id=approval_id,
+                flow="require_assigned",
+            ),
+        )
+
+        result = await _ask(h)
+
+        assert result == AgentAskResult(
+            run_id=result.run_id,
+            terminal_state="pending_approval",
+            answer="Requested approval — #a1b2, pending.",
+            steps_used=1,
+            refusal_reason=None,
+            prompt_tokens=7,
+            completion_tokens=3,
+            approval_request_id=approval_id,
+        )
+        assert len(h.gateway.calls) == 1
+        rows = await _rows(db)
+        assert [row.event_type for row in rows] == [
+            "agent.run.started",
+            "agent.run.dispatch",
+            "agent.run.pending_approval",
+        ]
+        terminal = rows[-1]
+        assert terminal.payload["approval_request_id"] == approval_id
+        assert (
+            terminal.payload["answer_sha256"] == hashlib.sha256(result.answer.encode()).hexdigest()
+        )
+        assert await _rows_of_type(db, "agent.run.completed") == []
+
+    async def test_pending_without_approval_id_fails_loud_before_second_completion(
+        self, db: AsyncEngine
+    ) -> None:
+        h = _harness(
+            db,
+            responses=[
+                _resp(tool_calls=(_tc("other_tool", amount=10),)),
+                _resp("must not run"),
+            ],
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_entitled=True,
+            proxy_exc=AgentToolApprovalPending(
+                approval_request_id="",
+                flow="require_assigned",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="pending dispatch omitted approval_request_id"):
+            await _ask(h)
+
+        assert len(h.gateway.calls) == 1
+        assert await _rows_of_type(db, "agent.run.pending_approval") == []
 
 
 # --- Test 2 — refusal feedback (the BAR-2 shape) -------------------------------------

@@ -241,6 +241,7 @@ async def _append_turn(
     run_id: str,
     tenant: str = _TENANT,
     creator: str = _CREATOR,
+    approval_request_id: str | None = None,
 ) -> str:
     """Claim + persist one turn (the executor's flow); returns the minted
     correlation request id."""
@@ -264,6 +265,7 @@ async def _append_turn(
         actor_id=creator,
         request_id=rid,
         claim_id=claim.claim_id,
+        approval_request_id=approval_request_id,
     )
     await store.release_claim(cid, tenant_id=tenant, claim_id=claim.claim_id)
     return rid
@@ -321,6 +323,30 @@ async def test_transcript_isolation_triple_reads_none(
     assert (
         await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject="analyst.sara") is None
     )  # cross-actor
+
+
+async def test_transcript_surfaces_pending_approval_request_id(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+) -> None:
+    cid = await _new_conversation(store)
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    await _append_turn(
+        store,
+        cid,
+        1,
+        run_id="agent-run-pending",
+        approval_request_id=approval_id,
+    )
+
+    page = await reader.read_transcript(
+        cid,
+        tenant_id=_TENANT,
+        creator_subject=_CREATOR,
+    )
+
+    assert page is not None
+    assert page.turns[0].approval_request_id == approval_id
 
 
 async def test_chain_isolation_triple_reads_none(

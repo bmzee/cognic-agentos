@@ -68,9 +68,14 @@ _CURSOR_VERSION: Final[int] = 1
 
 _STATE_VOCAB: Final[frozenset[str]] = frozenset({"active", "closed", "expired", "erased"})
 
-#: The three legal terminal event types (loop.py `_finish`).
+#: The four legal terminal event types (loop.py `_finish`).
 _TERMINAL_EVENT_TYPES: Final[frozenset[str]] = frozenset(
-    {"agent.run.completed", "agent.run.refused", "agent.run.failed"}
+    {
+        "agent.run.completed",
+        "agent.run.refused",
+        "agent.run.failed",
+        "agent.run.pending_approval",
+    }
 )
 
 #: Internal (log-only) integrity reasons — the wire stays generic.
@@ -263,6 +268,8 @@ class TranscriptTurn:
     completion_tokens: int
     created_at: datetime
     erased_at: datetime | None
+    approval_request_id: str | None = None
+    turn_kind: Literal["exchange", "system"] = "exchange"
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +652,8 @@ class ConversationReadModel:
                 completion_tokens=turn_row["completion_tokens"],
                 created_at=turn_row["created_at"],
                 erased_at=turn_row["erased_at"],
+                approval_request_id=turn_row["approval_request_id"],
+                turn_kind=turn_row["turn_kind"],
             )
             for turn_row in page
         )
