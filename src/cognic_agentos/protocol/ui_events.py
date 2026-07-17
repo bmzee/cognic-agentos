@@ -566,8 +566,7 @@ class SubagentRecursionCapped(_BaseEvent):
     type: Literal["recursion_capped"] = "recursion_capped"
 
 
-# ---- approval.* (schema only — the 13.5 arc landed the approval engine +
-# portal WITHOUT UI emit hooks; wiring is a named follow-up, unscheduled) ------
+# ---- approval.* (wired M8.5-D D2 T10 via decision-history projectors) --------
 
 
 class ApprovalPending(_BaseEvent):
@@ -593,6 +592,16 @@ class ApprovalDenied(_BaseEvent):
 class ApprovalExpired(_BaseEvent):
     family: Literal["approval"] = "approval"
     type: Literal["expired"] = "expired"
+
+
+class ApprovalGrantRecorded(_BaseEvent):
+    family: Literal["approval"] = "approval"
+    type: Literal["grant_recorded"] = "grant_recorded"
+
+
+class ApprovalExecuted(_BaseEvent):
+    family: Literal["approval"] = "approval"
+    type: Literal["executed"] = "executed"
 
 
 # ---- artifact.* (WIRED — Sprint-6 T11 mirror) --------------------------------
@@ -732,9 +741,9 @@ class KillSwitchReverted(_BaseEvent):
 # ---------------------------------------------------------------------------
 
 
-#: All 36 typed event subclasses (sum of family-event-counts across
+#: All 45 typed event subclasses (sum of family-event-counts across
 #: the 11 Wave-1 families per ADR-020 §"Event taxonomy (Wave 1)"):
-#: 7 agent_run + 7 tool_call + 4 subagent + 5 approval + 3 artifact +
+#: 7 agent_run + 7 tool_call + 5 subagent + 7 approval + 3 artifact +
 #: 3 interrupt + 3 frontend_action + 4 memory + 1 decision_audit +
 #: 3 policy + 2 kill_switch.
 #: (policy bumped 2 → 3 at Sprint-7B.4 T3 / R1: PolicyRBACDenied lands
@@ -795,7 +804,13 @@ _SubagentEvent = Annotated[
 ]
 
 _ApprovalEvent = Annotated[
-    ApprovalPending | ApprovalGranted | ApprovalGrantedSecond | ApprovalDenied | ApprovalExpired,
+    ApprovalPending
+    | ApprovalGranted
+    | ApprovalGrantedSecond
+    | ApprovalDenied
+    | ApprovalExpired
+    | ApprovalGrantRecorded
+    | ApprovalExecuted,
     pydantic.Field(discriminator="type"),
 ]
 
@@ -1217,6 +1232,141 @@ def _project_kill_switch_reverted(snapshot: AppendedDecisionSnapshot) -> KillSwi
 
 
 # ---------------------------------------------------------------------------
+# M8.5-D D2 T10 (ADR-014 + ADR-020) — approval.* typed projectors
+# ---------------------------------------------------------------------------
+
+
+def _project_approval_pending(snapshot: AppendedDecisionSnapshot) -> ApprovalPending:
+    """approval.requested → approval.pending."""
+    return ApprovalPending(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="pending",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_granted(snapshot: AppendedDecisionSnapshot) -> ApprovalGranted:
+    """approval.granted_first → approval.granted."""
+    return ApprovalGranted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="granted",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_granted_second(
+    snapshot: AppendedDecisionSnapshot,
+) -> ApprovalGrantedSecond:
+    """approval.granted_second → approval.granted_second."""
+    return ApprovalGrantedSecond(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="granted_second",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_grant_recorded(
+    snapshot: AppendedDecisionSnapshot,
+) -> ApprovalGrantRecorded:
+    """approval.grant_recorded → approval.grant_recorded."""
+    return ApprovalGrantRecorded(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="grant_recorded",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_denied(snapshot: AppendedDecisionSnapshot) -> ApprovalDenied:
+    """approval.denied → approval.denied."""
+    return ApprovalDenied(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="denied",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_expired(snapshot: AppendedDecisionSnapshot) -> ApprovalExpired:
+    """approval.expired → approval.expired."""
+    return ApprovalExpired(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="expired",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_approval_executed(snapshot: AppendedDecisionSnapshot) -> ApprovalExecuted:
+    """approval.executed → approval.executed."""
+    return ApprovalExecuted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="approval",
+            type_="executed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+# ---------------------------------------------------------------------------
 # M8 A12 (ADR-027 + ADR-020) — agent.run.* typed projectors
 # ---------------------------------------------------------------------------
 # Six chain decision_types (the A10 dispatch row + five run-terminal rows)
@@ -1409,6 +1559,16 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     # phase table).
     "emergency.kill_switch_flipped": _project_kill_switch_flipped,
     "emergency.kill_switch_reverted": _project_kill_switch_reverted,
+    # M8.5-D D2 T10 — approval transition projectors. `approval.consumed`
+    # stays deliberately absent: consumption is internal claim machinery;
+    # only the user-visible execution result projects as approval.executed.
+    "approval.requested": _project_approval_pending,
+    "approval.granted_first": _project_approval_granted,
+    "approval.granted_second": _project_approval_granted_second,
+    "approval.grant_recorded": _project_approval_grant_recorded,
+    "approval.denied": _project_approval_denied,
+    "approval.expired": _project_approval_expired,
+    "approval.executed": _project_approval_executed,
     # M8 A12 (ADR-027 + ADR-020) — agent.run.* chain event projectors.
     # `agent.run.refused` and `agent.run.failed` both map to AgentRunFailed
     # (the frozen family has no "refused" model); the payload's
@@ -1425,8 +1585,8 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
 def _project_typed_decision_history(snapshot: AppendedDecisionSnapshot) -> _BaseEvent | None:
     """Dispatch a DH snapshot to its typed projector.
 
-    Returns the typed event for known decision_types (4 exact-match keys +
-    `rbac.<suffix>` where `<suffix>` is in :data:`_RBAC_DENIAL_TYPE_VALUES`),
+    Returns the typed event for known exact-match decision types plus
+    `rbac.<suffix>` where `<suffix>` is in :data:`_RBAC_DENIAL_TYPE_VALUES`,
     or None when no projector matches. The caller MUST still emit the
     generic `decision_audit.event_appended` mirror at ordinal 1 regardless
     of typed-projection outcome.
@@ -1582,6 +1742,14 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         # Sprint 13.6 T3 — kill_switch family wired (ADR-018).
         KillSwitchFlipped,
         KillSwitchReverted,
+        # M8.5-D D2 T10 — approval family wired classes.
+        ApprovalPending,
+        ApprovalGranted,
+        ApprovalGrantedSecond,
+        ApprovalGrantRecorded,
+        ApprovalDenied,
+        ApprovalExpired,
+        ApprovalExecuted,
         # M8 A12 + M8.5-D D2 — agent_run family wired classes.
         # AgentRunCancelled / AgentRunResumed stay schema-only stubs (no chain
         # row projects them yet), so they are NOT members.
@@ -2233,7 +2401,9 @@ __all__ = (
     # event family models — agent_run
     "AgentRunStarted",
     "ApprovalDenied",
+    "ApprovalExecuted",
     "ApprovalExpired",
+    "ApprovalGrantRecorded",
     "ApprovalGranted",
     "ApprovalGrantedSecond",
     # approval

@@ -22,7 +22,7 @@ Pins (mirroring the snapshot-harness pattern of
     ``feedback_count_enum_values_via_ast_not_regex``)
   - existing-entries-untouched pin: the 12 pre-A12 table entries still map to
     their pre-A12 projector functions
-  - table-count pin: 12 → 18
+  - table-count pin: 12 → 18 at A12, then 18 → 25 at D2 T10
   - ``_TYPED_PROJECTION_CLASSES``: the 5 wired agent_run classes are members
     (the module contract comment's clause (c)); the 2 still-stub classes
     (Cancelled/Resumed) stay excluded
@@ -330,8 +330,8 @@ class TestAgentRunFamilyModelSetFrozen:
 
 
 class TestDispatchTableAfterA12:
-    """Table-shape pins: 12 → 17 entries; the 12 pre-A12 entries untouched;
-    the 5 new agent.run.* entries map to the A12 projector functions."""
+    """Table-shape pins across A12 and D2 T10 while preserving the 12
+    pre-A12 entries byte-for-byte."""
 
     #: The 12 pre-A12 entries and the projector each mapped to BEFORE A12 —
     #: hand-pinned here so an accidental remap during the A12 edit fails loud.
@@ -359,8 +359,18 @@ class TestDispatchTableAfterA12:
         "agent.run.pending_approval": "_project_agent_run_pending_approval",
     }
 
-    def test_table_count_is_eighteen(self) -> None:
-        assert len(_DECISION_HISTORY_TYPED_PROJECTORS) == 18
+    _D2_T10_APPROVAL_ENTRIES: ClassVar[dict[str, str]] = {
+        "approval.requested": "_project_approval_pending",
+        "approval.granted_first": "_project_approval_granted",
+        "approval.granted_second": "_project_approval_granted_second",
+        "approval.grant_recorded": "_project_approval_grant_recorded",
+        "approval.denied": "_project_approval_denied",
+        "approval.expired": "_project_approval_expired",
+        "approval.executed": "_project_approval_executed",
+    }
+
+    def test_table_count_is_twenty_five(self) -> None:
+        assert len(_DECISION_HISTORY_TYPED_PROJECTORS) == 25
 
     def test_pre_a12_entries_untouched(self) -> None:
         for decision_type, projector_name in self._PRE_A12_ENTRIES.items():
@@ -378,9 +388,13 @@ class TestDispatchTableAfterA12:
             )
             assert _DECISION_HISTORY_TYPED_PROJECTORS[decision_type].__name__ == projector_name
 
-    def test_table_keyset_is_exactly_pre_a12_plus_a12(self) -> None:
+    def test_d2_t10_approval_entries_present_and_mapped(self) -> None:
+        for decision_type, projector_name in self._D2_T10_APPROVAL_ENTRIES.items():
+            assert _DECISION_HISTORY_TYPED_PROJECTORS[decision_type].__name__ == projector_name
+
+    def test_table_keyset_is_exactly_pre_a12_plus_a12_plus_d2_t10(self) -> None:
         assert set(_DECISION_HISTORY_TYPED_PROJECTORS.keys()) == (
-            set(self._PRE_A12_ENTRIES) | set(self._A12_ENTRIES)
+            set(self._PRE_A12_ENTRIES) | set(self._A12_ENTRIES) | set(self._D2_T10_APPROVAL_ENTRIES)
         )
 
 

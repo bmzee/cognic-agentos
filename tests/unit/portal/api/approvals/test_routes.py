@@ -20,7 +20,7 @@ from cognic_agentos.core.approval._types import (
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.approval.executor import ExecutionOutcome
-from cognic_agentos.core.approval.storage import ApprovalRequestStore
+from cognic_agentos.core.approval.storage import ApprovalRequestStore, _approval_requests
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.portal.api.approvals.routes import _REFUSAL_STATUS, build_approval_routes
@@ -194,6 +194,33 @@ async def test_get_detail_renders_hex_digest(tmp_path: Any) -> None:
     assert resp.status_code == 200
     assert resp.json()["request_id"] == str(rid)
     assert resp.json()["args_digest"] == "02" * 32  # hex on the wire, never bytes
+
+
+@pytest.mark.asyncio
+async def test_queue_and_detail_render_two_of_four_progress(tmp_path: Any) -> None:
+    store = await _mk_store(tmp_path)
+    rid = uuid.uuid4()
+    await _seed(store, request_id=rid, flow="require_4_eyes")
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            _approval_requests.update()
+            .where(_approval_requests.c.request_id == rid)
+            .values(decisions_recorded=2, required_count=4)
+        )
+
+    async with _client(_make_actor(), store, _mk_engine(store)) as client:
+        queue_response = await client.get("/api/v1/approvals/")
+        detail_response = await client.get(f"/api/v1/approvals/{rid}")
+
+    assert queue_response.status_code == detail_response.status_code == 200
+    assert {
+        "decisions_recorded": queue_response.json()[0]["decisions_recorded"],
+        "required_count": queue_response.json()[0]["required_count"],
+    } == {"decisions_recorded": 2, "required_count": 4}
+    assert {
+        "decisions_recorded": detail_response.json()["decisions_recorded"],
+        "required_count": detail_response.json()["required_count"],
+    } == {"decisions_recorded": 2, "required_count": 4}
 
 
 @pytest.mark.asyncio

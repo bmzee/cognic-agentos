@@ -28,6 +28,8 @@ class ApprovalSummaryResponse(_ApprovalResponseModel):
     originator_subject: str
     state: ApprovalState
     first_approver: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: str
     expires_at: str
 
@@ -47,6 +49,8 @@ class ApprovalDetailResponse(_ApprovalResponseModel):
     first_approver: str | None
     second_approver: str | None
     denier: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: str
     expires_at: str
 

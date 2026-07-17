@@ -183,6 +183,8 @@ def _summary_dto(s: ApprovalRequestSummary) -> ApprovalSummaryResponse:
         originator_subject=s.originator_subject,
         state=s.state,
         first_approver=s.first_approver,
+        decisions_recorded=s.decisions_recorded,
+        required_count=s.required_count,
         created_at=s.created_at.isoformat(),
         expires_at=s.expires_at.isoformat(),
     )
@@ -204,6 +206,8 @@ def _detail_dto(d: ApprovalRequestDetail) -> ApprovalDetailResponse:
         first_approver=d.first_approver,
         second_approver=d.second_approver,
         denier=d.denier,
+        decisions_recorded=d.decisions_recorded,
+        required_count=d.required_count,
         created_at=d.created_at.isoformat(),
         expires_at=d.expires_at.isoformat(),
     )

@@ -184,6 +184,8 @@ class ApprovalRequestSummary:
     originator_subject: str
     state: ApprovalState
     first_approver: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: datetime
     expires_at: datetime
 
@@ -210,6 +212,8 @@ class ApprovalRequestDetail:
     first_approver: str | None
     second_approver: str | None
     denier: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: datetime
     expires_at: datetime
 
@@ -962,6 +966,8 @@ class ApprovalRequestStore:
                 originator_subject=r.originator_subject,
                 state=r.state,
                 first_approver=r.first_approver,
+                decisions_recorded=int(r.decisions_recorded),
+                required_count=(int(r.required_count) if r.required_count is not None else None),
                 created_at=r.created_at.replace(tzinfo=r.created_at.tzinfo or UTC),
                 expires_at=r.expires_at.replace(tzinfo=r.expires_at.tzinfo or UTC),
             )
@@ -1008,6 +1014,8 @@ class ApprovalRequestStore:
             first_approver=row.first_approver,
             second_approver=row.second_approver,
             denier=row.denier,
+            decisions_recorded=int(row.decisions_recorded),
+            required_count=(int(row.required_count) if row.required_count is not None else None),
             created_at=row.created_at.replace(tzinfo=row.created_at.tzinfo or UTC),
             expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo or UTC),
         )

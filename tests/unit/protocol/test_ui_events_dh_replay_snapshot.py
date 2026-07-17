@@ -97,6 +97,14 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         # gap class the maintainer caught for agent.run.* below).
         "_project_kill_switch_flipped",
         "_project_kill_switch_reverted",
+        # M8.5-D D2 T10 — approval transition projectors.
+        "_project_approval_pending",
+        "_project_approval_granted",
+        "_project_approval_granted_second",
+        "_project_approval_grant_recorded",
+        "_project_approval_denied",
+        "_project_approval_expired",
+        "_project_approval_executed",
         # M8 A12 (ADR-027 + ADR-020) — agent.run.* projectors wired to the
         # typed dispatch table, plus the shared run_id-lift helper they call.
         "_agent_run_payload_run_id",
