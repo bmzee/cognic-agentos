@@ -183,6 +183,37 @@ async def test_concurrent_claims_have_exactly_one_first_claim(tmp_path: Any) -> 
         await engine.dispose()
 
 
+async def test_reconciler_query_returns_only_old_granted_unconsumed_rows(tmp_path: Any) -> None:
+    store, engine = await _harness(tmp_path)
+    try:
+        old_unconsumed = await _seed(store, state="granted", tenant_id="t1")
+        recent_unconsumed = await _seed(store, state="granted", tenant_id="t2")
+        consumed = await _seed(store, state="granted", tenant_id="t3")
+        pending = await _seed(store, state="pending", tenant_id="t4")
+        cutoff = datetime(2026, 7, 16, 13, 0, tzinfo=UTC)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(_approval_requests)
+                .where(_approval_requests.c.request_id.in_([old_unconsumed, consumed, pending]))
+                .values(updated_at=cutoff - timedelta(seconds=1))
+            )
+            await conn.execute(
+                sa.update(_approval_requests)
+                .where(_approval_requests.c.request_id == recent_unconsumed)
+                .values(updated_at=cutoff + timedelta(seconds=1))
+            )
+        await store.claim_consumption(
+            request_id=consumed,
+            tenant_id="t3",
+            consumed_by="already-consumed",
+        )
+        assert await store.list_granted_unconsumed_before(cutoff=cutoff) == (
+            (old_unconsumed, "t1"),
+        )
+    finally:
+        await engine.dispose()
+
+
 async def test_claim_rolls_back_when_consumed_evidence_cannot_append(tmp_path: Any) -> None:
     store, engine = await _harness(tmp_path)
     request_id = await _seed(store, state="granted")

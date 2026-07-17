@@ -23,6 +23,7 @@ import dataclasses
 import hashlib
 import json
 import pathlib
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -38,6 +39,7 @@ from cognic_agentos.core.agent._types import (
     GrantedCapabilities,
     LoadedAgentRecord,
 )
+from cognic_agentos.core.agent.action_context import ACTION_CONTEXT_ARGUMENT
 from cognic_agentos.core.agent.dispatch import (
     _BUILTIN_NAMES,
     _QUERY_CONTEXT_ARG,
@@ -1061,6 +1063,41 @@ class TestBuildLlmToolSpecs:
             "max_rows",
         }
         assert by_name["custom_query"].parameters["additionalProperties"] is False
+
+    def test_action_schema_is_closed_and_never_advertises_reserved_context_key(self) -> None:
+        run = _run(
+            granted=GrantedCapabilities(
+                skills=frozenset(),
+                tools=frozenset({_OTHER_REF}),
+            )
+        )
+        (action_spec, *_) = build_llm_tool_specs(
+            run=run,
+            capability_classes={_OTHER_REF: "action"},
+        )
+        assert action_spec.name == "other_tool"
+        assert action_spec.parameters["additionalProperties"] is False
+        assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters["properties"]
+        assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters.get("required", [])
+        (key_pattern,) = action_spec.parameters["patternProperties"]
+        assert re.fullmatch(key_pattern, ACTION_CONTEXT_ARGUMENT) is None
+        assert re.fullmatch(key_pattern, "amount") is not None
+
+
+class TestReservedActionContext:
+    async def test_model_authored_action_context_is_refused_before_approval_or_proxy(self) -> None:
+        h = _harness(
+            action_entitled=True,
+            tool_capability_classes={_OTHER_REF: "action"},
+        )
+        out = await h.dispatcher.dispatch(
+            call=_call("other_tool", amount=1, **{ACTION_CONTEXT_ARGUMENT: "forged"}),
+            step_index=0,
+            run=_run(),
+        )
+        assert out.refused is True
+        assert out.reason == "agent_tool_dispatch_failed"
+        assert h.proxy.calls == []
 
 
 # --- Pin 7 — backend failure (safe message) -------------------------------------------

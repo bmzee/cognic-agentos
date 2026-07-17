@@ -28,6 +28,15 @@ def test_dtos_forbid_extra() -> None:
         ApprovalActionResponse(request_id=uuid.uuid4(), state="granted", boom=1)  # type: ignore[call-arg]
 
 
+def test_action_response_execution_vocabulary_is_closed() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        ApprovalActionResponse(
+            request_id=uuid.uuid4(),
+            state="granted",
+            execution="invented_outcome",  # type: ignore[arg-type]
+        )
+
+
 def test_detail_response_digests_are_hex_strings() -> None:
     # args_digest/envelope_digest are str (hex) on the wire, never bytes.
     fields = ApprovalDetailResponse.model_fields

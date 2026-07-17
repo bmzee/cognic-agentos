@@ -807,6 +807,32 @@ class ApprovalRequestStore:
             return exc.outcome
         return "first_claim"
 
+    async def list_granted_unconsumed_before(
+        self,
+        *,
+        cutoff: datetime,
+    ) -> tuple[tuple[uuid.UUID, str], ...]:
+        """Startup-reconciler candidates, oldest first.
+
+        Only terminal grants whose atomic consume claim is still absent are
+        eligible. The grace cutoff avoids racing an inline route execution.
+        """
+        stmt = (
+            select(_approval_requests.c.request_id, _approval_requests.c.tenant_id)
+            .where(
+                _approval_requests.c.state == "granted",
+                _approval_requests.c.consumed_at.is_(None),
+                _approval_requests.c.updated_at <= cutoff,
+            )
+            .order_by(
+                _approval_requests.c.updated_at.asc(),
+                _approval_requests.c.request_id.asc(),
+            )
+        )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return tuple((row.request_id, str(row.tenant_id)) for row in rows)
+
     async def load(self, *, request_id: uuid.UUID, tenant_id: str) -> ApprovalRequestRow | None:
         """Tenant-scoped read; cross-tenant / unknown -> ``None``."""
         async with self._engine.begin() as conn:

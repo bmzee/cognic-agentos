@@ -9,7 +9,7 @@ inside build_approval_routes, not module globals)."""
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Annotated, cast
+from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -26,6 +26,7 @@ from cognic_agentos.core.approval.assignments import (
     ApprovalAssignmentStore,
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
+from cognic_agentos.core.approval.executor import ExecutionOutcome
 from cognic_agentos.core.approval.storage import (
     ApprovalCursorInvalid,
     ApprovalRequestDetail,
@@ -75,6 +76,36 @@ _REFUSAL_STATUS: dict[str, int] = {
     "approval_consumed": 409,
 }
 
+# A final decision retry can fail before the state-machine's terminal-state
+# check: the engine's established duplicate-decider precedence fires first for
+# an approver who already participated. These three reasons alone are eligible
+# for stored-result recovery; maker-checker, scope, assignment and reason-policy
+# refusals must remain refusals even when the request is already final.
+_FINAL_EXECUTION_RETRY_REASONS = frozenset(
+    {
+        "approval_already_finalized",
+        "four_eyes_approver_not_distinct",
+        "approver_not_distinct",
+    }
+)
+
+
+class _ApprovalExecutor(Protocol):
+    async def supports_request(self, *, request_id: uuid.UUID, tenant_id: str) -> bool: ...
+
+    async def execute_granted(
+        self, *, request_id: uuid.UUID, tenant_id: str
+    ) -> ExecutionOutcome: ...
+
+    async def post_denied(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        approver_subject: str,
+        reason: str,
+    ) -> bool: ...
+
 
 def _to_approval_actor(actor: Actor) -> ApprovalActor:
     # Boundary projection: the core engine MUST NOT import portal/rbac, so the
@@ -93,6 +124,12 @@ async def _dispatch_decision(
     request_id: uuid.UUID,
     actor: Actor,
     call: Callable[[], Awaitable[ApprovalState]],
+    after: Callable[[ApprovalState], Awaitable[ExecutionOutcome | None]] | None = None,
+    recover: Callable[
+        [ApprovalTransitionRefused],
+        Awaitable[tuple[ApprovalState, ExecutionOutcome] | None],
+    ]
+    | None = None,
 ) -> ApprovalActionResponse:
     """Shared refusal-dispatch for the three decision verbs. The ENGINE is
     authoritative for tenant-binding / scope-per-tier / human-only / state /
@@ -103,6 +140,7 @@ async def _dispatch_decision(
     ``portal.approvals.<verb>_refused``; dep-chain refusals emit ZERO
     route-level logs (the sibling guard's _emit_denial_or_500 carries that axis).
     """
+    execution: ExecutionOutcome | None = None
     try:
         state = await call()
     except ApprovalRequestNotFound:
@@ -114,18 +152,23 @@ async def _dispatch_decision(
             status_code=404, detail={"reason": "approval_request_not_found"}
         ) from None
     except ApprovalTransitionRefused as exc:
-        _LOG.warning(
-            f"portal.approvals.{verb}_refused",
-            extra={"reason": exc.reason, "actor_subject": actor.subject},
-        )
-        raise HTTPException(
-            status_code=_REFUSAL_STATUS[exc.reason], detail={"reason": exc.reason}
-        ) from None
+        recovered = await recover(exc) if recover is not None else None
+        if recovered is None:
+            _LOG.warning(
+                f"portal.approvals.{verb}_refused",
+                extra={"reason": exc.reason, "actor_subject": actor.subject},
+            )
+            raise HTTPException(
+                status_code=_REFUSAL_STATUS[exc.reason], detail={"reason": exc.reason}
+            ) from None
+        state, execution = recovered
+    else:
+        execution = await after(state) if after is not None else None
     _LOG.info(
         f"portal.approvals.{verb}",
         extra={"actor_subject": actor.subject, "request_id": str(request_id), "state": state},
     )
-    return ApprovalActionResponse(request_id=request_id, state=state)
+    return ApprovalActionResponse(request_id=request_id, state=state, execution=execution)
 
 
 def _summary_dto(s: ApprovalRequestSummary) -> ApprovalSummaryResponse:
@@ -181,11 +224,48 @@ def build_approval_routes(
     store: ApprovalRequestStore,
     engine: ApprovalEngine,
     assignments: ApprovalAssignmentStore | None = None,
+    executor_provider: Callable[[], _ApprovalExecutor | None] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
     _require_observe = RequireScope("tool.approve.observe")
     _require_assign = RequireScope("tool.approve.assign")
     _require_human = RequireHumanActor()
+
+    async def _execute_if_final(
+        *, request_id: uuid.UUID, tenant_id: str, state: ApprovalState
+    ) -> ExecutionOutcome | None:
+        if state != "granted" or executor_provider is None:
+            return None
+        executor = executor_provider()
+        if executor is None or not await executor.supports_request(
+            request_id=request_id,
+            tenant_id=tenant_id,
+        ):
+            return None
+        return await executor.execute_granted(
+            request_id=request_id,
+            tenant_id=tenant_id,
+        )
+
+    async def _recover_final_execution(
+        *,
+        refusal: ApprovalTransitionRefused,
+        request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[ApprovalState, ExecutionOutcome] | None:
+        """Retry a post-commit final grant through stored-result recovery."""
+
+        if refusal.reason not in _FINAL_EXECUTION_RETRY_REASONS:
+            return None
+        current = await engine.check(request_id=request_id, tenant_id=tenant_id)
+        if current.state != "granted":
+            return None
+        execution = await _execute_if_final(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            state="granted",
+        )
+        return None if execution is None else ("granted", execution)
 
     @router.get(
         "/",
@@ -354,7 +434,11 @@ def build_approval_routes(
             raise HTTPException(status_code=404, detail={"reason": "approval_request_not_found"})
         return _detail_dto(detail)
 
-    @router.post("/{request_id}/grant", response_model=ApprovalActionResponse)
+    @router.post(
+        "/{request_id}/grant",
+        response_model=ApprovalActionResponse,
+        response_model_exclude_none=True,
+    )
     async def grant(
         request_id: uuid.UUID,
         body: GrantRequest,
@@ -372,9 +456,23 @@ def build_approval_routes(
                 approver=_to_approval_actor(actor),
                 reason=body.reason,
             ),
+            after=lambda state: _execute_if_final(
+                request_id=request_id,
+                tenant_id=actor.tenant_id,
+                state=state,
+            ),
+            recover=lambda refusal: _recover_final_execution(
+                refusal=refusal,
+                request_id=request_id,
+                tenant_id=actor.tenant_id,
+            ),
         )
 
-    @router.post("/{request_id}/grant-second", response_model=ApprovalActionResponse)
+    @router.post(
+        "/{request_id}/grant-second",
+        response_model=ApprovalActionResponse,
+        response_model_exclude_none=True,
+    )
     async def grant_second(
         request_id: uuid.UUID,
         body: GrantRequest,
@@ -390,14 +488,44 @@ def build_approval_routes(
                 approver=_to_approval_actor(actor),
                 reason=body.reason,
             ),
+            after=lambda state: _execute_if_final(
+                request_id=request_id,
+                tenant_id=actor.tenant_id,
+                state=state,
+            ),
+            recover=lambda refusal: _recover_final_execution(
+                refusal=refusal,
+                request_id=request_id,
+                tenant_id=actor.tenant_id,
+            ),
         )
 
-    @router.post("/{request_id}/deny", response_model=ApprovalActionResponse)
+    @router.post(
+        "/{request_id}/deny",
+        response_model=ApprovalActionResponse,
+        response_model_exclude_none=True,
+    )
     async def deny(
         request_id: uuid.UUID,
         body: DenyRequest,
         actor: Annotated[Actor, Depends(_require_human)],
     ) -> ApprovalActionResponse:
+        async def _post_denial(state: ApprovalState) -> ExecutionOutcome | None:
+            if state != "denied" or executor_provider is None:
+                return None
+            executor = executor_provider()
+            if executor is not None and await executor.supports_request(
+                request_id=request_id,
+                tenant_id=actor.tenant_id,
+            ):
+                await executor.post_denied(
+                    request_id=request_id,
+                    tenant_id=actor.tenant_id,
+                    approver_subject=actor.subject,
+                    reason=body.reason,
+                )
+            return None
+
         return await _dispatch_decision(
             verb="deny",
             request_id=request_id,
@@ -408,6 +536,7 @@ def build_approval_routes(
                 approver=_to_approval_actor(actor),
                 reason=body.reason,
             ),
+            after=_post_denial,
         )
 
     return router

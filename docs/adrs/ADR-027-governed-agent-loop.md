@@ -171,6 +171,29 @@ adapter alone translates `tool_approval_pending`; `core/agent` remains
 independent of protocol exception types. `agents.rego` is unchanged and still
 re-requires the entitlement attestation strictly.
 
+## M8.5-D D2 phase-C action-context and completion amendment (2026-07-17)
+
+`pending_approval` is a terminal agent-run state, not a refusal and not another
+model round. The loop emits `agent.run.pending_approval`, returns a
+kernel-authored pending sentence plus the request id, and the conversation
+persists that complete exchange. Final approval execution never asks the model
+to recreate arguments: the executor replays the digest-verified bytes approved
+at proposal time.
+
+At execution time the kernel adds the reserved `_cognic_action_context`
+argument. Action tool schemas never advertise or accept that key from the
+model. Its attached RS256 JWS has exactly twelve claims: `iss`, `aud`, `sub`,
+`act`, `tenant_id`, `action_id`, `args_sha256`, `approval_request_id`,
+`idempotency_key`, `jti`, `iat`, and `exp`; verification precedence is
+signature, claim shape, expiry, then audience. The argument digest remains the
+pre-stamp digest of the LLM-authored canonical object.
+
+Execution and denial outcomes append `turn_kind="system"` conversation rows.
+They render in the transcript and share conversation erasure, but are excluded
+from prior-context replay and do not consume model turn or token budgets. This
+preserves the visible approval story without letting kernel-authored status
+text become future model input.
+
 ## References
 
 - Design spec: `docs/superpowers/specs/2026-07-04-m8-governed-agent-loop-design.md` · Implementation plan: `docs/superpowers/plans/2026-07-05-m8-governed-agent-loop.md`

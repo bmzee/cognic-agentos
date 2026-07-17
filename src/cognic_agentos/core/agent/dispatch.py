@@ -74,6 +74,9 @@ from cognic_agentos.core.agent._types import (
     GrantedCapabilities,
     LoadedAgentRecord,
 )
+from cognic_agentos.core.agent.action_context import (
+    ACTION_CONTEXT_ARGUMENT as _ACTION_CONTEXT_ARG,
+)
 from cognic_agentos.core.agent.policy import AgentDispatchPolicy, AgentPolicyInput
 from cognic_agentos.core.agent.query_context import (
     _ISSUER,
@@ -406,6 +409,17 @@ class AgentDispatcher:
                     scope_id=None,
                 )
             if capability_class == "action":
+                if _ACTION_CONTEXT_ARG in call.arguments:
+                    return await self._refuse(
+                        run=run,
+                        step_index=step_index,
+                        args_sha256=args_sha256,
+                        reason="agent_tool_dispatch_failed",
+                        message="the action arguments contain a kernel-reserved field",
+                        capability_kind=resolved.kind,
+                        capability_ref=resolved.ref,
+                        scope_id=None,
+                    )
                 action_entitled = await self._entitlements.entitled_action(
                     tenant_id=run.tenant_id,
                     subject=run.originator_subject,
@@ -768,7 +782,8 @@ def build_llm_tool_specs(
     name_map = _granted_tool_name_map(run.granted.tools)
     for tool_name in sorted(name_map):
         full_ref = name_map[tool_name]
-        if capability_classes.get(full_ref) == "data_query":
+        capability_class = capability_classes.get(full_ref)
+        if capability_class == "data_query":
             parameters: dict[str, Any] = {
                 "type": "object",
                 "properties": {
@@ -789,6 +804,19 @@ def build_llm_tool_specs(
                 "additionalProperties": False,
             }
             description = "Run a governed read-only SQL query inside an entitled data scope."
+        elif capability_class == "action":
+            # Generic action metadata is not yet projected from MCP tool
+            # schemas. Keep arbitrary application keys possible while closing
+            # the object and excluding the one kernel-owned stamp key.
+            parameters = {
+                "type": "object",
+                "properties": {},
+                "patternProperties": {
+                    r"^(?!_cognic_action_context$).+$": {},
+                },
+                "additionalProperties": False,
+            }
+            description = f"Request the governed action '{tool_name}'."
         else:
             # The kernel does not curate non-data-query tool schemas in this
             # lane — a permissive object schema; governance is dispatch-side.

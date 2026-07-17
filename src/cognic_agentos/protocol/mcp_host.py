@@ -109,13 +109,16 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from typing import Any, ClassVar, Literal
 
 import httpx
 
+from cognic_agentos.core.agent.action_context import ACTION_CONTEXT_ARGUMENT
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalCheckResult,
     ApprovalEnvelope,
     ApprovalRequestNotFound,
     ApprovalTransitionRefused,
@@ -406,6 +409,23 @@ class _DispatchContext:
     last_dispatched_session: MCPSession | None = None
     last_dispatched_token: Token | None = None
     dispatched: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ExecutorApprovalClaim:
+    """One-call capability proving this host instance consumed the grant."""
+
+    request_id: uuid.UUID
+    tenant_id: str
+    originator_subject: str
+    tool_identity: str
+    args_digest: bytes
+
+
+_EXECUTOR_APPROVAL_CLAIM: ContextVar[_ExecutorApprovalClaim | None] = ContextVar(
+    "mcp_executor_approval_claim",
+    default=None,
+)
 
 
 #: Sub-classification of a transport-level send error, derived by
@@ -1192,6 +1212,29 @@ class MCPHost:
         """
         engine = self._approval_engine
         assert engine is not None  # call site is gated on wiredness
+        executor_claim = _EXECUTOR_APPROVAL_CLAIM.get()
+        if executor_claim is not None:
+            # The only bypass of the ordinary public recall-consume branch is
+            # a ContextVar capability minted by execute_consumed_action on
+            # THIS task after a successful atomic consume. Rebind every fact
+            # and recompute the approved digest after removing only the
+            # kernel-owned action-context token.
+            unstamped = dict(arguments)
+            action_context = unstamped.pop(ACTION_CONTEXT_ARGUMENT, None)
+            expected_identity = _canonical_tool_identity(
+                server_id=entry.server_id,
+                tool_name=tool_name,
+            )
+            if (
+                approval_request_id != executor_claim.request_id
+                or tenant_id != executor_claim.tenant_id
+                or originator_subject != executor_claim.originator_subject
+                or expected_identity != executor_claim.tool_identity
+                or not isinstance(action_context, str)
+                or hashlib.sha256(canonical_bytes(unstamped)).digest() != executor_claim.args_digest
+            ):
+                raise RuntimeError("executor approval claim binding mismatch")
+            return
         canonical_args = canonical_bytes(dict(arguments))
         args_digest = hashlib.sha256(canonical_args).digest()
         tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
@@ -1298,11 +1341,14 @@ class MCPHost:
                 approval_request_id=str(approval_request_id),
                 flow=res.flow,
             )
-        required_refs: dict[str, str] = {}
+        required_refs: dict[str, str] = {
+            "mcp_server_id": entry.server_id,
+            "mcp_tool_name": tool_name,
+        }
         if declared_risk_tier == "regulator_communication":
             # Spec F3: the invocation request_id IS the audit correlator
             # every call_tool evidence row is keyed by.
-            required_refs = {"audit_record_ref": request_id}
+            required_refs["audit_record_ref"] = request_id
         envelope = ApprovalEnvelope(
             risk_tier=declared_risk_tier,
             tool_identity=tool_identity,
@@ -1862,6 +1908,68 @@ class MCPHost:
             scopes=used_token.scopes,
             client_id=used_token.client_id,
         )
+
+    async def execute_consumed_action(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        request_id: str,
+        tenant_id: str,
+        originator_subject: str,
+        approval_request_id: uuid.UUID,
+        prepare_arguments: Callable[[ApprovalCheckResult], Awaitable[Mapping[str, Any]]],
+    ) -> CallResult:
+        """Atomically consume, prepare stored args, then run ``call_tool``.
+
+        This is the executor's one private lane. The public ``call_tool``
+        contract is unchanged; a task-local capability lets its existing
+        pipeline replace the ordinary recall consume with the claim already
+        won here. Preparation runs only after the claim, closing replay drift.
+        """
+        engine = self._approval_engine
+        if engine is None:
+            raise RuntimeError("approval engine is required for consumed action execution")
+        entry = self._lookup_server(server_id)
+        tool_identity = _canonical_tool_identity(
+            server_id=entry.server_id,
+            tool_name=tool_name,
+        )
+        checked = await engine.check(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+        )
+        consumed = await engine.consume_grant_for_action(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+            expected_args_digest=checked.args_digest,
+            expected_tool_identity=tool_identity,
+            expected_originator_subject=originator_subject,
+            consumed_by=request_id,
+        )
+        if consumed.state != "granted":
+            raise RuntimeError("executor attempted to consume a non-granted approval")
+        arguments = await prepare_arguments(consumed)
+        claim = _ExecutorApprovalClaim(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+            originator_subject=originator_subject,
+            tool_identity=tool_identity,
+            args_digest=consumed.args_digest,
+        )
+        token = _EXECUTOR_APPROVAL_CLAIM.set(claim)
+        try:
+            return await self.call_tool(
+                server_id=server_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                originator_subject=originator_subject,
+                approval_request_id=approval_request_id,
+            )
+        finally:
+            _EXECUTOR_APPROVAL_CLAIM.reset(token)
 
     async def _call_tool_inner(
         self,

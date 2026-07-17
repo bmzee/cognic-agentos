@@ -76,6 +76,13 @@ class _StoreLike(Protocol):
         self, conversation_id: uuid.UUID, *, tenant_id: str, last_n: int
     ) -> list[TurnRecord]: ...
 
+    async def resolve_approval_context(
+        self,
+        *,
+        approval_request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[uuid.UUID, str] | None: ...
+
     async def claim_system_turn(
         self,
         conversation_id: uuid.UUID,
@@ -326,3 +333,15 @@ class ConversationTurnExecutor:
                 tenant_id=tenant_id,
                 claim_id=claim.claim_id,
             )
+
+    async def resolve_approval_context(
+        self,
+        *,
+        approval_request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[uuid.UUID, str] | None:
+        """Delegate the tenant-scoped approval-to-conversation lookup."""
+        return await self._store.resolve_approval_context(
+            approval_request_id=approval_request_id,
+            tenant_id=tenant_id,
+        )

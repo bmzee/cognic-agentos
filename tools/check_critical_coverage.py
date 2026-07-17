@@ -2162,6 +2162,12 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # every write/read custody edge; erasure retains the row + digests while
     # nulling both values. Gate 153 -> 154.
     ("src/cognic_agentos/core/approval/replay.py", 0.95, 0.90),
+    # M8.5-D D2 phase C — the exact 12-claim approved-action token and the
+    # consume/replay/dispatch/system-turn/evidence executor. Both are runtime
+    # authority: a widening in either can execute unapproved write bytes.
+    # Gate 154 -> 156.
+    ("src/cognic_agentos/core/agent/action_context.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/approval/executor.py", 0.95, 0.90),
     # Sprint 14A-A (ADR-022 + ADR-004) — the managed-run executor: the first
     # EXERCISED managed-run authority. Loads + validates the trusted pack record
     # (four fail-closed pre-submit checks), admits through the scheduler, owns

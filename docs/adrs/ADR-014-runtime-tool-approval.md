@@ -396,6 +396,41 @@ Bar-D-shaped flow remains compatible: the first exact-shape re-call after the
 final distinct grant claims and dispatches once.
 
 Stored-result replay is deliberately not part of the direct-MCP lane. It is
-owned by the later kernel execution service, which combines this claim with
-tool-side idempotency for at-least-once recovery; this amendment does not imply
-that a second human POST can execute or retrieve a result.
+owned by the later kernel execution service. The phase-C amendment below
+records both the tool-side idempotency contract and the remaining
+consume-before-send crash boundary; this amendment does not imply that a
+second human POST can execute or retrieve a result.
+
+## M8.5-D D2 phase-C execution amendment (2026-07-17)
+
+Conversation-originated action approvals now have a kernel-owned execution
+handoff. After the final grant transaction commits, the portal awaits
+`ApprovalExecutionService.execute_granted` inline. Non-final grants never
+trigger it. The service resolves the approval's conversation correlation,
+claims consumption once through `MCPHost.execute_consumed_action`, reloads and
+digest-verifies the exact approved canonical argument bytes, stamps a
+short-lived RS256 action-context token, dispatches through the host's existing
+authorization/DLP/audit pipeline, records canonical result bytes, appends a
+replay-excluded system turn, and emits value-free `approval.executed` evidence.
+The public `MCPHost.call_tool` contract is unchanged; its direct-MCP lane still
+returns `tool_approval_consumed` on a second use.
+
+The grant route is retry-safe for a participant whose duplicate-decision guard
+fires before the terminal-state guard: only the established duplicate-decider
+or already-finalized reasons may enter stored-result recovery, and only when
+the request currently projects as `granted`. Maker-checker, scope, assignment,
+and reason-policy refusals remain refusals. A second final-grant POST therefore
+reports `already_executed` without redispatching. Denial never executes and
+posts the exact system-authored outcome `Declined by {approver} — {reason}.`
+
+Delivery in this phase is an inline attempt plus startup recovery of
+`granted AND consumed_at IS NULL` conversation approvals older than the
+configured grace interval. It is not unconditional at-least-once delivery
+across process death: the single-use rule deliberately forbids redispatch once
+the consume claim has committed, leaving a narrow fail-closed window if the
+process dies before the tool receives the call or before the result is stored.
+When a call does reach the tool, the tool must deduplicate the stable
+`idempotency_key = sha256(approval_request_id UTF-8 || raw args digest bytes)`
+and return its original result. Closing the consumed-without-result recovery
+window needs a separately reviewed durable delivery claim; scheduler-lane
+execution also remains deferred.

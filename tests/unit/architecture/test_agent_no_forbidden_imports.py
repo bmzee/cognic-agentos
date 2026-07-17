@@ -60,6 +60,7 @@ def test_agent_dir_has_expected_sources() -> None:
         "assignments.py",
         "policy.py",
         "query_context.py",
+        "action_context.py",
         "dispatch.py",
         "builtins.py",
         "loop.py",

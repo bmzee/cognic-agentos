@@ -262,6 +262,14 @@ class ApprovalEngine:
             raise ApprovalTransitionRefused("approval_consumed")
         raise RuntimeError("granted approval became non-granted during consumption")
 
+    async def list_granted_unconsumed_before(
+        self,
+        *,
+        cutoff: datetime,
+    ) -> tuple[tuple[uuid.UUID, str], ...]:
+        """Expose the store's bounded startup-reconciliation predicate."""
+        return await self._store.list_granted_unconsumed_before(cutoff=cutoff)
+
     async def grant(
         self,
         *,

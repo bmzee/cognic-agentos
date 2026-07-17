@@ -267,6 +267,41 @@ class ConversationStore:
             row = (await conn.execute(stmt)).mappings().first()
         return None if row is None else _to_record(row)
 
+    async def resolve_approval_context(
+        self,
+        *,
+        approval_request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[uuid.UUID, str] | None:
+        """Resolve a pending chat approval to its conversation and agent.
+
+        The tenant predicate is the isolation boundary. Exactly one exchange
+        turn may own an approval id; duplicates are corruption and fail loud.
+        Direct-MCP approvals have no conversation turn and return ``None``.
+        """
+        stmt = (
+            select(_conversation_turns.c.conversation_id, _conversations.c.agent_id)
+            .select_from(
+                _conversation_turns.join(
+                    _conversations,
+                    _conversation_turns.c.conversation_id == _conversations.c.conversation_id,
+                )
+            )
+            .where(
+                _conversation_turns.c.approval_request_id == str(approval_request_id),
+                _conversation_turns.c.turn_kind == "exchange",
+                _conversations.c.tenant_id == tenant_id,
+            )
+            .limit(2)
+        )
+        async with self._engine.connect() as conn:
+            matches = (await conn.execute(stmt)).all()
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RuntimeError("approval conversation correlation is not unique")
+        return matches[0].conversation_id, str(matches[0].agent_id)
+
     async def load_replay_turns(
         self, conversation_id: uuid.UUID, *, tenant_id: str, last_n: int
     ) -> list[TurnRecord]:

@@ -1409,6 +1409,27 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_action_context_signing_key_path_prod_profile_guard(self) -> Settings:
+        """Reject production action-context keys from synthetic fixture trees."""
+        if (
+            self.runtime_profile == "prod"
+            and self.action_context_signing_key_path is not None
+            and "://" not in self.action_context_signing_key_path
+        ):
+            from pathlib import Path as _Path
+
+            resolved = str(_Path(self.action_context_signing_key_path).resolve())
+            for segment in ("/examples/", "/tests/fixtures/"):
+                if segment in resolved:
+                    raise ValueError(
+                        "action_context_signing_key_path_under_test_fixture_tree_in_prod: "
+                        f"action_context_signing_key_path={self.action_context_signing_key_path!r} "
+                        f"resolves to {resolved!r}; production action-context keys "
+                        "must live outside synthetic fixture trees"
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _validate_agent_card_jws_signing_key_path_prod_profile_guard(self) -> Settings:
         """M8 finding #4 (ADR-016 amendment 2026-07-06) — prod-profile guard
         rejecting test-fixture-tree AgentCard-JWS signing keys at startup.
@@ -2103,6 +2124,27 @@ class Settings(BaseSettings):
             "``exp - iat`` window the kernel mints. Short by design — the "
             "token binds ONE dispatch call; the tool-side verifier "
             "refuses at ``now >= exp``."
+        ),
+    )
+    action_context_signing_key_path: str | None = Field(
+        default=None,
+        description=(
+            "M8.5-D D2 — path or vault:// URI to the RS256 key used for "
+            "single-use approved-action context tokens. Production rejects "
+            "keys under examples/ or tests/fixtures/."
+        ),
+    )
+    action_context_ttl_s: float = Field(
+        default=120.0,
+        gt=0,
+        description="M8.5-D D2 — short TTL for one approved action dispatch.",
+    )
+    approval_executor_grace_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "M8.5-D D2 — startup reconciler delay before re-driving a granted, "
+            "unconsumed action; avoids racing the inline final-grant trigger."
         ),
     )
     agent_max_steps: int = Field(
