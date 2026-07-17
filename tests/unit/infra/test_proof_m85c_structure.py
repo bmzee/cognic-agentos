@@ -147,6 +147,13 @@ def test_proof_app_builds_only_the_reference_oidc_binder() -> None:
     )
 
 
+def test_proof_app_wires_assignments_across_its_eager_router_engine() -> None:
+    text = _PROOF_APP.read_text()
+    assert "ApprovalAssignmentStore(decision_history_store)" in text
+    assert "assignments=approval_assignment_store" in text
+    assert "approval_assignment_store=approval_assignment_store" in text
+
+
 # --- the locked grant profile + exact audience (spec §4) ---------------------------
 
 
