@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# CURRENT EXTENSION (M8.5-D D2 A-minus, 2026-07-17): the historical M8.5-C
+# Bars A-F remain byte-locked below; BAR G appends deployed N-way assignment,
+# single-use direct-MCP consumption, and maker-checker evidence. The aggregate
+# success marker is now BARS A-G. Conversation-correlated auto-execution remains
+# deferred to D5's externally released action-agent/write-pack proof.
 # Proof M8.5 SLICE (conversational substrate — BARs 1-3) — the vertical-slice
 # gate for ADR-028: the kernel-owned CONVERSATION primitive (`/api/v1/
 # conversations`) wrapping the PROVEN M8 governed agent loop, live on kind.
@@ -77,7 +82,7 @@
 # conversation.% / agent.run.% / dispatch / audit evidence to
 # docs/VALIDATION-RESULTS.md and exits non-zero — the proof is NEVER
 # redefined downward. On all-pass it prints
-# "PROOF M8.5-C (BARS 1-3) PASS" and exits 0.
+# "PROOF M8.5-C (BARS A-G) PASS" and exits 0.
 set -euo pipefail
 
 if [[ "${COGNIC_RUN_PROOF_M85C:-}" != "1" ]]; then
@@ -644,6 +649,25 @@ except Exception:
 ' "$2"
 }
 
+# token_has_scope <JWT> <SCOPE> — decode-only claim check for Bar G's temporary
+# maker-checker scope elevation. The token rides stdin, never argv. The reference
+# binder remains the verifier; this helper only proves the newly-minted token
+# actually carries (or, with `! token_has_scope`, no longer carries) the scope the
+# Keycloak Admin API was asked to set.
+token_has_scope() {
+  printf '%s' "$1" | python3 -c '
+import base64, json, sys
+token, wanted = sys.stdin.read(), sys.argv[1]
+try:
+    payload = token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    scopes = claims.get("cognic_scopes")
+    sys.exit(0 if isinstance(scopes, list) and wanted in scopes else 1)
+except Exception:
+    sys.exit(1)
+' "$2"
+}
+
 # The reference binder accepts a token until `now > exp + clock_skew_s`. This
 # constant is lockstep-pinned against ReferenceBinderConfig.clock_skew_s by the
 # remediation suite: the live expiry leg must cross the BINDER'S acceptance
@@ -813,6 +837,47 @@ print(json.dumps(rep))
     || bar_fail "Keycloak admin API refused the access.token.lifespan=$seconds update (HTTP $code)"
 }
 
+# kc_set_user_scope_set <USERNAME> <CSV> — replace one proof user's exact
+# cognic_scopes attribute through Keycloak's own Admin API. Bar G uses this only
+# AFTER Bars A-F to prove maker-checker exclusion independently of ordinary role
+# hygiene: Amir temporarily receives the tier approval scope, exercises both
+# originator decision indices, then is restored to IDENTITY_SCOPES[amir].
+#
+# The admin bearer stays on stdin. The representation is 0600 under QC_TMP and is
+# removed before return. The user's stable Keycloak id/sub is never changed.
+kc_set_user_scope_set() {
+  local username="$1" scopes_csv="$2" tok uuid rep_file code safe_name
+  tok="$(kc_admin_token)"
+  [ -n "$tok" ] || bar_fail "Keycloak admin token could not be obtained (user-scope update)"
+  uuid="$(kc_admin_get "$tok" "/admin/realms/$KC_ADMIN_REALM/users?username=$username&exact=true" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if len(d) == 1 else "")')"
+  [ -n "$uuid" ] \
+    || bar_fail "Keycloak admin API did not resolve exactly one user for $username"
+  safe_name="$(printf '%s' "$username" | tr -c '[:alnum:]_-' '_')"
+  rep_file="$QC_TMP/kc-user-$safe_name.json"
+  ( umask 077; kc_admin_get "$tok" "/admin/realms/$KC_ADMIN_REALM/users/$uuid" \
+    | python3 -c '
+import json, sys
+rep = json.load(sys.stdin)
+attrs = rep.get("attributes")
+if not isinstance(attrs, dict):
+    raise SystemExit("user representation carries no attributes object")
+scopes = [scope for scope in sys.argv[1].split(",") if scope]
+if not scopes or len(scopes) != len(set(scopes)):
+    raise SystemExit("scope replacement is empty or duplicated")
+attrs["cognic_scopes"] = scopes
+print(json.dumps(rep))
+' "$scopes_csv" > "$rep_file" ) \
+    || bar_fail "Keycloak returned no usable user representation for $username"
+  code="$(printf 'header = "Authorization: Bearer %s"\n' "$tok" \
+    | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" \
+        -X PUT -H "Content-Type: application/json" --data-binary "@$rep_file" \
+        "$KC_ADMIN_BASE/admin/realms/$KC_ADMIN_REALM/users/$uuid")"
+  rm -f "$rep_file"
+  [ "$code" = "204" ] \
+    || bar_fail "Keycloak admin API refused the scope update for $username (HTTP $code)"
+}
+
 # kc_refresh_event_count — the INDEPENDENT observer for S6. Keycloak's own user-
 # event log counts every refresh_token grant it served (gen_realm.py enables
 # eventsEnabled + the REFRESH_TOKEN / REFRESH_TOKEN_ERROR types). If the BFF's
@@ -855,6 +920,97 @@ api() {
   HTTP_CODE="$out"
   printf '%s' "$out" > "$HTTP_CODE_FILE"
   cat "$API_RESP_FILE"
+}
+
+# api_with_bearer <TOKEN> <METHOD> <PATH> [BODY] — one-shot variant used only
+# by Bar G's service-token negative. The credential rides curl's stdin config,
+# exactly like api(); it is never exported, cached, written to disk, or placed on
+# argv. Returns curl's transport status so the direct caller can fail loudly.
+api_with_bearer() {
+  local token="$1" method="$2" path="$3" body="${4:-}" out rc
+  [ -n "$HTTP_CODE_FILE" ] && [ -n "$API_RESP_FILE" ] \
+    || die "api_with_bearer() called before QC_TMP was minted (programming error)"
+  set +e
+  if [ -n "$body" ]; then
+    out="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -K - \
+      -o "$API_RESP_FILE" -w '%{http_code}' --cacert "$PROOF_CA" -X "$method" \
+      -H 'Content-Type: application/json' -d "$body" "$BASE_URL$path")"
+    rc=$?
+  else
+    out="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -K - \
+      -o "$API_RESP_FILE" -w '%{http_code}' --cacert "$PROOF_CA" -X "$method" \
+      "$BASE_URL$path")"
+    rc=$?
+  fi
+  set -e
+  [ "$rc" -eq 0 ] || return "$rc"
+  HTTP_CODE="$out"
+  printf '%s' "$out" > "$HTTP_CODE_FILE"
+  cat "$API_RESP_FILE"
+}
+
+# proof_mcp_service_token — mint a genuine client-credentials access token from
+# the proof MCP authorization server. This is the real service-token plane used
+# on kernel→pack calls. It is intentionally NOT a Keycloak human token, so the
+# reference binder refuses it before an Actor can exist. The token is returned
+# only through this function's stdout into a private shell variable.
+proof_mcp_service_token() {
+  kubectl -n "$NS" exec deploy/rel-agentos -- python -c '
+import httpx
+response = httpx.post(
+    "http://proof-as:9000/token",
+    data={
+        "grant_type": "client_credentials",
+        "client_id": "proof-client",
+        "client_secret": "proof-secret",
+        "scope": "tool.approve.assign",
+        "resource": "cognic-agentos",
+    },
+    timeout=10.0,
+)
+response.raise_for_status()
+token = response.json().get("access_token")
+if not isinstance(token, str) or token.count(".") != 2:
+    raise SystemExit("authorization server returned no JWT access token")
+print(token)
+'
+}
+
+# assert_approval_wire_progress <LABEL> <DOC> <DECISIONS> <REQUIRED> <STATE> —
+# strict reader for the deployed approval-detail wire response. The document
+# rides stdin and no response values enter the failure message.
+assert_approval_wire_progress() {
+  local label="$1" doc="$2" decisions="$3" required="$4" state="$5" rc
+  set +e
+  printf '%s' "$doc" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+assert isinstance(doc, dict), "response_not_object"
+assert doc.get("decisions_recorded") == int(sys.argv[1]), "decisions_recorded_mismatch"
+assert doc.get("required_count") == int(sys.argv[2]), "required_count_mismatch"
+assert doc.get("state") == sys.argv[3], "state_mismatch"
+' "$decisions" "$required" "$state"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || bar_fail "$label: approval-detail wire progress did not match the required contract"
+}
+
+# assert_http_reason <LABEL> <DOC> <REASON> — strict FastAPI refusal-envelope
+# reader. Static failure text only: response values never enter durable evidence.
+assert_http_reason() {
+  local label="$1" doc="$2" expected="$3" rc
+  set +e
+  printf '%s' "$doc" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+detail = doc.get("detail") if isinstance(doc, dict) else None
+assert isinstance(detail, dict), "detail_not_object"
+assert detail.get("reason") == sys.argv[1], "reason_mismatch"
+' "$expected"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || bar_fail "$label: refusal reason did not match the required contract"
 }
 
 # ---- Browser driver helper (the Playwright driver drives + observes; the runner
@@ -5218,3 +5374,192 @@ echo "  Bar F OK: zero DB modules; exactly the 3 screens (+auth); no actor-heade
 echo "PROOF M8.5-C (BAR F) PASS"
 
 echo "PROOF M8.5-C (BARS A-F) PASS"
+
+# ============================ BAR G — assigned approval ============================
+# D2 A-minus: bank-owned N-way assignment, wire progress, direct-MCP consume-once,
+# and maker-checker exclusion on both originator indices. This bar deliberately
+# mints only AFTER Bar D's four-eyes requests, so A-F remain the byte-identical
+# M8.5-C proof. The independent execution observer remains the probe ledger.
+#
+# HONEST BOUNDARY: the deployed reference binder accepts only Authorization-Code
+# tokens from cognic-harness and derives every accepted Actor as human. Therefore a
+# service token cannot reach RequireHumanActor in this topology. G.1 sends the REAL
+# client-credentials token used on the kernel→MCP plane and proves it cannot mutate
+# assignment state (exact binder refusal + zero chain-row delta). The route-level
+# service-Actor arm remains unit/e2e-proven. Auto-execution + the conversation system
+# turn likewise await D5's external action-agent/write-pack live proof.
+echo "==> BAR G — D2 assigned approval: 3-of-3 progress, consume-once, maker-checker"
+
+# G.0 — no action in Bars E/F may have moved the independent ledger after Bar D.
+G_LEDGER0="$(probe_ledger_count)"
+[ "$G_LEDGER0" = "$D_LEDGER1" ] && [ "$G_LEDGER0" = "1" ] \
+  || bar_fail "BAR G.0 the probe ledger drifted after Bar D (bar-d=$D_LEDGER1 bar-g=$G_LEDGER0, expected 1)"
+
+# Resolve the canonical, collision-proof identity from Bar D's REAL persisted row.
+# Never hand-format it: mcp_host derives mcp:<sha256(canonical object)>.
+G_TOOL_ID="$(PSQL "SELECT tool_identity FROM approval_requests WHERE tenant_id='$TENANT' AND request_id='$D_REQ2';")"
+[[ "$G_TOOL_ID" =~ ^mcp:[0-9a-f]{64}$ ]] \
+  || bar_fail "BAR G.1 Bar D's persisted request carried no canonical MCP tool identity"
+G_DANA_SUB="$(bound_subject approver.dana)"
+G_ERIN_SUB="$(bound_subject approver.erin)"
+G_FIONA_SUB="$(bound_subject approver.fiona)"
+G_ASSIGN_BODY="$(python3 -c 'import json,sys; print(json.dumps({"approver_subjects":sys.argv[1:]}))' \
+  "$G_DANA_SUB" "$G_ERIN_SUB" "$G_FIONA_SUB")"
+
+# G.1 — Omar is a real human holding only assignment administration + observe.
+G_ASSIGN_EVENTS_BEFORE="$(PSQL "SELECT count(*) FROM decision_history WHERE tenant_id='$TENANT' AND event_type='approval.assignment_changed' AND payload->>'tool_identity'='$G_TOOL_ID';")"
+case "$G_ASSIGN_EVENTS_BEFORE" in
+  ''|*[!0-9]*) bar_fail "BAR G.1 assignment-event baseline is non-numeric" ;;
+esac
+G_ASSIGN_RESP="$(api omar PUT "/api/v1/approvals/assignments/$G_TOOL_ID" "$G_ASSIGN_BODY")"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.1 Omar's assignment PUT failed (HTTP $HTTP_CODE)"
+printf '%s' "$G_ASSIGN_RESP" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+assert doc["required_count"] == 3, "required_count_mismatch"
+assert set(doc["approver_subjects"]) == set(sys.argv[1:]), "approver_set_mismatch"
+' "$G_DANA_SUB" "$G_ERIN_SUB" "$G_FIONA_SUB" \
+  || bar_fail "BAR G.1 assignment response did not carry the exact 3-person set"
+G_ASSIGN_EVENTS_AFTER="$(PSQL "SELECT count(*) FROM decision_history WHERE tenant_id='$TENANT' AND event_type='approval.assignment_changed' AND payload->>'tool_identity'='$G_TOOL_ID';")"
+[ "$G_ASSIGN_EVENTS_AFTER" -eq "$((G_ASSIGN_EVENTS_BEFORE + 1))" ] \
+  || bar_fail "BAR G.1 the human assignment PUT did not append exactly one approval.assignment_changed row"
+
+# A genuine client-credentials token from the proof MCP AS must not cross the
+# human API identity boundary. It is refused at the reference binder's structural
+# token-type gate, before an Actor exists; the assignment chain count must not move.
+G_SERVICE_REFUSALS_BEFORE="$(binder_refusal_count typ_not_at_jwt)"
+set +e
+G_SERVICE_TOKEN="$(proof_mcp_service_token)"
+G_SERVICE_TOKEN_RC=$?
+set -e
+[ "$G_SERVICE_TOKEN_RC" -eq 0 ] && [ -n "$G_SERVICE_TOKEN" ] \
+  || bar_fail "BAR G.1 the proof MCP authorization server did not mint its service token"
+set +e
+G_SERVICE_RESP="$(api_with_bearer "$G_SERVICE_TOKEN" PUT "/api/v1/approvals/assignments/$G_TOOL_ID" "$G_ASSIGN_BODY")"
+G_SERVICE_CALL_RC=$?
+set -e
+unset G_SERVICE_TOKEN
+[ "$G_SERVICE_CALL_RC" -eq 0 ] || bar_fail "BAR G.1 service-token PUT transport failed"
+load_http_code
+[ "$HTTP_CODE" = "403" ] || bar_fail "BAR G.1 a service token was not refused (HTTP $HTTP_CODE)"
+assert_http_reason "BAR G.1 service token" "$G_SERVICE_RESP" actor_unauthenticated
+assert_binder_refusal typ_not_at_jwt "$G_SERVICE_REFUSALS_BEFORE"
+G_ASSIGN_EVENTS_AFTER_SERVICE="$(PSQL "SELECT count(*) FROM decision_history WHERE tenant_id='$TENANT' AND event_type='approval.assignment_changed' AND payload->>'tool_identity'='$G_TOOL_ID';")"
+[ "$G_ASSIGN_EVENTS_AFTER_SERVICE" = "$G_ASSIGN_EVENTS_AFTER" ] \
+  || bar_fail "BAR G.1 the refused service token changed assignment evidence"
+echo "  Bar G.1 OK: Omar assigned 3 humans; one assignment_changed row; a real service token was refused before mutation"
+
+# G.2 — THE composition-root witness. Mint through the deployed MCP host, then
+# read the row straight from Postgres. A missing build_runtime assignments= wire
+# yields require_4_eyes|2|0|pending here and fails the proof.
+G_MINT1="$(mint_probe_request amir)"
+G_REQ1="$(printf '%s' "$G_MINT1" | cut -f1)"
+G_NONCE1="$(printf '%s' "$G_MINT1" | cut -f2)"
+[ -n "$G_REQ1" ] && [ -n "$G_NONCE1" ] || bar_fail "BAR G.2 no request/nonce minted"
+G_SNAPSHOT="$(PSQL "SELECT flow || '|' || required_count::text || '|' || decisions_recorded::text || '|' || state FROM approval_requests WHERE tenant_id='$TENANT' AND request_id='$G_REQ1';")"
+[ "$G_SNAPSHOT" = "require_assigned|3|0|pending" ] \
+  || bar_fail "BAR G.2 deployed mint did not persist require_assigned|3|0|pending"
+[ "$(probe_ledger_count)" = "$G_LEDGER0" ] \
+  || bar_fail "BAR G.2 a pending assigned request executed the tool"
+echo "  Bar G.2 OK: PSQL witnessed flow=require_assigned, required_count=3, decisions_recorded=0"
+
+# G.3 — three distinct assigned humans advance the deployed wire 1/3 → 2/3 →
+# 3/3. The first two stay pending; only the third reaches granted. Every progress
+# read comes from GET /api/v1/approvals/{id}, not a shell-maintained counter.
+G_GRANT1="$(api dana POST "/api/v1/approvals/$G_REQ1/grant" '{"reason":"assigned review one"}')"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 Dana's first grant failed (HTTP $HTTP_CODE)"
+G_DETAIL1="$(api dana GET "/api/v1/approvals/$G_REQ1")"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 first progress read failed (HTTP $HTTP_CODE)"
+assert_approval_wire_progress "BAR G.3 1-of-3" "$G_DETAIL1" 1 3 awaiting_second
+echo "  Bar G.3 progress 1|3|awaiting_second"
+
+G_GRANT2="$(api erin POST "/api/v1/approvals/$G_REQ1/grant" '{"reason":"assigned review two"}')"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 Erin's second grant failed (HTTP $HTTP_CODE)"
+G_DETAIL2="$(api erin GET "/api/v1/approvals/$G_REQ1")"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 second progress read failed (HTTP $HTTP_CODE)"
+assert_approval_wire_progress "BAR G.3 2-of-3" "$G_DETAIL2" 2 3 awaiting_second
+echo "  Bar G.3 progress 2|3|awaiting_second"
+
+G_GRANT3="$(api fiona POST "/api/v1/approvals/$G_REQ1/grant" '{"reason":"assigned review three"}')"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 Fiona's final grant failed (HTTP $HTTP_CODE)"
+G_DETAIL3="$(api fiona GET "/api/v1/approvals/$G_REQ1")"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.3 final progress read failed (HTTP $HTTP_CODE)"
+assert_approval_wire_progress "BAR G.3 3-of-3" "$G_DETAIL3" 3 3 granted
+echo "  Bar G.3 progress 3|3|granted"
+
+G_CHAIN="$(PSQL "SELECT string_agg(event_type, ',' ORDER BY sequence) FROM decision_history WHERE tenant_id='$TENANT' AND payload->>'request_id'='$G_REQ1' AND event_type IN ('approval.requested','approval.granted_first','approval.granted_second','approval.grant_recorded');")"
+[ "$G_CHAIN" = "approval.requested,approval.granted_first,approval.granted_second,approval.grant_recorded" ] \
+  || bar_fail "BAR G.3 assigned approval chain order did not match the D2 contract"
+[ "$(probe_ledger_count)" = "$G_LEDGER0" ] \
+  || bar_fail "BAR G.3 granting alone executed the direct-MCP tool"
+echo "  Bar G.3 OK: deployed detail wire advanced 1/3 → 2/3 → 3/3; chain order exact; ledger unchanged"
+
+# G.4 — the grant is a single-use capability on direct MCP. First exact recall
+# atomically claims and executes; the second exact recall refuses with the new
+# closed wire reason and cannot move the independent ledger.
+G_RECALL1="$(recall_probe amir "$G_REQ1" "$G_NONCE1")"
+load_http_code
+[ "$HTTP_CODE" = "200" ] || bar_fail "BAR G.4 first exact recall did not execute (HTTP $HTTP_CODE)"
+G_LEDGER1="$(probe_ledger_count)"
+[ "$G_LEDGER1" -eq "$((G_LEDGER0 + 1))" ] \
+  || bar_fail "BAR G.4 first exact recall did not advance the ledger exactly once"
+G_RECALL2="$(recall_probe amir "$G_REQ1" "$G_NONCE1")"
+load_http_code
+[ "$HTTP_CODE" = "409" ] || bar_fail "BAR G.4 second exact recall was not refused (HTTP $HTTP_CODE)"
+assert_http_reason "BAR G.4 consumed replay" "$G_RECALL2" tool_approval_consumed
+[ "$(probe_ledger_count)" = "$G_LEDGER1" ] \
+  || bar_fail "BAR G.4 consumed replay moved the ledger"
+echo "  Bar G.4 OK: first exact recall executed once; second refused tool_approval_consumed; ledger stayed $G_LEDGER1"
+
+# G.5 — prove maker-checker in code, not by ordinary scope hygiene. The request
+# originates while Amir has his normal analyst scopes. Then Keycloak temporarily
+# adds the tier approval scope to the SAME stable subject; a fresh token reaches
+# the engine's originator gates. The exact original scope set is restored before
+# this leg can pass.
+G_MINT2="$(mint_probe_request amir)"
+G_REQ2="$(printf '%s' "$G_MINT2" | cut -f1)"
+[ -n "$G_REQ2" ] || bar_fail "BAR G.5 no assigned request minted for maker-checker"
+kc_set_user_scope_set analyst.amir "${IDENTITY_SCOPES[amir]},tool.approve.high_risk_custom"
+ROLE_TOKEN[amir]=""
+ensure_token amir
+token_has_scope "${ROLE_TOKEN[amir]}" tool.approve.high_risk_custom \
+  || { kc_set_user_scope_set analyst.amir "${IDENTITY_SCOPES[amir]}"; bar_fail "BAR G.5 elevated Amir token lacks the tier approval scope"; }
+
+G_ORIGINATOR0="$(api amir POST "/api/v1/approvals/$G_REQ2/grant" '{"reason":"maker checker index zero"}')"
+load_http_code
+G_ORIGINATOR0_CODE="$HTTP_CODE"
+G_DANA_INDEX1="$(api dana POST "/api/v1/approvals/$G_REQ2/grant" '{"reason":"assigned reviewer index zero"}')"
+load_http_code
+G_DANA_INDEX1_CODE="$HTTP_CODE"
+G_ORIGINATOR1="$(api amir POST "/api/v1/approvals/$G_REQ2/grant" '{"reason":"maker checker index one"}')"
+load_http_code
+G_ORIGINATOR1_CODE="$HTTP_CODE"
+
+# Restore before judging the responses: a failed assertion must never leave the
+# proof identity elevated for a later diagnostic or rerun.
+kc_set_user_scope_set analyst.amir "${IDENTITY_SCOPES[amir]}"
+ROLE_TOKEN[amir]=""
+ensure_token amir
+! token_has_scope "${ROLE_TOKEN[amir]}" tool.approve.high_risk_custom \
+  || bar_fail "BAR G.5 Amir's normal scope contract was not restored"
+
+[ "$G_ORIGINATOR0_CODE" = "409" ] \
+  || bar_fail "BAR G.5 originator index-0 grant was not refused (HTTP $G_ORIGINATOR0_CODE)"
+assert_http_reason "BAR G.5 index zero" "$G_ORIGINATOR0" originator_cannot_approve
+[ "$G_DANA_INDEX1_CODE" = "200" ] \
+  || bar_fail "BAR G.5 Dana could not establish decision index 1 (HTTP $G_DANA_INDEX1_CODE)"
+[ "$G_ORIGINATOR1_CODE" = "409" ] \
+  || bar_fail "BAR G.5 originator index-1 grant was not refused (HTTP $G_ORIGINATOR1_CODE)"
+assert_http_reason "BAR G.5 index one" "$G_ORIGINATOR1" four_eyes_approver_not_distinct
+[ "$(probe_ledger_count)" = "$G_LEDGER1" ] \
+  || bar_fail "BAR G.5 maker-checker refusals moved the ledger"
+echo "  Bar G.5 OK: scope-holding originator refused at index 0 (originator_cannot_approve) and index 1 (four_eyes_approver_not_distinct); normal scopes restored"
+echo "PROOF M8.5-C (BAR G) PASS"
+echo "PROOF M8.5-C (BARS A-G) PASS"

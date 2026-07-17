@@ -4691,3 +4691,81 @@ def test_attempt19_bar_c_executes_the_exact_refusal_correlation_predicate() -> N
     )
     assert refused.returncode != 0
     assert secret_marker not in refused.stdout + refused.stderr
+
+
+# --------------------------------------------------------------------------- #
+# D2 A-minus — BAR G assigned approval + consume-once live contract.          #
+# --------------------------------------------------------------------------- #
+
+
+def _bar_a_through_f_text() -> str:
+    start_marker = "# ============================ BAR A"
+    end_marker = 'echo "PROOF M8.5-C (BARS A-F) PASS"'
+    assert _RUNNER_TEXT.count(start_marker) == 1
+    assert _RUNNER_TEXT.count(end_marker) == 1
+    start = _RUNNER_TEXT.index(start_marker)
+    end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
+    return _RUNNER_TEXT[start:end]
+
+
+def _bar_g_text() -> str:
+    start_marker = "# ============================ BAR G"
+    end_marker = 'echo "PROOF M8.5-C (BARS A-G) PASS"'
+    assert _RUNNER_TEXT.count(start_marker) == 1, "BAR G is absent or duplicated"
+    assert _RUNNER_TEXT.count(end_marker) == 1, "the A-G terminal marker is absent or duplicated"
+    start = _RUNNER_TEXT.index(start_marker)
+    end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
+    return _RUNNER_TEXT[start:end]
+
+
+def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
+    assert hashlib.sha256(_bar_a_through_f_text().encode()).hexdigest() == (
+        "92b3942a5b687c072988515f0b6ec6512a3969c5881d5fff342bb26ace778d0a"
+    )
+    assert _RUNNER_TEXT.index("# ============================ BAR G") > _RUNNER_TEXT.index(
+        'echo "PROOF M8.5-C (BARS A-F) PASS"'
+    )
+
+
+def test_d2_bar_g_reads_the_canonical_identity_from_bar_d() -> None:
+    bar = _bar_g_text()
+    assert "request_id='$D_REQ2'" in bar
+    assert "SELECT tool_identity FROM approval_requests" in bar
+    assert 'G_TOOL_ID="mcp:' not in bar
+
+
+def test_d2_bar_g_assignment_and_flow_witness_are_db_observations() -> None:
+    bar = _bar_g_text()
+    assert 'api omar PUT "/api/v1/approvals/assignments/$G_TOOL_ID"' in bar
+    assert 'doc["required_count"] == 3' in bar
+    assert "approval.assignment_changed" in bar
+    assert "SELECT flow || '|' || required_count::text || '|' || decisions_recorded::text" in bar
+    assert 'G_SNAPSHOT" = "require_assigned|3|0|pending"' in bar
+
+
+def test_d2_bar_g_pins_three_way_progress_and_exact_chain_order() -> None:
+    bar = _bar_g_text()
+    for progress in ("1|3|awaiting_second", "2|3|awaiting_second", "3|3|granted"):
+        assert progress in bar
+    assert (
+        "approval.requested,approval.granted_first,approval.granted_second,approval.grant_recorded"
+    ) in bar
+
+
+def test_d2_bar_g_pins_consume_once_and_both_originator_indices() -> None:
+    bar = _bar_g_text()
+    assert bar.count('recall_probe amir "$G_REQ1" "$G_NONCE1"') == 2
+    assert "tool_approval_consumed" in bar
+    assert "originator_cannot_approve" in bar
+    assert "four_eyes_approver_not_distinct" in bar
+    assert "kc_set_user_scope_set analyst.amir" in bar
+    assert 'kc_set_user_scope_set analyst.amir "${IDENTITY_SCOPES[amir]}"' in bar
+
+
+def test_d2_bar_g_real_service_token_cannot_mutate_the_assignment() -> None:
+    bar = _bar_g_text()
+    assert "proof_mcp_service_token" in bar
+    assert "api_with_bearer" in bar
+    assert "actor_unauthenticated" in bar
+    assert "typ_not_at_jwt" in bar
+    assert 'G_ASSIGN_EVENTS_AFTER_SERVICE" = "$G_ASSIGN_EVENTS_AFTER"' in bar

@@ -11,6 +11,12 @@
 > ledger, and the honesty boundary are in `docs/VALIDATION-RESULTS.md` under
 > "M8.5-C — Basic bank harness (ADR-028) — PASS".
 
+> **D2 A-minus extension (2026-07-17): AUTHORED, NOT YET LIVE.** The runner now
+> preserves the proven A-F body byte-for-byte and appends BAR G for bank-owned
+> 3-of-3 assignment, direct-MCP consume-once, and maker-checker exclusion. Its
+> source/structural gates are green, but no A-G PASS or log digest is claimed
+> until the kind run completes. The historical run-20 record above is unchanged.
+
 ## What the passing run proved
 
 M8.5-C stands up the **Cognic Harness v1** — a same-origin BFF (`cognic-harness`
@@ -155,18 +161,20 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
 
 ## Honesty boundaries (mandatory — spec §8)
 
-1. **Grants are deliberately not single-use** (ADR-014): the same requester may
-   replay the same granted shape until expiry. "Exact re-call" means
-   actor/tenant/tool/args-bound, **not** exactly-once execution. Single-use
-   `consume`/transaction idempotency is a **named prerequisite before any real
-   high-risk business action or pilot** — recorded, not implemented here.
+1. **Direct-MCP grants are now consume-once.** BAR G claims a granted request
+   atomically, executes the first exact recall, and requires a second identical
+   recall to refuse `tool_approval_consumed` without moving the independent
+   ledger. The historical Bar-D run predates this D2 change and remains a record
+   of the then-current replayable contract.
 2. The harness-PR-CI **kernel fake never counts as milestone evidence** — the
    real-kernel `kind` proof is the authority.
 3. **HP-2 remains open per bank** (issuer, claim mapping, assurance level,
    accepted FAPI profile). The reference binder is a worked example, not a
    shipped bank overlay.
-4. **HP-5 is untouched**: chat is auto-tier; the approvals screen proves the MCP
-   surface only.
+4. **Conversation-correlated auto-execution is not live-proven here.** D2's
+   executor/system-turn path is unit/e2e-proven, but BAR G uses the direct-MCP
+   probe. The live write + system-turn bar needs D5's external action agent and
+   released write pack.
 5. Any plaintext proof-internal MCP transport is disclosed explicitly (above).
 6. The M8.5-C baseline is **RFC 9700**; full **FAPI 2.0** is the bank-deployment
    target — nothing here is called FAPI conformant. The realm pins the RFC 9068
@@ -174,8 +182,7 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
 7. **NOT PILOT-READY.** M8.5-C proves the harness boundary and the approvals
    surface only. Still outstanding before any pilot: HP-5, erasure,
    content-safety/escalation hooks, data-access brokerage (M8.5-D/E), full FAPI
-   2.0 or a formally accepted equivalent, and single-use grant consumption
-   (item 1).
+   2.0 or a formally accepted equivalent, and D5's live write proof.
 
 ### M8.5-C-specific proof-staging disclosures
 
@@ -456,7 +463,7 @@ COGNIC_PROOF_M85C_TIER1_API_KEY=<operator key> \
 (The probe's two trust digests are **not** environment variables — they are
 maintainer-committed literals in `stage-packs.sh`; see prerequisite 2.)
 
-On all-pass it prints `PROOF M8.5-C (BARS A-F) PASS` and exits 0; on any bar
+On all-pass it prints `PROOF M8.5-C (BARS A-G) PASS` and exits 0; on any bar
 failure it captures diagnostics to `docs/VALIDATION-RESULTS.md` and exits
 non-zero — the proof is never redefined downward.
 

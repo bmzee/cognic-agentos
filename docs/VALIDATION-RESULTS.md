@@ -6473,3 +6473,40 @@ releases. The historical M8.5-C record above is untouched.
    engine file:line grounding, in the D2 recon memo
    (`docs/superpowers/recon/2026-07-16-d2-governed-write-recon.md`, docs
    worktree) — D2 owns closing both.
+
+## M8.5-D D2 A-minus live-proof extension — AUTHORED, NOT YET RUN (2026-07-17)
+
+This is a pre-live authoring checkpoint, **not evidence of operational PASS**.
+The M8.5-C A-F body remains byte-locked to its proven form; the runner appends
+BAR G and will claim `PROOF M8.5-C (BARS A-G) PASS` only after the full kind run
+exits zero.
+
+- **Composition root:** `build_runtime` now constructs and exposes an
+  `ApprovalAssignmentStore` and injects it into the same `ApprovalEngine` the
+  MCP host uses to mint requests. A real runtime regression seeds a 3-person
+  assignment and requires the mint to persist `flow=require_assigned` with
+  `required_count=3`; this closes the fixture-only wiring gap found by recon.
+- **Proof topology:** the eager approvals-router engine receives its own
+  assignment-store instance over the same Postgres database, so assignment
+  administration and lifespan minting observe one durable ledger without
+  pretending the two engines are one object.
+- **BAR G contract:** canonical `tool_identity` is read from Bar D's persisted
+  approval row; Omar's 3-person assignment must append exactly one
+  `approval.assignment_changed` row; the load-bearing flow/count/state witness
+  is read directly from `approval_requests`; Dana/Erin/Fiona must advance the
+  deployed detail wire through 1/3, 2/3, and 3/3 with exact chain order; the
+  first exact recall executes once and the second refuses
+  `tool_approval_consumed`; a temporarily scope-elevated but stable Amir subject
+  must be refused at both maker-checker indices, after which his exact normal
+  scope set is restored.
+- **Service-token precision:** the reference binder's locked grant profile maps
+  every accepted `cognic-harness` token to a human and accepts no service grant.
+  A route-level `service` Actor is therefore unreachable in this live topology.
+  BAR G instead sends the real client-credentials token from the kernel-to-MCP
+  plane and requires the exact binder refusal plus zero assignment-evidence
+  delta. `RequireHumanActor`'s service-Actor arm remains unit/e2e-proven; this
+  checkpoint does not relabel the earlier binder refusal as that route gate.
+- **Honesty boundary:** BAR G proves the direct-MCP A-minus surface only. It does
+  not prove conversation-correlated auto-execution or the appended system turn;
+  those require D5's externally authored action agent and released write pack.
+  No A-G log, digest, spend total, or live verdict exists at this checkpoint.
