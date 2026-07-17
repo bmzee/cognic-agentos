@@ -255,11 +255,15 @@ _CONVERSATION_SCOPES: Final = [
 #: load-bearing: sara's replay of amir's granted request cannot be explained
 #: away by a scope difference or by tenant invisibility.
 _ANALYST_SCOPES: Final = [*_CONVERSATION_SCOPES, "mcp.tool.list", "mcp.tool.invoke"]
-#: The four-eyes approvers. ``tool.approve.high_risk_custom`` is the tier the
+#: The approval humans. ``tool.approve.high_risk_custom`` is the tier the
 #: probe pack declares (spec §6); ``tool.approve.observe`` is what renders the
-#: queue. dana and erin are DISTINCT humans — ADR-014 four-eyes requires the
-#: second approver to differ from the first.
+#: queue. dana, erin, and fiona are DISTINCT humans — ADR-014 assigned approval
+#: can require all three, while the four-eyes compatibility flow uses two.
 _APPROVER_SCOPES: Final = ["tool.approve.high_risk_custom", "tool.approve.observe"]
+#: omar owns assignment administration but no tier approval authority. Keeping
+#: the scopes separate makes Bar G's human-only assignment mutation independent
+#: from its later three-approver decision sequence.
+_ASSIGNER_SCOPES: Final = ["tool.approve.assign", "tool.approve.observe"]
 
 IDENTITIES: Final[tuple[dict[str, Any], ...]] = (
     # --- SETUP identities: the governed operator pack lifecycle (M4 flow) -----
@@ -295,9 +299,13 @@ IDENTITIES: Final[tuple[dict[str, Any], ...]] = (
     {"username": "analyst.amir", "tenant": TENANT, "scopes": list(_ANALYST_SCOPES)},
     # sara: same tenant, same MCP invocation authority, DIFFERENT subject.
     {"username": "analyst.sara", "tenant": TENANT, "scopes": list(_ANALYST_SCOPES)},
-    # dana + erin: the two distinct four-eyes humans.
+    # dana + erin: the two distinct four-eyes compatibility humans.
     {"username": "approver.dana", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
     {"username": "approver.erin", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
+    # fiona: the third distinct reviewer for Bar G's assigned 3-of-3 flow.
+    {"username": "approver.fiona", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
+    # omar: assignment administrator, deliberately not a tier approver.
+    {"username": "assigner.omar", "tenant": TENANT, "scopes": list(_ASSIGNER_SCOPES)},
     # zara: fully-scoped reader in ANOTHER tenant. Carries tool.approve.observe so
     # her empty approvals queue proves tenant isolation rather than missing scope.
     {

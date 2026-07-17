@@ -233,7 +233,7 @@ def test_realm_users_are_profile_complete_and_have_no_required_actions() -> None
     deliberately refuses required-action detours, so profile completeness is part
     of the generated identity contract."""
     realm = _generate_realm()
-    assert len(realm["users"]) == 8
+    assert len(realm["users"]) == 10
     for user in realm["users"]:
         assert isinstance(user.get("firstName"), str) and user["firstName"]
         assert isinstance(user.get("lastName"), str) and user["lastName"]
@@ -388,7 +388,7 @@ def test_runner_identity_scopes_match_the_generated_realm() -> None:
         )
 
 
-def test_realm_carries_exactly_eight_identities_including_the_foreign_reader() -> None:
+def test_realm_carries_exactly_ten_identities_including_assignment_humans() -> None:
     realm = _generate_realm()
     usernames = {u["username"] for u in realm["users"]}
     assert usernames == {
@@ -399,12 +399,25 @@ def test_realm_carries_exactly_eight_identities_including_the_foreign_reader() -
         "analyst.sara",
         "approver.dana",
         "approver.erin",
+        "approver.fiona",
+        "assigner.omar",
         "analyst.zara",
     }
     zara = next(u for u in realm["users"] if u["username"] == "analyst.zara")
     assert zara["attributes"]["tenant_id"] == ["proof-foreign"], (
         "the foreign reader must be off-tenant"
     )
+
+    fiona = next(u for u in realm["users"] if u["username"] == "approver.fiona")
+    assert set(fiona["attributes"]["cognic_scopes"]) == {
+        "tool.approve.high_risk_custom",
+        "tool.approve.observe",
+    }
+    omar = next(u for u in realm["users"] if u["username"] == "assigner.omar")
+    assert set(omar["attributes"]["cognic_scopes"]) == {
+        "tool.approve.assign",
+        "tool.approve.observe",
+    }
 
 
 def test_amir_and_sara_are_scope_and_tenant_identical() -> None:

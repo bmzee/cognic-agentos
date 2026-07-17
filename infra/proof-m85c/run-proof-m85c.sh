@@ -307,11 +307,13 @@ PROBE_LEDGER_PATH="/var/probe/ledger"               # readable only by the runne
 declare -A IDENTITY_TENANT=(
   [author]=proof-m85c [reviewer]=proof-m85c [operator]=proof-m85c
   [amir]=proof-m85c [sara]=proof-m85c [dana]=proof-m85c [erin]=proof-m85c
+  [fiona]=proof-m85c [omar]=proof-m85c
   [zara]=proof-foreign
 )
 declare -A IDENTITY_USER=(
   [author]=proof-m85c-author [reviewer]=proof-m85c-reviewer [operator]=proof-m85c-operator
   [amir]=analyst.amir [sara]=analyst.sara [dana]=approver.dana [erin]=approver.erin
+  [fiona]=approver.fiona [omar]=assigner.omar
   [zara]=analyst.zara
 )
 # The EXACT cognic_scopes set each user's token must carry (CSV, for the claim
@@ -326,6 +328,8 @@ declare -A IDENTITY_SCOPES=(
   [sara]="conversation.create,conversation.read,conversation.post_turn,conversation.close,mcp.tool.list,mcp.tool.invoke"
   [dana]="tool.approve.high_risk_custom,tool.approve.observe"
   [erin]="tool.approve.high_risk_custom,tool.approve.observe"
+  [fiona]="tool.approve.high_risk_custom,tool.approve.observe"
+  [omar]="tool.approve.assign,tool.approve.observe"
   [zara]="conversation.create,conversation.read,conversation.post_turn,conversation.close,tool.approve.observe"
 )
 #: role -> cached Bearer access token (filled lazily by ensure_token()).
@@ -2445,7 +2449,7 @@ PROOF_CA="$PKI_TMP/proof-ca.pem"
 
 # The reference-binder CA the kernel pod mounts + verifies Keycloak against. It is
 # the SAME CA bytes as $PROOF_CA — one root of trust for the whole proof.
-echo "==> [2/11] generate the Keycloak realm (8 identities; locked grant profile; exact audience)"
+echo "==> [2/11] generate the Keycloak realm (10 identities; locked grant profile; exact audience)"
 KC_CRED_TMP="$(mktemp -d)"
 chmod 700 "$KC_CRED_TMP"
 python3 "$PROOF_DIR/keycloak/gen_realm.py" "$KC_CRED_TMP" "$BFF_REDIRECT_URI" "$DRIVER_REDIRECT_URI"
