@@ -4718,6 +4718,70 @@ def _bar_g_text() -> str:
     return _RUNNER_TEXT[start:end]
 
 
+def _kc_user_scope_program() -> str:
+    body = _extract_shell_function("kc_set_user_scope_set")
+    start_marker = "| python3 -c '\n"
+    end_marker = '\n\' "$scopes_csv" > "$rep_file"'
+    assert body.count(start_marker) == 1
+    assert body.count(end_marker) == 1
+    start = body.index(start_marker) + len(start_marker)
+    end = body.index(end_marker, start)
+    return body[start:end]
+
+
+def test_d2_bar_g_scope_update_accepts_keycloaks_omitted_empty_attributes() -> None:
+    source = _kc_user_scope_program()
+    representation = {
+        "id": "stable-user-id",
+        "username": "analyst.amir",
+        "enabled": True,
+    }
+    probe = subprocess.run(
+        ["python3", "-c", source, "conversation.read,tool.approve.high_risk_custom"],
+        input=json.dumps(representation),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert probe.returncode == 0, probe.stderr
+    updated = json.loads(probe.stdout)
+    assert updated == {
+        **representation,
+        "attributes": {"cognic_scopes": ["conversation.read", "tool.approve.high_risk_custom"]},
+    }
+
+
+def test_d2_bar_g_scope_update_preserves_attributes_and_refuses_wrong_shape() -> None:
+    source = _kc_user_scope_program()
+    valid = subprocess.run(
+        ["python3", "-c", source, "conversation.read"],
+        input=json.dumps(
+            {
+                "id": "stable-user-id",
+                "attributes": {"bank_unit": ["retail"]},
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert valid.returncode == 0, valid.stderr
+    assert json.loads(valid.stdout)["attributes"] == {
+        "bank_unit": ["retail"],
+        "cognic_scopes": ["conversation.read"],
+    }
+
+    malformed = subprocess.run(
+        ["python3", "-c", source, "conversation.read"],
+        input=json.dumps({"id": "stable-user-id", "attributes": []}),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert malformed.returncode != 0
+    assert "attributes object" in malformed.stderr
+
+
 def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
     assert hashlib.sha256(_bar_a_through_f_text().encode()).hexdigest() == (
         "92b3942a5b687c072988515f0b6ec6512a3969c5881d5fff342bb26ace778d0a"

@@ -859,7 +859,7 @@ kc_set_user_scope_set() {
     | python3 -c '
 import json, sys
 rep = json.load(sys.stdin)
-attrs = rep.get("attributes")
+attrs = rep.setdefault("attributes", {})
 if not isinstance(attrs, dict):
     raise SystemExit("user representation carries no attributes object")
 scopes = [scope for scope in sys.argv[1].split(",") if scope]
