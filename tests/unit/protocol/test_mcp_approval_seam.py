@@ -722,6 +722,114 @@ class TestWiredReCall:
             )
         assert consumed.value.reason == "approval_consumed"
 
+    async def test_executor_rebind_refuses_token_stamped_argument_drift_after_consume(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(_: Any) -> dict[str, Any]:
+            return {"q": "DRIFTED", "_cognic_action_context": "signed-token"}
+
+        with pytest.raises(RuntimeError, match=r"^executor approval claim binding mismatch$"):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-drifted-args",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=prepare,
+            )
+        http_transport.send.assert_not_awaited()
+
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="executor-drifted-args-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        http_transport.send.assert_not_awaited()
+
+    async def test_executor_rebind_refuses_missing_action_context_after_consume(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(_: Any) -> dict[str, Any]:
+            return {"q": "x"}
+
+        with pytest.raises(RuntimeError, match=r"^executor approval claim binding mismatch$"):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-missing-token",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=prepare,
+            )
+        http_transport.send.assert_not_awaited()
+
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="executor-missing-token-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        http_transport.send.assert_not_awaited()
+
     async def test_executor_task_local_claim_is_reset_after_dispatch_failure(
         self,
         host_module: Any,
