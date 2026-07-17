@@ -859,7 +859,7 @@ kc_set_user_scope_set() {
     | python3 -c '
 import json, sys
 rep = json.load(sys.stdin)
-attrs = rep.setdefault("attributes", {})
+attrs = rep.get("attributes")
 if not isinstance(attrs, dict):
     raise SystemExit("user representation carries no attributes object")
 scopes = [scope for scope in sys.argv[1].split(",") if scope]
@@ -876,6 +876,30 @@ print(json.dumps(rep))
   rm -f "$rep_file"
   [ "$code" = "204" ] \
     || bar_fail "Keycloak admin API refused the scope update for $username (HTTP $code)"
+  # Keycloak 26 returns 204 even when its user-profile policy silently ignores
+  # an unmanaged attribute. Re-read through Keycloak itself and require the
+  # exact scope SET plus the unchanged tenant claim source before treating the
+  # write as an observation. All failure messages are value-free.
+  kc_admin_get "$tok" "/admin/realms/$KC_ADMIN_REALM/users/$uuid" \
+    | python3 -c '
+import json, sys
+rep = json.load(sys.stdin)
+attrs = rep.get("attributes")
+if not isinstance(attrs, dict):
+    raise SystemExit("scope update is not observable through the managed profile")
+expected = [scope for scope in sys.argv[1].split(",") if scope]
+actual = attrs.get("cognic_scopes")
+if (
+    not isinstance(actual, list)
+    or any(not isinstance(scope, str) or not scope for scope in actual)
+    or len(actual) != len(set(actual))
+    or set(actual) != set(expected)
+):
+    raise SystemExit("scope update is not observable through the managed profile")
+if attrs.get("tenant_id") != [sys.argv[2]]:
+    raise SystemExit("tenant claim source changed during the scope update")
+' "$scopes_csv" "$TENANT" \
+    || bar_fail "Keycloak admin API did not persist the exact scope set for $username"
 }
 
 # kc_refresh_event_count — the INDEPENDENT observer for S6. Keycloak's own user-

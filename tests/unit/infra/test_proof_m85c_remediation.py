@@ -4718,19 +4718,19 @@ def _bar_g_text() -> str:
     return _RUNNER_TEXT[start:end]
 
 
-def _kc_user_scope_program() -> str:
+def _kc_user_scope_program(end_marker: str) -> str:
     body = _extract_shell_function("kc_set_user_scope_set")
     start_marker = "| python3 -c '\n"
-    end_marker = '\n\' "$scopes_csv" > "$rep_file"'
-    assert body.count(start_marker) == 1
     assert body.count(end_marker) == 1
-    start = body.index(start_marker) + len(start_marker)
-    end = body.index(end_marker, start)
+    end = body.index(end_marker)
+    start = body.rfind(start_marker, 0, end)
+    assert start >= 0
+    start += len(start_marker)
     return body[start:end]
 
 
-def test_d2_bar_g_scope_update_accepts_keycloaks_omitted_empty_attributes() -> None:
-    source = _kc_user_scope_program()
+def test_d2_bar_g_scope_update_refuses_missing_managed_attributes() -> None:
+    source = _kc_user_scope_program('\n\' "$scopes_csv" > "$rep_file"')
     representation = {
         "id": "stable-user-id",
         "username": "analyst.amir",
@@ -4743,16 +4743,12 @@ def test_d2_bar_g_scope_update_accepts_keycloaks_omitted_empty_attributes() -> N
         text=True,
         timeout=10,
     )
-    assert probe.returncode == 0, probe.stderr
-    updated = json.loads(probe.stdout)
-    assert updated == {
-        **representation,
-        "attributes": {"cognic_scopes": ["conversation.read", "tool.approve.high_risk_custom"]},
-    }
+    assert probe.returncode != 0
+    assert "attributes object" in probe.stderr
 
 
 def test_d2_bar_g_scope_update_preserves_attributes_and_refuses_wrong_shape() -> None:
-    source = _kc_user_scope_program()
+    source = _kc_user_scope_program('\n\' "$scopes_csv" > "$rep_file"')
     valid = subprocess.run(
         ["python3", "-c", source, "conversation.read"],
         input=json.dumps(
@@ -4780,6 +4776,65 @@ def test_d2_bar_g_scope_update_preserves_attributes_and_refuses_wrong_shape() ->
     )
     assert malformed.returncode != 0
     assert "attributes object" in malformed.stderr
+
+
+def test_d2_bar_g_scope_update_requires_exact_admin_api_readback() -> None:
+    source = _kc_user_scope_program('\n\' "$scopes_csv" "$TENANT"')
+    expected_scopes = "conversation.read,tool.approve.high_risk_custom"
+    valid = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-m85c"],
+                    "cognic_scopes": [
+                        "tool.approve.high_risk_custom",
+                        "conversation.read",
+                    ],
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    ignored = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-m85c"],
+                    "cognic_scopes": ["conversation.read"],
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert ignored.returncode != 0
+    assert "scope update is not observable" in ignored.stderr
+    assert "conversation.read" not in ignored.stderr
+
+    wrong_tenant = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-foreign"],
+                    "cognic_scopes": expected_scopes.split(","),
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert wrong_tenant.returncode != 0
+    assert "tenant claim source changed" in wrong_tenant.stderr
+    assert "proof-foreign" not in wrong_tenant.stderr
 
 
 def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:

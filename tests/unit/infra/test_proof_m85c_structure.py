@@ -292,6 +292,37 @@ def test_realm_emits_cognic_scopes_as_a_multivalued_array() -> None:
     )
 
 
+def test_realm_manages_identity_claim_sources_for_admin_updates() -> None:
+    """Keycloak 26 ignores unmanaged attributes in Admin REST by default.
+
+    Bar G temporarily changes Amir's approval scope through that API, so both
+    mapper source attributes must be explicit, admin-only managed attributes.
+    The disabled unmanaged-attribute posture is represented by omitting the
+    optional policy key; Keycloak 26.2 rejects the literal ``DISABLED`` value.
+    """
+    realm = _generate_realm()
+    providers = realm["components"]["org.keycloak.userprofile.UserProfileProvider"]
+    assert len(providers) == 1
+    provider = providers[0]
+    assert provider["providerId"] == "declarative-user-profile"
+    assert provider["subComponents"] == {}
+
+    encoded = provider["config"]["kc.user.profile.config"]
+    assert isinstance(encoded, list) and len(encoded) == 1
+    profile = json.loads(encoded[0])
+    assert "unmanagedAttributePolicy" not in profile
+    attributes = {item["name"]: item for item in profile["attributes"]}
+    assert {"username", "email", "firstName", "lastName", "tenant_id", "cognic_scopes"} == set(
+        attributes
+    )
+    for name, multivalued in (("tenant_id", False), ("cognic_scopes", True)):
+        assert attributes[name]["permissions"] == {
+            "view": ["admin"],
+            "edit": ["admin"],
+        }
+        assert attributes[name]["multivalued"] is multivalued
+
+
 # --- the live session-case realm levers (lifespan override + event log) ------------
 
 
