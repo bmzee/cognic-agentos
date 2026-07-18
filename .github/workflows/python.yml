@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      run_credential_free_kind_lanes:
+        description: Run the credential-free kind smoke and Proof 1b-2 lanes
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -691,7 +698,12 @@ jobs:
     name: kind Ready-smoke (env-gated)
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    if: ${{ vars.COGNIC_RUN_KIND_SMOKE == '1' || github.event_name == 'workflow_dispatch' }}
+    if: >-
+      ${{
+        inputs.run_credential_free_kind_lanes == true ||
+        vars.COGNIC_RUN_KIND_SMOKE == '1' ||
+        github.event_name == 'workflow_dispatch'
+      }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -705,16 +717,22 @@ jobs:
   proof-1b-2:
     # Proof 1b-2 — deployed governed MCP invocation loop (Bar 1 carve-out
     # checkpoint + Bar 2 full list_tools/call_tool loop) in a `kind` cluster.
-    # NEVER default-on: this job runs ONLY when the repo var
-    # COGNIC_RUN_PROOF_1B2 == '1' OR on a manual workflow_dispatch — it rebuilds
-    # the pack wheel, stages the trust inputs, builds FOUR images, spins kind, and
-    # brings up a live Vault + Postgres, far too heavy for every PR. Mirrors the
-    # env-gated `kind-smoke` job above. timeout-minutes is 40 (vs the smoke's 25):
-    # 4 image builds + kind + the Bar 1 / Bar 2 sequence is heavier.
+    # NEVER default-on for push/PR: this job runs only when the repo var
+    # COGNIC_RUN_PROOF_1B2 == '1', on a manual workflow_dispatch, or through the
+    # nightly reusable-workflow input. It rebuilds the pack wheel, stages the
+    # trust inputs, builds FOUR images, spins kind, and brings up a live Vault +
+    # Postgres, far too heavy for every PR. Mirrors the env-gated `kind-smoke`
+    # job above. timeout-minutes is 40 (vs the smoke's 25): 4 image builds + kind
+    # + the Bar 1 / Bar 2 sequence is heavier.
     name: Proof 1b-2 deployed MCP loop (env-gated)
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    if: ${{ vars.COGNIC_RUN_PROOF_1B2 == '1' || github.event_name == 'workflow_dispatch' }}
+    if: >-
+      ${{
+        inputs.run_credential_free_kind_lanes == true ||
+        vars.COGNIC_RUN_PROOF_1B2 == '1' ||
+        github.event_name == 'workflow_dispatch'
+      }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -787,9 +805,9 @@ jobs:
           syft version
           grype version
       - name: Run the Proof 1b-2 deployed MCP loop (Bar 1 checkpoint + Bar 2 completion)
-        # TWO gates, BOTH required: the GitHub `vars.COGNIC_RUN_PROOF_1B2` (the job
-        # `if` above) gates the JOB; this ENV COGNIC_RUN_PROOF_1B2=1 enables the
-        # RUNNER (it self-gates on the ENV var and exits 0 cleanly if unset —
-        # run-proof-1b-2.sh:23-26). A bare `bash …` would run the job but the runner
-        # would silently exit 0 (skip the proof).
+        # TWO gates, BOTH required: the job `if` above requires an explicit repo-
+        # variable, manual, or reusable-workflow selector; this ENV
+        # COGNIC_RUN_PROOF_1B2=1 enables the RUNNER (it self-gates on the ENV var
+        # and exits 0 cleanly if unset — run-proof-1b-2.sh:23-26). A bare
+        # `bash …` would run the job but the runner would silently exit 0.
         run: COGNIC_RUN_PROOF_1B2=1 bash infra/proof-1b-2/run-proof-1b-2.sh
