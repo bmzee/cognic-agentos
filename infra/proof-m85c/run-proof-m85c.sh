@@ -196,8 +196,10 @@ PACK_WHEEL="cognic_tool_oracle_schema-0.5.1-py3-none-any.whl"
 # External Secrets is chart- and image-pinned independently. All three chart
 # workloads use this one multi-platform image digest.
 ESO_CHART_VERSION="2.7.0"
-ESO_IMAGE_TAG="v2.7.0@sha256:6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
 ESO_IMAGE="ghcr.io/external-secrets/external-secrets:v2.7.0@sha256:6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
+ESO_LOCAL_REPOSITORY="cognic-proof-eso"
+ESO_LOCAL_TAG="v2.7.0-pinned"
+ESO_LOCAL_IMAGE="$ESO_LOCAL_REPOSITORY:$ESO_LOCAL_TAG"
 ORACLE_APP_PASSWORD=""
 
 # ---- The approval-probe pack's trust pins (Bar D drives the probe) ----------------
@@ -447,14 +449,14 @@ _backend_images() {
 
 # Extra (non-backend) images the proof references with imagePullPolicy: IfNotPresent —
 # pre-pulled + kind-loaded so the kind node never reaches the internet for them:
-# Oracle Free + ESO + busybox (oracle-pack wait-for-db + topology-perms init) +
+# Oracle Free + busybox (oracle-pack wait-for-db + topology-perms init) +
 # redis (the scheduler control plane) + registry:2 (the local TLS registry) +
 # the OTLP collector (inherited diagnostics — ruling R6: NO M8.5 bar depends
-# on spans; manifests/otel-collector.yaml).
+# on spans; manifests/otel-collector.yaml). ESO is handled separately: kind's
+# manifest-list import needs a digest-verified local alias (see step 4).
 _extra_images() {
   printf '%s\n' \
     "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8" \
-    "$ESO_IMAGE" \
     "busybox:1.36" "redis:7.4-alpine" "registry:2" \
     "otel/opentelemetry-collector:0.111.0"
 }
@@ -2884,6 +2886,20 @@ while IFS= read -r _img; do
   docker_pull_with_retry "$_img"
 done < <(_backend_images; _extra_images)
 
+# Docker Desktop 28 + kind/containerd cannot reliably run a manifest-list
+# digest imported by `kind load`: it may retain a transient `import-<date>`
+# checkpoint reference and every pod then dies CreateContainerError. Preserve
+# the immutable source pin, create one proof-local alias of those exact bytes,
+# and later force the chart to that preloaded alias with pullPolicy=Never.
+echo "  docker pull $ESO_IMAGE"
+docker_pull_with_retry "$ESO_IMAGE"
+docker tag "$ESO_IMAGE" "$ESO_LOCAL_IMAGE"
+ESO_SOURCE_ID="$(docker image inspect --format '{{.Id}}' "$ESO_IMAGE")"
+ESO_ALIAS_ID="$(docker image inspect --format '{{.Id}}' "$ESO_LOCAL_IMAGE")"
+[ -n "$ESO_SOURCE_ID" ] && [ "$ESO_SOURCE_ID" = "$ESO_ALIAS_ID" ] \
+  || die "ESO digest-to-local-alias byte identity check failed"
+echo "  ESO digest-pinned source and proof-local alias share image id $ESO_SOURCE_ID"
+
 echo "==> [4/11] create the kind cluster with the sandbox topology (docker sock + broker share)"
 kind create cluster --name "$CLUSTER" --config "$PROOF_DIR/kind-config.yaml"
 
@@ -2900,6 +2916,9 @@ while IFS= read -r _img; do
   echo "  kind load $_img"
   kind load docker-image "$_img" --name "$CLUSTER"
 done < <(_backend_images; _extra_images)
+
+echo "==> [4/11] kind load the digest-verified ESO proof-local alias"
+kind load docker-image "$ESO_LOCAL_IMAGE" --name "$CLUSTER"
 
 # --- 4b. local TLS registry + canonical re-home (pull->push->sign->digest-pin) -----
 # The M6 executable-skill posture deploys UNCHANGED, so the canonical trust
@@ -3020,19 +3039,36 @@ echo "  Keycloak Available"
 echo "==> [6/11] seed Vault, then materialize the Oracle app credential through ESO"
 ORACLE_APP_PASSWORD="$ORACLE_APP_PASSWORD" NS="$NS" bash "$PROOF_DIR/seed-vault.sh"
 
-# The chart version and every workload image are immutable. The dev-root token
-# is proof posture only: read it from the deployed Vault workload, write it with
-# a shell builtin into the existing private per-run directory, and let kubectl
-# read the file so no token value enters argv.
+# The chart version is pinned. Every ESO workload uses the proof-local alias
+# whose bytes were checked against the manifest-list digest before cluster
+# creation; pullPolicy=Never makes the node's preloaded bytes the only source.
+# The dev-root token is proof posture only: read it from the deployed Vault
+# workload, write it with a shell builtin into the existing private per-run
+# directory, and let kubectl read the file so no token value enters argv.
 helm repo add external-secrets https://charts.external-secrets.io --force-update >/dev/null
+set +e
 helm upgrade --install external-secrets external-secrets/external-secrets \
   --namespace "$NS" \
   --version "$ESO_CHART_VERSION" \
   --set installCRDs=true \
-  --set-string image.tag="$ESO_IMAGE_TAG" \
-  --set-string webhook.image.tag="$ESO_IMAGE_TAG" \
-  --set-string certController.image.tag="$ESO_IMAGE_TAG" \
+  --set-string image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string image.tag="$ESO_LOCAL_TAG" \
+  --set image.pullPolicy=Never \
+  --set-string webhook.image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string webhook.image.tag="$ESO_LOCAL_TAG" \
+  --set webhook.image.pullPolicy=Never \
+  --set-string certController.image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string certController.image.tag="$ESO_LOCAL_TAG" \
+  --set certController.image.pullPolicy=Never \
   --wait --timeout=300s
+ESO_HELM_RC=$?
+set -e
+if [ "$ESO_HELM_RC" -ne 0 ]; then
+  kubectl -n "$NS" get pods -l app.kubernetes.io/instance=external-secrets \
+    -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,WAITING:.status.containerStatuses[0].state.waiting.reason \
+    >&2 || true
+  die "External Secrets chart did not become Ready (helm rc=$ESO_HELM_RC)"
+fi
 ESO_VAULT_TOKEN="$(kubectl -n "$NS" get deploy/vault \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="VAULT_DEV_ROOT_TOKEN_ID")].value}')"
 [ -n "$ESO_VAULT_TOKEN" ] || die "deployed Vault carries no dev-token value for the proof SecretStore"

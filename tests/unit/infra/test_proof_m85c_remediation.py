@@ -1057,6 +1057,18 @@ def test_d3_runner_pins_eso_and_materializes_before_oracle_deploy() -> None:
     )
     assert 'ESO_CHART_VERSION="2.7.0"' in _RUNNER_TEXT
     assert f'ESO_IMAGE="{eso_image}"' in _RUNNER_TEXT
+    assert 'ESO_LOCAL_REPOSITORY="cognic-proof-eso"' in _RUNNER_TEXT
+    assert 'ESO_LOCAL_TAG="v2.7.0-pinned"' in _RUNNER_TEXT
+    assert 'ESO_LOCAL_IMAGE="$ESO_LOCAL_REPOSITORY:$ESO_LOCAL_TAG"' in _RUNNER_TEXT
+    assert 'docker tag "$ESO_IMAGE" "$ESO_LOCAL_IMAGE"' in _RUNNER_TEXT
+    assert 'ESO_SOURCE_ID="$(docker image inspect --format \'{{.Id}}\' "$ESO_IMAGE")"' in (
+        _RUNNER_TEXT
+    )
+    assert 'ESO_ALIAS_ID="$(docker image inspect --format \'{{.Id}}\' "$ESO_LOCAL_IMAGE")"' in (
+        _RUNNER_TEXT
+    )
+    assert '[ "$ESO_SOURCE_ID" = "$ESO_ALIAS_ID" ]' in _RUNNER_TEXT
+    assert 'kind load docker-image "$ESO_LOCAL_IMAGE" --name "$CLUSTER"' in _RUNNER_TEXT
     assert 'ORACLE_APP_PASSWORD="$(openssl rand -hex 24)"' in _RUNNER_TEXT
     assert 'ORACLE_APP_PASSWORD="$ORACLE_APP_PASSWORD" NS="$NS" bash' in _RUNNER_TEXT
     assert "create secret generic proof-vault-token" in _RUNNER_TEXT
@@ -1065,7 +1077,10 @@ def test_d3_runner_pins_eso_and_materializes_before_oracle_deploy() -> None:
     assert '--version "$ESO_CHART_VERSION"' in _RUNNER_TEXT
     assert '--namespace "$NS"' in _RUNNER_TEXT
     assert "--set installCRDs=true" in _RUNNER_TEXT
-    assert eso_image in _RUNNER_TEXT
+    for component in ("image", "webhook.image", "certController.image"):
+        assert f'--set-string {component}.repository="$ESO_LOCAL_REPOSITORY"' in _RUNNER_TEXT
+        assert f'--set-string {component}.tag="$ESO_LOCAL_TAG"' in _RUNNER_TEXT
+        assert f"--set {component}.pullPolicy=Never" in _RUNNER_TEXT
     assert "condition=Ready externalsecret/oracle-app-credential" in _RUNNER_TEXT
     assert _RUNNER_TEXT.index("condition=Ready externalsecret/oracle-app-credential") < (
         _RUNNER_TEXT.index("manifests/oracle-db.yaml")
