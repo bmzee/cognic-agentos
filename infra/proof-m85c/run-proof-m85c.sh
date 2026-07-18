@@ -5823,7 +5823,7 @@ H_QUERY1="$(governed_rotation_query amir)"
 IFS=$'\t' read -r H_RUN1 H_WIRE_REF1 <<<"$H_QUERY1"
 [ -n "$H_RUN1" ] && [ -n "$H_WIRE_REF1" ] \
   || bar_fail "BAR H.1 governed query returned no run/reference pair"
-H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload ? 'credential_rotation_ref' ORDER BY sequence DESC LIMIT 1;")"
+H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
 [ -n "$H_CHAIN_REF1" ] \
   || bar_fail "BAR H.1 the governed run carried no credential rotation reference in chain evidence"
 [ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ] \
@@ -5903,7 +5903,7 @@ H_QUERY2="$(governed_rotation_query amir)"
 IFS=$'\t' read -r H_RUN2 H_WIRE_REF2 <<<"$H_QUERY2"
 [ -n "$H_RUN2" ] && [ -n "$H_WIRE_REF2" ] \
   || bar_fail "BAR H.3 post-rotation query returned no run/reference pair"
-H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload ? 'credential_rotation_ref' ORDER BY sequence DESC LIMIT 1;")"
+H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
 [ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ] \
   || bar_fail "BAR H.3 post-rotation wire and chain references differ"
 [ "$H_WIRE_REF2" != "$H_WIRE_REF1" ] \

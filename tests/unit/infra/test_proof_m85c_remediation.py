@@ -5081,6 +5081,8 @@ def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
     assert "conv_turn" in helper
     assert "CREDENTIAL_ROTATION_REF=" in helper
     assert "payload->>'credential_rotation_ref'" in bar
+    assert bar.count("payload->>'credential_rotation_ref' IS NOT NULL") == 2
+    assert "payload ? 'credential_rotation_ref'" not in bar
     assert "event_type='agent.run.dispatch'" in bar
     assert "payload->>'capability_ref'='$PACK_ID/run_readonly_query'" in bar
     assert "payload->>'tool_name'='run_readonly_query'" not in bar
