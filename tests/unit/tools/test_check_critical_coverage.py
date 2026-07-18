@@ -195,7 +195,7 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: non-authoritative cursors, the bounded index-addressable chain join, and
 #: the corruption-vs-projection-limit taxonomy) promoted to the gate = 152.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 152
+_EXPECTED_ENTRY_COUNT = 156
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -916,6 +916,37 @@ _SPRINT_13_5A_GATE_MODULES = (
     "src/cognic_agentos/core/approval/storage.py",
     "src/cognic_agentos/core/approval/policy.py",
 )
+
+_M85D_D2_PHASE_A_GATE_MODULES = ("src/cognic_agentos/core/approval/assignments.py",)
+
+_M85D_D2_PHASE_B_GATE_MODULES = ("src/cognic_agentos/core/approval/replay.py",)
+
+_M85D_D2_PHASE_C_GATE_MODULES = (
+    "src/cognic_agentos/core/agent/action_context.py",
+    "src/cognic_agentos/core/approval/executor.py",
+)
+
+
+def test_m85d_d2_phase_a_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    assert by_path[_M85D_D2_PHASE_A_GATE_MODULES[0]] == (0.95, 0.90)
+
+
+def test_m85d_d2_phase_b_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    assert by_path[_M85D_D2_PHASE_B_GATE_MODULES[0]] == (0.95, 0.90)
+
+
+def test_m85d_d2_phase_c_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _M85D_D2_PHASE_C_GATE_MODULES:
+        assert by_path[module] == (0.95, 0.90)
 
 
 def test_sprint_13_5a_modules_present_with_standard_floors(

@@ -1485,6 +1485,44 @@ class TestM8A5A6AgentSettings:
         s = build_settings_without_env_file()
         assert s.agent_query_context_ttl_s == 120.0
 
+    def test_action_context_and_executor_defaults(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.action_context_signing_key_path is None
+        assert s.action_context_ttl_s == 120.0
+        assert s.approval_executor_grace_s == 30.0
+
+    def test_action_context_key_relative_fixture_path_in_prod_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                action_context_signing_key_path="tests/fixtures/action.pem",
+            )
+        assert "action_context_signing_key_path_under_test_fixture_tree_in_prod" in str(
+            excinfo.value
+        )
+
+    def test_action_context_key_vault_uri_in_prod_allowed(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            action_context_signing_key_path="vault://secret/cognic/action-context/prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
+        assert s.action_context_signing_key_path == "vault://secret/cognic/action-context/prod"
+
     def test_agent_query_context_key_relative_fixture_path_in_prod_rejected(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

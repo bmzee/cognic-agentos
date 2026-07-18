@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from cognic_agentos.core.agent._types import (
     AgentDispatchRefusalReason,
@@ -76,6 +76,30 @@ class _StoreLike(Protocol):
         self, conversation_id: uuid.UUID, *, tenant_id: str, last_n: int
     ) -> list[TurnRecord]: ...
 
+    async def resolve_approval_context(
+        self,
+        *,
+        approval_request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[uuid.UUID, str] | None: ...
+
+    async def claim_system_turn(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        now: datetime,
+        claim_ttl_s: float,
+    ) -> TurnClaim: ...
+
+    async def next_turn_seq(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        claim_id: uuid.UUID,
+    ) -> int: ...
+
     async def append_turn(
         self,
         *,
@@ -87,6 +111,20 @@ class _StoreLike(Protocol):
         agent_run_id: str,
         prompt_tokens: int,
         completion_tokens: int,
+        actor_id: str,
+        request_id: str,
+        claim_id: uuid.UUID,
+        approval_request_id: str | None = None,
+        turn_kind: Literal["exchange", "system"] = "exchange",
+    ) -> uuid.UUID: ...
+
+    async def append_system_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        text: str,
+        approval_request_id: str,
         actor_id: str,
         request_id: str,
         claim_id: uuid.UUID,
@@ -124,6 +162,7 @@ class TurnResult:
     agent_run_id: str
     terminal_state: AgentRunTerminalState
     refusal_reason: AgentDispatchRefusalReason | None
+    approval_request_id: str | None = None
 
 
 class ConversationTurnExecutor:
@@ -219,7 +258,11 @@ class ConversationTurnExecutor:
 
             # 5. Persist + chain row (digest-only). append_turn returns the
             #    turn_id it actually inserted -- surface THAT, never a fresh uuid.
-            seq = record.turn_count + 1
+            seq = await self._store.next_turn_seq(
+                conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim.claim_id,
+            )
             turn_id = await self._store.append_turn(
                 conversation_id=conversation_id,
                 tenant_id=tenant_id,
@@ -232,6 +275,8 @@ class ConversationTurnExecutor:
                 actor_id=actor_subject,
                 request_id=f"{_TURN_REQUEST_ID_PREFIX}{uuid.uuid4().hex}",
                 claim_id=claim.claim_id,
+                approval_request_id=result.approval_request_id,
+                turn_kind="exchange",
             )
             return TurnResult(
                 turn_id=turn_id,
@@ -240,6 +285,7 @@ class ConversationTurnExecutor:
                 agent_run_id=result.run_id,
                 terminal_state=result.terminal_state,
                 refusal_reason=result.refusal_reason,
+                approval_request_id=result.approval_request_id,
             )
         finally:
             # 6. Always release OUR OWN lease (fenced by claim_id): if the claim
@@ -249,3 +295,53 @@ class ConversationTurnExecutor:
             await self._store.release_claim(
                 conversation_id, tenant_id=tenant_id, claim_id=claim.claim_id
             )
+
+    async def post_system_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        text: str,
+        approval_request_id: str,
+        actor_id: str = "system:approval-executor",
+        request_id: str,
+    ) -> uuid.UUID:
+        """Append an approval outcome without consuming model-turn budgets.
+
+        The system writer uses the same database-backed claim and fencing token
+        as a user turn, so it cannot interleave with an in-flight model call.
+        """
+        claim = await self._store.claim_system_turn(
+            conversation_id,
+            tenant_id=tenant_id,
+            now=self._clock(),
+            claim_ttl_s=self._claim_ttl_s,
+        )
+        try:
+            return await self._store.append_system_turn(
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                text=text,
+                approval_request_id=approval_request_id,
+                actor_id=actor_id,
+                request_id=request_id,
+                claim_id=claim.claim_id,
+            )
+        finally:
+            await self._store.release_claim(
+                conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim.claim_id,
+            )
+
+    async def resolve_approval_context(
+        self,
+        *,
+        approval_request_id: uuid.UUID,
+        tenant_id: str,
+    ) -> tuple[uuid.UUID, str] | None:
+        """Delegate the tenant-scoped approval-to-conversation lookup."""
+        return await self._store.resolve_approval_context(
+            approval_request_id=approval_request_id,
+            tenant_id=tenant_id,
+        )

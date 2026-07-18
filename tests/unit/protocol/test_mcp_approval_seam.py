@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 import typing
 import uuid
@@ -12,18 +13,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalTransitionRefused,
+)
 from cognic_agentos.core.approval.engine import ApprovalEngine
+from cognic_agentos.core.approval.replay import ApprovalReplayStore
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
 from cognic_agentos.core.audit import AuditStore
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
 
 
-def test_tool_invocation_refusal_reason_has_exactly_ten_values() -> None:
+def test_tool_invocation_refusal_reason_has_exactly_eleven_values() -> None:
     # Wire-protocol-public vocabulary (spec §4; M5 added the three DLP
-    # pre-invocation reasons; HP-4 added the originator mismatch).
+    # pre-invocation reasons; HP-4 added the originator mismatch; D2 phase B
+    # adds the single-use consumed conflict).
     # Drift-pinned: adding or removing a value fails here until the
     # spec/ADR amendment moves with it.
     from cognic_agentos.protocol.mcp_host import ToolInvocationRefusalReason
@@ -34,6 +41,7 @@ def test_tool_invocation_refusal_reason_has_exactly_ten_values() -> None:
         "tool_approval_denied",
         "tool_approval_expired",
         "tool_approval_binding_mismatch",
+        "tool_approval_consumed",
         "tool_approval_originator_mismatch",
         "tool_approval_request_not_found",
         "dlp_pre_refused",
@@ -283,6 +291,15 @@ class TestWiredFirstCall:
         # the pending request actually persisted (engine path, not a stub)
         detail = await store.load_detail(request_id=rid, tenant_id="t-1")
         assert detail is not None and detail.state == "pending"
+        approved_bytes = canonical_bytes({"q": "x"})
+        assert detail.args_digest == hashlib.sha256(approved_bytes).digest()
+        assert (
+            await ApprovalReplayStore(store._engine).load(
+                request_id=rid,
+                tenant_id="t-1",
+            )
+            == approved_bytes
+        )
         # Envelope-sourcing pin (spec §3.3): the persisted detail carries the
         # sanitized human-readable pair in redacted_context (what the 13.5b1
         # portal reviewer panel shows), bounded by the cap, while
@@ -292,6 +309,10 @@ class TestWiredFirstCall:
         assert "lookup" in detail.redacted_context
         assert len(detail.redacted_context) <= APPROVAL_REDACTED_CONTEXT_MAX_LEN
         assert detail.tool_identity.startswith("mcp:")
+        assert detail.required_refs == {
+            "mcp_server_id": entry.server_id,
+            "mcp_tool_name": "lookup",
+        }
         # gate fired BEFORE token-acquire + session-open (T10 sequencing kept)
         authz.acquire_token.assert_not_awaited()
         http_transport.open_session.assert_not_awaited()
@@ -416,7 +437,11 @@ class TestWiredFirstCall:
         rid = uuid.UUID(exc_info.value.payload["approval_request_id"])
         detail = await store.load_detail(request_id=rid, tenant_id="t-1")
         assert detail is not None
-        assert detail.required_refs == {"audit_record_ref": "r-reg-1"}
+        assert detail.required_refs == {
+            "audit_record_ref": "r-reg-1",
+            "mcp_server_id": entry.server_id,
+            "mcp_tool_name": "notify",
+        }
 
     async def test_empty_originator_routes_errored_not_refused(
         self,
@@ -501,13 +526,17 @@ class TestWiredFirstCall:
 # ---------------------------------------------------------------------------
 
 
-def _approver(subject: str = "rev@bank.example") -> Any:
+def _approver(
+    subject: str = "rev@bank.example",
+    *,
+    scope: str = "tool.approve.customer_data",
+) -> Any:
     from cognic_agentos.core.approval._types import ApprovalActor
 
     return ApprovalActor(
         subject=subject,
         tenant_id="t-1",
-        scopes=frozenset({"tool.approve.customer_data"}),
+        scopes=frozenset({scope}),
         actor_type="human",
     )
 
@@ -559,10 +588,22 @@ class TestWiredReCall:
             originator_subject="agent-1",
             approval_request_id=rid,
         )
-        # Same-function identity pin (behavioural): create + verify both used
+        # Same-function identity pin (behavioural): create + consume both used
         # _canonical_tool_identity — a divergent recompute would have refused
         # tool_approval_binding_mismatch here instead of dispatching.
         assert result.payload == {"content": "ok"}
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r12",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        assert http_transport.send.await_count == 1
         # No-double-emission pin (spec §3.6 guard arm): the FIRST call emitted
         # exactly one refused row + zero errored rows for its request_id.
         # NOTE: request_id is an AuditEvent ATTRIBUTE (mcp_host.py:1712), not a
@@ -570,6 +611,279 @@ class TestWiredReCall:
         rows = [c.args[0] for c in audit_store.append.await_args_list]
         r10_rows = [e for e in rows if e.request_id == "r10"]
         assert [e.event_type for e in r10_rows] == ["audit.tool_invocation_refused"]
+
+    async def test_executor_entrypoint_claims_then_dispatches_stamped_stored_shape(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(result: Any) -> dict[str, Any]:
+            assert result.args_digest == hashlib.sha256(canonical_bytes({"q": "x"})).digest()
+            return {"q": "x", "_cognic_action_context": "signed-token"}
+
+        result = await host.execute_consumed_action(
+            server_id=entry.server_id,
+            tool_name="lookup",
+            request_id="executor-1",
+            tenant_id="t-1",
+            originator_subject="agent-1",
+            approval_request_id=rid,
+            prepare_arguments=prepare,
+        )
+        assert result.payload == {"content": "ok"}
+        assert http_transport.send.await_count == 1
+        sent = http_transport.send.await_args.args[1]
+        assert sent.arguments == {"q": "x", "_cognic_action_context": "signed-token"}
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="executor-2",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+
+    async def test_executor_entrypoint_consumes_before_replay_loader_and_never_dispatches_on_drift(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        from cognic_agentos.core.approval.replay import ApprovalReplayUnavailable
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def drift(_: Any) -> dict[str, Any]:
+            raise ApprovalReplayUnavailable("replay_digest_mismatch")
+
+        with pytest.raises(ApprovalReplayUnavailable):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-drift",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=drift,
+            )
+        http_transport.send.assert_not_awaited()
+        row = await store.load(request_id=rid, tenant_id="t-1")
+        assert row is not None
+        with pytest.raises(ApprovalTransitionRefused) as consumed:
+            await engine.consume_grant_for_action(
+                request_id=rid,
+                tenant_id="t-1",
+                expected_args_digest=row.args_digest,
+                expected_tool_identity=row.tool_identity,
+                expected_originator_subject=row.originator_subject,
+                consumed_by="executor-second",
+            )
+        assert consumed.value.reason == "approval_consumed"
+
+    async def test_executor_rebind_refuses_token_stamped_argument_drift_after_consume(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(_: Any) -> dict[str, Any]:
+            return {"q": "DRIFTED", "_cognic_action_context": "signed-token"}
+
+        with pytest.raises(RuntimeError, match=r"^executor approval claim binding mismatch$"):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-drifted-args",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=prepare,
+            )
+        http_transport.send.assert_not_awaited()
+
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="executor-drifted-args-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        http_transport.send.assert_not_awaited()
+
+    async def test_executor_rebind_refuses_missing_action_context_after_consume(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(_: Any) -> dict[str, Any]:
+            return {"q": "x"}
+
+        with pytest.raises(RuntimeError, match=r"^executor approval claim binding mismatch$"):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-missing-token",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=prepare,
+            )
+        http_transport.send.assert_not_awaited()
+
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="executor-missing-token-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        http_transport.send.assert_not_awaited()
+
+    async def test_executor_task_local_claim_is_reset_after_dispatch_failure(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+
+        async def prepare(_: Any) -> dict[str, Any]:
+            return {"q": "x", "_cognic_action_context": "signed-token"}
+
+        http_transport.send.side_effect = RuntimeError("send failed")
+        with pytest.raises(RuntimeError, match="send failed"):
+            await host.execute_consumed_action(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                request_id="executor-failed",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+                prepare_arguments=prepare,
+            )
+
+        http_transport.send.side_effect = None
+        http_transport.send.return_value = {"content": "ok"}
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="ordinary-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
 
     async def test_different_originator_recall_refuses_originator_mismatch(
         self,
@@ -642,7 +956,7 @@ class TestWiredReCall:
             assert subject not in refused_payload, f"{subject!r} leaked into the evidence row"
             assert subject not in logged, f"{subject!r} leaked into a log record"
 
-    async def test_verify_receives_the_route_originator_exactly(
+    async def test_consume_receives_route_originator_and_request_id_exactly(
         self,
         host_module: Any,
         http_transport: MagicMock,
@@ -660,7 +974,7 @@ class TestWiredReCall:
         from cognic_agentos.core.approval._types import ApprovalTransitionRefused
 
         engine = MagicMock()
-        engine.verify_grant_for_action = AsyncMock(
+        engine.consume_grant_for_action = AsyncMock(
             side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
         )
         entry = _entry(host_module)
@@ -686,8 +1000,67 @@ class TestWiredReCall:
                 approval_request_id=rid,
             )
         assert exc_info.value.reason == "tool_approval_originator_mismatch"
-        kwargs = engine.verify_grant_for_action.await_args.kwargs
+        kwargs = engine.consume_grant_for_action.await_args.kwargs
         assert kwargs["expected_originator_subject"] == "analyst.exact-forwarding"
+        assert kwargs["consumed_by"] == "r14"
+
+    async def test_bar_d_four_eyes_walk_dispatches_exactly_once(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_4_eyes")
+        entry = _entry(host_module, risk_tier="payment_action")
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        payment_scope = "tool.approve.payment"
+        await engine.grant(
+            request_id=rid,
+            tenant_id="t-1",
+            approver=_approver("approver.dana", scope=payment_scope),
+        )
+        with pytest.raises(host_module.MCPToolInvocationRefused) as pending:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="bar-d-first-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert pending.value.reason == "tool_approval_pending"
+        await engine.grant_second(
+            request_id=rid,
+            tenant_id="t-1",
+            approver=_approver("approver.erin", scope=payment_scope),
+        )
+        result = await host.call_tool(
+            server_id=entry.server_id,
+            tool_name="lookup",
+            arguments={"q": "x"},
+            request_id="bar-d-dispatch",
+            tenant_id="t-1",
+            originator_subject="agent-1",
+            approval_request_id=rid,
+        )
+        assert result.payload == {"content": "ok"}
+        assert http_transport.send.await_count == 1
 
     async def test_changed_args_recall_refuses_binding_mismatch_without_flow(
         self,
@@ -819,7 +1192,7 @@ class TestWiredReCall:
         tmp_path: Any,
     ) -> None:
         # Spec §3.2/§8: lazy expiry surfaces through the re-call mapping as
-        # tool_approval_expired. flow IS included — verify_grant_for_action
+        # tool_approval_expired. flow IS included — consume_grant_for_action
         # RETURNS an ApprovalCheckResult for the expired state (spec §4).
         store = await _mk_approval_store(tmp_path)
         clock = _MutableClock()

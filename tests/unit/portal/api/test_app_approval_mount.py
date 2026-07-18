@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
 from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
 from cognic_agentos.core.config import build_settings_without_env_file
@@ -55,6 +56,18 @@ def test_approval_router_mounted_when_store_and_engine_present() -> None:
     assert app.state.approval_router_mounted is True
     assert _QUEUE_PATH in _paths(app)
     assert _GRANT_PATH in _paths(app)
+
+
+def test_assignment_routes_mount_when_assignment_store_is_present() -> None:
+    store, engine = _store_and_engine()
+    assignments = ApprovalAssignmentStore(store._history)
+    app = create_app(
+        build_settings_without_env_file(),
+        approval_store=store,
+        approval_engine=engine,
+        approval_assignment_store=assignments,
+    )
+    assert "/api/v1/approvals/assignments/{tool_identity:path}" in _paths(app)
 
 
 def test_approval_router_not_mounted_without_deps() -> None:

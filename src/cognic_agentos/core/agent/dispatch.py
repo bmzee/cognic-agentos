@@ -74,6 +74,9 @@ from cognic_agentos.core.agent._types import (
     GrantedCapabilities,
     LoadedAgentRecord,
 )
+from cognic_agentos.core.agent.action_context import (
+    ACTION_CONTEXT_ARGUMENT as _ACTION_CONTEXT_ARG,
+)
 from cognic_agentos.core.agent.policy import AgentDispatchPolicy, AgentPolicyInput
 from cognic_agentos.core.agent.query_context import (
     _ISSUER,
@@ -102,10 +105,9 @@ _BUILTIN_NAMES: Final[frozenset[str]] = frozenset({"read_skill", "remember"})
 #: unscoped call. A missing class is the same fail-closed refusal.
 _DISPATCHABLE_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action", "unscoped"})
 
-#: Classes requiring a per-originator data-scope entitlement read at gate 2.
-#: ``action`` is deliberately absent in D-S1: it refuses earlier because no
-#: action-entitlement store exists until D-S2.
-_ENTITLEMENT_REQUIRED_CLASSES: Final[frozenset[str]] = frozenset({"data_query"})
+#: Classes requiring a per-originator entitlement read at gate 2. Data queries
+#: bind a named data scope; actions bind the exact full tool identity.
+_ENTITLEMENT_REQUIRED_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action"})
 
 #: The reserved argument key the signed query-context token rides on. Kernel-
 #: owned: NEVER advertised in :func:`build_llm_tool_specs` output (the
@@ -159,6 +161,17 @@ class DispatchOutcome:
     reason: AgentDispatchRefusalReason | None
     message: str | None
     result: dict[str, Any] | None
+    pending: bool = False
+    approval_request_id: str | None = None
+
+
+class AgentToolApprovalPending(Exception):
+    """Typed boundary signal: the governed tool proposal awaits humans."""
+
+    def __init__(self, *, approval_request_id: str, flow: str | None) -> None:
+        super().__init__("agent tool approval pending")
+        self.approval_request_id = approval_request_id
+        self.flow = flow
 
 
 @runtime_checkable
@@ -377,6 +390,7 @@ class AgentDispatcher:
         # The signed manifest's per-tool class is the authority. Missing,
         # unknown, and reserved classes all refuse before entitlement/policy.
         capability_class: str | None = None
+        action_entitled = False
         if resolved.kind == "tool":
             capability_class = self._tool_capability_classes.get(resolved.ref)
             if capability_class not in _DISPATCHABLE_CLASSES:
@@ -395,23 +409,37 @@ class AgentDispatcher:
                     scope_id=None,
                 )
             if capability_class == "action":
-                # D-S1 has no action-entitlement store. Refuse unconditionally
-                # before the data-scope gate: an entitled scope_id must never
-                # authorize a write-class tool by accident.
-                return await self._refuse(
-                    run=run,
-                    step_index=step_index,
-                    args_sha256=args_sha256,
-                    reason="agent_scope_not_entitled",
-                    message=(
-                        "action-class tools require an action entitlement, which "
-                        "is not available until D-S2; this write is not dispatchable"
-                    ),
-                    capability_kind=resolved.kind,
-                    capability_ref=resolved.ref,
-                    scope_id=None,
+                if _ACTION_CONTEXT_ARG in call.arguments:
+                    return await self._refuse(
+                        run=run,
+                        step_index=step_index,
+                        args_sha256=args_sha256,
+                        reason="agent_tool_dispatch_failed",
+                        message="the action arguments contain a kernel-reserved field",
+                        capability_kind=resolved.kind,
+                        capability_ref=resolved.ref,
+                        scope_id=None,
+                    )
+                action_entitled = await self._entitlements.entitled_action(
+                    tenant_id=run.tenant_id,
+                    subject=run.originator_subject,
+                    tool_identity=resolved.ref,
                 )
-        # --- 3. Gate 2 — entitlement (data-query tools only).
+                if not action_entitled:
+                    return await self._refuse(
+                        run=run,
+                        step_index=step_index,
+                        args_sha256=args_sha256,
+                        reason="agent_scope_not_entitled",
+                        message=(
+                            "you are not entitled to request this action; ask your "
+                            "administrator for the action entitlement"
+                        ),
+                        capability_kind=resolved.kind,
+                        capability_ref=resolved.ref,
+                        scope_id=None,
+                    )
+        # --- 3. Gate 2 — entitlement.
         stamped = capability_class == "data_query"
         scope_id: str | None = None
         resolved_scope: DataScope | None = None
@@ -480,7 +508,9 @@ class AgentDispatcher:
                 assignment_verified=True,
                 # Computed, never asserted: an entitlement-required class can
                 # reach here only after gate 2 resolved a real scope.
-                entitlement_verified=(scope_id is not None)
+                entitlement_verified=(
+                    (scope_id is not None) if capability_class == "data_query" else action_entitled
+                )
                 if capability_class in _ENTITLEMENT_REQUIRED_CLASSES
                 else True,
             )
@@ -556,6 +586,27 @@ class AgentDispatcher:
                     originator_subject=run.originator_subject,
                     approval_request_id=None,
                 )
+        except AgentToolApprovalPending as pending:
+            await self._emit_dispatch(
+                run=run,
+                step_index=step_index,
+                args_sha256=args_sha256,
+                outcome="pending_approval",
+                refusal_reason=None,
+                capability_kind=resolved.kind,
+                capability_ref=resolved.ref,
+                scope_id=scope_id,
+                result=None,
+                approval_request_id=pending.approval_request_id,
+            )
+            return DispatchOutcome(
+                refused=False,
+                reason=None,
+                message=None,
+                result=None,
+                pending=True,
+                approval_request_id=pending.approval_request_id,
+            )
         except Exception as exc:
             # Operator-axis diagnostic only (exc_info) — the LLM-visible
             # message + the chain payload carry the CLASS name at most.
@@ -653,12 +704,13 @@ class AgentDispatcher:
         run: AgentRunContext,
         step_index: int,
         args_sha256: str,
-        outcome: Literal["ok", "refused"],
+        outcome: Literal["ok", "refused", "pending_approval"],
         refusal_reason: AgentDispatchRefusalReason | None,
         capability_kind: str | None,
         capability_ref: str,
         scope_id: str | None,
         result: dict[str, Any] | None,
+        approval_request_id: str | None = None,
     ) -> None:
         """The ONE ``agent.run.dispatch`` evidence row per dispatch, on EVERY
         arm. Digest-only per ADR-027 §f: sha256 digests + canonical byte
@@ -689,6 +741,8 @@ class AgentDispatcher:
             "result_sha256": result_sha256,
             "result_bytes": result_bytes,
         }
+        if approval_request_id is not None:
+            payload["approval_request_id"] = approval_request_id
         await self._decision_history.append(
             DecisionRecord(
                 decision_type="agent.run.dispatch",
@@ -728,7 +782,8 @@ def build_llm_tool_specs(
     name_map = _granted_tool_name_map(run.granted.tools)
     for tool_name in sorted(name_map):
         full_ref = name_map[tool_name]
-        if capability_classes.get(full_ref) == "data_query":
+        capability_class = capability_classes.get(full_ref)
+        if capability_class == "data_query":
             parameters: dict[str, Any] = {
                 "type": "object",
                 "properties": {
@@ -749,6 +804,19 @@ def build_llm_tool_specs(
                 "additionalProperties": False,
             }
             description = "Run a governed read-only SQL query inside an entitled data scope."
+        elif capability_class == "action":
+            # Generic action metadata is not yet projected from MCP tool
+            # schemas. Keep arbitrary application keys possible while closing
+            # the object and excluding the one kernel-owned stamp key.
+            parameters = {
+                "type": "object",
+                "properties": {},
+                "patternProperties": {
+                    r"^(?!_cognic_action_context$).+$": {},
+                },
+                "additionalProperties": False,
+            }
+            description = f"Request the governed action '{tool_name}'."
         else:
             # The kernel does not curate non-data-query tool schemas in this
             # lane — a permissive object schema; governance is dispatch-side.
@@ -794,6 +862,7 @@ def build_llm_tool_specs(
 __all__ = (
     "AgentDispatcher",
     "AgentRunContext",
+    "AgentToolApprovalPending",
     "AgentToolProxy",
     "DispatchOutcome",
     "MemoryApiFactory",

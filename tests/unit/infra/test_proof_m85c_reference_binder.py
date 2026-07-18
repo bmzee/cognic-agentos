@@ -547,7 +547,7 @@ def test_realm_subjects_env_is_deterministic_and_matches_the_realm_ids(
     assert stat.S_IMODE((out_a / "realm-subjects.env").stat().st_mode) == 0o600
     realm: dict[str, Any] = json.loads((out_a / "realm.json").read_text())
     lines = _parse_env(out_a / "realm-subjects.env")
-    assert len(lines) == len(realm["users"]) == 8
+    assert len(lines) == len(realm["users"]) == 10
     for user in realm["users"]:
         username = str(user["username"])
         # (a) every user carries the deterministic id...

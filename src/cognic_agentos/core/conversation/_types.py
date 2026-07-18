@@ -133,6 +133,8 @@ class TurnRecord:
     prompt_tokens: int
     completion_tokens: int
     created_at: datetime
+    approval_request_id: str | None = None
+    turn_kind: Literal["exchange", "system"] = "exchange"
 
 
 @dataclass(frozen=True, slots=True)

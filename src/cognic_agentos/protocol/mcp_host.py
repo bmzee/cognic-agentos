@@ -109,13 +109,16 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from typing import Any, ClassVar, Literal
 
 import httpx
 
+from cognic_agentos.core.agent.action_context import ACTION_CONTEXT_ARGUMENT
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalCheckResult,
     ApprovalEnvelope,
     ApprovalRequestNotFound,
     ApprovalTransitionRefused,
@@ -408,6 +411,23 @@ class _DispatchContext:
     dispatched: bool = False
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ExecutorApprovalClaim:
+    """One-call capability proving this host instance consumed the grant."""
+
+    request_id: uuid.UUID
+    tenant_id: str
+    originator_subject: str
+    tool_identity: str
+    args_digest: bytes
+
+
+_EXECUTOR_APPROVAL_CLAIM: ContextVar[_ExecutorApprovalClaim | None] = ContextVar(
+    "mcp_executor_approval_claim",
+    default=None,
+)
+
+
 #: Sub-classification of a transport-level send error, derived by
 #: walking the ``__cause__`` chain for ``httpx.HTTPStatusError``.
 _AuthSignal = Literal["authz_lost", "step_up", "transport_failed"]
@@ -589,8 +609,8 @@ def _canonical_tool_identity(*, server_id: str, tool_name: str) -> str:
     separator characters in either field cannot collide (raw
     f"{server_id}:{tool_name}" rejected at the 13.5b2 reconciliation). The
     human-readable pair lives in the envelope's redacted_context instead.
-    SAME function serves create_request AND verify_grant_for_action — drift
-    between the two would make every grant unverifiable.
+    SAME function serves create_request AND consume_grant_for_action — drift
+    between the two would make every grant unclaimable.
     """
     digest = hashlib.sha256(
         canonical_bytes({"server_id": server_id, "tool_name": tool_name})
@@ -618,8 +638,10 @@ def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
 #: policy-refused the call), ``dlp_pre_failed`` (a hook raised / timed out, or
 #: a declared hook did not resolve), ``dlp_pre_guard_unavailable``
 #: (``dlp_pre_hooks`` declared but no DLP guard wired — fail closed).
+#: M8.5-D D2 phase B adds ``tool_approval_consumed`` for a second use of a
+#: single-claim grant.
 #: Drift-pinned by ``test_mcp_approval_seam.py::
-#: test_tool_invocation_refusal_reason_has_exactly_ten_values`` +
+#: test_tool_invocation_refusal_reason_has_exactly_eleven_values`` +
 #: ``test_mcp_high_risk_tier_refused.py::
 #: TestRiskTierAllowListPinned::test_refusal_reason_closed_enum_pinned``.
 ToolInvocationRefusalReason = Literal[
@@ -628,6 +650,7 @@ ToolInvocationRefusalReason = Literal[
     "tool_approval_denied",
     "tool_approval_expired",
     "tool_approval_binding_mismatch",
+    "tool_approval_consumed",
     "tool_approval_originator_mismatch",
     "tool_approval_request_not_found",
     "dlp_pre_refused",
@@ -1181,7 +1204,7 @@ class MCPHost:
         """ADR-014 engine-authoritative approval consult (13.5b2 spec §3).
 
         Returns None to proceed to dispatch (auto_run classification or a
-        verified grant); raises MCPToolInvocationRefused (after emitting the
+        verified first-claimed grant); raises MCPToolInvocationRefused (after emitting the
         refused evidence row) otherwise. ApprovalEnvelopeInvalid deliberately
         propagates to the outer generic-Exception arm (spec §3.5 — system
         error, not a policy refusal). Runs INSIDE the evidence-emitting try
@@ -1189,16 +1212,41 @@ class MCPHost:
         """
         engine = self._approval_engine
         assert engine is not None  # call site is gated on wiredness
-        args_digest = hashlib.sha256(canonical_bytes(dict(arguments))).digest()
+        executor_claim = _EXECUTOR_APPROVAL_CLAIM.get()
+        if executor_claim is not None:
+            # The only bypass of the ordinary public recall-consume branch is
+            # a ContextVar capability minted by execute_consumed_action on
+            # THIS task after a successful atomic consume. Rebind every fact
+            # and recompute the approved digest after removing only the
+            # kernel-owned action-context token.
+            unstamped = dict(arguments)
+            action_context = unstamped.pop(ACTION_CONTEXT_ARGUMENT, None)
+            expected_identity = _canonical_tool_identity(
+                server_id=entry.server_id,
+                tool_name=tool_name,
+            )
+            if (
+                approval_request_id != executor_claim.request_id
+                or tenant_id != executor_claim.tenant_id
+                or originator_subject != executor_claim.originator_subject
+                or expected_identity != executor_claim.tool_identity
+                or not isinstance(action_context, str)
+                or hashlib.sha256(canonical_bytes(unstamped)).digest() != executor_claim.args_digest
+            ):
+                raise RuntimeError("executor approval claim binding mismatch")
+            return
+        canonical_args = canonical_bytes(dict(arguments))
+        args_digest = hashlib.sha256(canonical_args).digest()
         tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
         if approval_request_id is not None:
             try:
-                res = await engine.verify_grant_for_action(
+                res = await engine.consume_grant_for_action(
                     request_id=approval_request_id,
                     tenant_id=tenant_id,
                     expected_args_digest=args_digest,
                     expected_tool_identity=tool_identity,
                     expected_originator_subject=originator_subject,
+                    consumed_by=request_id,
                 )
             except ApprovalRequestNotFound:
                 # Unknown OR cross-tenant — indistinguishable by construction
@@ -1237,9 +1285,15 @@ class MCPHost:
                         f"different requesting subject; a grant authorises exactly "
                         f"one requester."
                     )
+                elif exc.reason == "approval_consumed":
+                    wire_reason = "tool_approval_consumed"
+                    wire_detail = (
+                        f"approval request {approval_request_id} has already been "
+                        f"consumed; a grant authorises exactly one dispatch."
+                    )
                 else:
-                    raise  # defensive: unexpected verify-side refusal -> errored arm
-                # flow OMITTED: verify raised without returning the result and
+                    raise  # defensive: unexpected consume-side refusal -> errored arm
+                # flow OMITTED: consume raised without returning the result and
                 # the seam does NOT issue an extra store read (spec §4).
                 await self._emit_approval_refused(
                     reason=wire_reason,
@@ -1259,7 +1313,7 @@ class MCPHost:
                     approval_request_id=str(approval_request_id),
                 ) from None
             if res.state == "granted":
-                return  # verified grant -> dispatch
+                return  # verified + first-claimed grant -> dispatch
             state_to_reason: dict[str, ToolInvocationRefusalReason] = {
                 "pending": "tool_approval_pending",
                 "awaiting_second": "tool_approval_pending",
@@ -1287,11 +1341,14 @@ class MCPHost:
                 approval_request_id=str(approval_request_id),
                 flow=res.flow,
             )
-        required_refs: dict[str, str] = {}
+        required_refs: dict[str, str] = {
+            "mcp_server_id": entry.server_id,
+            "mcp_tool_name": tool_name,
+        }
         if declared_risk_tier == "regulator_communication":
             # Spec F3: the invocation request_id IS the audit correlator
             # every call_tool evidence row is keyed by.
-            required_refs = {"audit_record_ref": request_id}
+            required_refs["audit_record_ref"] = request_id
         envelope = ApprovalEnvelope(
             risk_tier=declared_risk_tier,
             tool_identity=tool_identity,
@@ -1305,7 +1362,10 @@ class MCPHost:
             required_refs=required_refs,
         )
         try:
-            request = await engine.create_request(envelope=envelope)
+            request = await engine.create_request(
+                envelope=envelope,
+                replay_payload=canonical_args,
+            )
         except ApprovalTransitionRefused as exc:
             if exc.reason == "auto_tier_no_approval_required":
                 return  # tools.rego classified auto_run -> dispatch
@@ -1848,6 +1908,68 @@ class MCPHost:
             scopes=used_token.scopes,
             client_id=used_token.client_id,
         )
+
+    async def execute_consumed_action(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        request_id: str,
+        tenant_id: str,
+        originator_subject: str,
+        approval_request_id: uuid.UUID,
+        prepare_arguments: Callable[[ApprovalCheckResult], Awaitable[Mapping[str, Any]]],
+    ) -> CallResult:
+        """Atomically consume, prepare stored args, then run ``call_tool``.
+
+        This is the executor's one private lane. The public ``call_tool``
+        contract is unchanged; a task-local capability lets its existing
+        pipeline replace the ordinary recall consume with the claim already
+        won here. Preparation runs only after the claim, closing replay drift.
+        """
+        engine = self._approval_engine
+        if engine is None:
+            raise RuntimeError("approval engine is required for consumed action execution")
+        entry = self._lookup_server(server_id)
+        tool_identity = _canonical_tool_identity(
+            server_id=entry.server_id,
+            tool_name=tool_name,
+        )
+        checked = await engine.check(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+        )
+        consumed = await engine.consume_grant_for_action(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+            expected_args_digest=checked.args_digest,
+            expected_tool_identity=tool_identity,
+            expected_originator_subject=originator_subject,
+            consumed_by=request_id,
+        )
+        if consumed.state != "granted":
+            raise RuntimeError("executor attempted to consume a non-granted approval")
+        arguments = await prepare_arguments(consumed)
+        claim = _ExecutorApprovalClaim(
+            request_id=approval_request_id,
+            tenant_id=tenant_id,
+            originator_subject=originator_subject,
+            tool_identity=tool_identity,
+            args_digest=consumed.args_digest,
+        )
+        token = _EXECUTOR_APPROVAL_CLAIM.set(claim)
+        try:
+            return await self.call_tool(
+                server_id=server_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                originator_subject=originator_subject,
+                approval_request_id=approval_request_id,
+            )
+        finally:
+            _EXECUTOR_APPROVAL_CLAIM.reset(token)
 
     async def _call_tool_inner(
         self,

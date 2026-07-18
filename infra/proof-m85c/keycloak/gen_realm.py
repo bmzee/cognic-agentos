@@ -103,6 +103,13 @@ deterministic; they change nothing about the identity contract above):
    stampede records N ``REFRESH_TOKEN`` events (and, under refresh-token
    rotation, ``REFRESH_TOKEN_ERROR`` s too). ADMIN events stay OFF: noise.
 
+8. THE MANAGED IDENTITY-CLAIM SOURCES. Keycloak 26 ignores unmanaged user
+   attributes in the Admin REST context by default. ``tenant_id`` and
+   ``cognic_scopes`` are therefore explicit, admin-only managed attributes in
+   the declarative user profile. This preserves the strict unmanaged-attribute
+   default while allowing Bar G's scoped maker-checker mutation to be read,
+   written, and independently observed through Keycloak's own Admin API.
+
 The claims the reference binder consumes (``overlay_reference/binder.py``) and
 therefore the mappers this realm MUST emit into the ACCESS token:
     ``tenant_id``      — closed-shape string (the kernel tenant)
@@ -255,11 +262,15 @@ _CONVERSATION_SCOPES: Final = [
 #: load-bearing: sara's replay of amir's granted request cannot be explained
 #: away by a scope difference or by tenant invisibility.
 _ANALYST_SCOPES: Final = [*_CONVERSATION_SCOPES, "mcp.tool.list", "mcp.tool.invoke"]
-#: The four-eyes approvers. ``tool.approve.high_risk_custom`` is the tier the
+#: The approval humans. ``tool.approve.high_risk_custom`` is the tier the
 #: probe pack declares (spec §6); ``tool.approve.observe`` is what renders the
-#: queue. dana and erin are DISTINCT humans — ADR-014 four-eyes requires the
-#: second approver to differ from the first.
+#: queue. dana, erin, and fiona are DISTINCT humans — ADR-014 assigned approval
+#: can require all three, while the four-eyes compatibility flow uses two.
 _APPROVER_SCOPES: Final = ["tool.approve.high_risk_custom", "tool.approve.observe"]
+#: omar owns assignment administration but no tier approval authority. Keeping
+#: the scopes separate makes Bar G's human-only assignment mutation independent
+#: from its later three-approver decision sequence.
+_ASSIGNER_SCOPES: Final = ["tool.approve.assign", "tool.approve.observe"]
 
 IDENTITIES: Final[tuple[dict[str, Any], ...]] = (
     # --- SETUP identities: the governed operator pack lifecycle (M4 flow) -----
@@ -295,9 +306,13 @@ IDENTITIES: Final[tuple[dict[str, Any], ...]] = (
     {"username": "analyst.amir", "tenant": TENANT, "scopes": list(_ANALYST_SCOPES)},
     # sara: same tenant, same MCP invocation authority, DIFFERENT subject.
     {"username": "analyst.sara", "tenant": TENANT, "scopes": list(_ANALYST_SCOPES)},
-    # dana + erin: the two distinct four-eyes humans.
+    # dana + erin: the two distinct four-eyes compatibility humans.
     {"username": "approver.dana", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
     {"username": "approver.erin", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
+    # fiona: the third distinct reviewer for Bar G's assigned 3-of-3 flow.
+    {"username": "approver.fiona", "tenant": TENANT, "scopes": list(_APPROVER_SCOPES)},
+    # omar: assignment administrator, deliberately not a tier approver.
+    {"username": "assigner.omar", "tenant": TENANT, "scopes": list(_ASSIGNER_SCOPES)},
     # zara: fully-scoped reader in ANOTHER tenant. Carries tool.approve.observe so
     # her empty approvals queue proves tenant isolation rather than missing scope.
     {
@@ -443,6 +458,92 @@ def _keycloak_default_client_scopes() -> list[dict[str, Any]]:
     ]
 
 
+def _user_profile_component() -> dict[str, Any]:
+    """Keycloak 26.2's default profile plus the two proof claim sources.
+
+    A custom declarative profile replaces, rather than extends, the built-in
+    profile, so the four standard attributes are reproduced exactly. The two
+    authorization attributes are available only to administrators; users can
+    neither view nor edit the tenant or scope claims that AgentOS binds.
+    """
+    profile = {
+        "attributes": [
+            {
+                "name": "username",
+                "displayName": "${username}",
+                "validations": {
+                    "length": {"min": 3, "max": 255},
+                    "username-prohibited-characters": {},
+                    "up-username-not-idn-homograph": {},
+                },
+                "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]},
+                "multivalued": False,
+            },
+            {
+                "name": "email",
+                "displayName": "${email}",
+                "validations": {"email": {}, "length": {"max": 255}},
+                "required": {"roles": ["user"]},
+                "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]},
+                "multivalued": False,
+            },
+            {
+                "name": "firstName",
+                "displayName": "${firstName}",
+                "validations": {
+                    "length": {"max": 255},
+                    "person-name-prohibited-characters": {},
+                },
+                "required": {"roles": ["user"]},
+                "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]},
+                "multivalued": False,
+            },
+            {
+                "name": "lastName",
+                "displayName": "${lastName}",
+                "validations": {
+                    "length": {"max": 255},
+                    "person-name-prohibited-characters": {},
+                },
+                "required": {"roles": ["user"]},
+                "permissions": {"view": ["admin", "user"], "edit": ["admin", "user"]},
+                "multivalued": False,
+            },
+            {
+                "name": "tenant_id",
+                "displayName": "Tenant ID",
+                "validations": {"length": {"max": 255}},
+                "permissions": {"view": ["admin"], "edit": ["admin"]},
+                "multivalued": False,
+            },
+            {
+                "name": "cognic_scopes",
+                "displayName": "Cognic scopes",
+                "validations": {"length": {"max": 255}},
+                "permissions": {"view": ["admin"], "edit": ["admin"]},
+                "multivalued": True,
+            },
+        ],
+        "groups": [
+            {
+                "name": "user-metadata",
+                "displayHeader": "User metadata",
+                "displayDescription": "Attributes, which refer to user metadata",
+            }
+        ],
+        # Do not emit unmanagedAttributePolicy. In Keycloak 26.2, omission is
+        # the strict disabled posture; the literal DISABLED is not accepted by
+        # the user-profile representation parser.
+    }
+    return {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+            "kc.user.profile.config": [json.dumps(profile, separators=(",", ":"), sort_keys=True)]
+        },
+    }
+
+
 def build_realm(
     *,
     bff_redirect_uri: str,
@@ -496,6 +597,7 @@ def build_realm(
     return {
         "realm": REALM,
         "enabled": True,
+        "components": {"org.keycloak.userprofile.UserProfileProvider": [_user_profile_component()]},
         # Keycloak serves HTTPS with the per-run proof CA (the TLS matrix, spec
         # §5.1): require TLS for every request, not just external ones.
         "sslRequired": "all",

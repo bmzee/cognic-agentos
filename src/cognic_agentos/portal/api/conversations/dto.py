@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,6 +67,7 @@ class TurnResponse(BaseModel):
     agent_run_id: str
     terminal_state: AgentRunTerminalState
     refusal_reason: AgentDispatchRefusalReason | None
+    approval_request_id: str | None = None
 
 
 class ConversationSummaryResponse(BaseModel):
@@ -105,6 +107,8 @@ class TranscriptTurnResponse(BaseModel):
     completion_tokens: int
     created_at: datetime
     erased_at: datetime | None
+    approval_request_id: str | None = None
+    turn_kind: Literal["exchange", "system"] = "exchange"
 
 
 class TranscriptResponse(BaseModel):

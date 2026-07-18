@@ -72,11 +72,17 @@ def test_harness_dir_has_expected_sources() -> None:
     ``protocol.mcp_manifest`` + stdlib ``hashlib`` / ``importlib.metadata`` /
     ``logging``, with the registry-candidate dep under TYPE_CHECKING; no
     Layer-C, no redis client, no second engine, no Bucket-1 default, so the
-    fences below hold)."""
+    fences below hold). M8.5-D D2-C added ``approval_executor.py`` (the
+    approved-action executor builder — reviewed: imports only the approval
+    core, secret-resolution adapter, and stdlib ``pathlib`` at runtime; it
+    consumes the injected SQL engine and secret adapter, opens no client or
+    second engine, and constructs no Bucket-1 default, so the fences below
+    hold)."""
     names = {p.name for p in _harness_sources()}
     assert names == {
         "__init__.py",
         "agent_host.py",
+        "approval_executor.py",
         "hook_registry.py",
         "mcp_host.py",
         "memory_policy.py",

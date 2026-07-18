@@ -548,9 +548,10 @@ class TestRiskTierAllowListPinned:
         """Sprint 13.5b2 extended the Sprint-5 single-value enum with the
         five approval-engine outcomes (ADR-014); M5 added the three DLP
         pre-invocation reasons; HP-4 (M8.5-C T1) added the originator
-        mismatch. The transitional ``tool_approval_engine_not_available``
+        mismatch; D2 phase B added the consumed conflict. The transitional
+        ``tool_approval_engine_not_available``
         value is KEPT as the engine-absent fallback this suite pins;
-        anything outside the 10-value set is drift (mirror pin lives in
+        anything outside the 11-value set is drift (mirror pin lives in
         test_mcp_approval_seam.py)."""
         from typing import get_args
 
@@ -562,6 +563,7 @@ class TestRiskTierAllowListPinned:
                 "tool_approval_denied",
                 "tool_approval_expired",
                 "tool_approval_binding_mismatch",
+                "tool_approval_consumed",
                 "tool_approval_originator_mismatch",
                 "tool_approval_request_not_found",
                 "dlp_pre_refused",

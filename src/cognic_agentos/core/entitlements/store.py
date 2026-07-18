@@ -1,10 +1,11 @@
-"""M8 Task A3 (ADR-027) — the data-scope entitlement store (CRITICAL CONTROLS).
+"""M8 Task A3 / M8.5-D D2 entitlement reads (CRITICAL CONTROLS).
 
 Pure-READ substrate for the M8 dispatch entitlement gate (gate 2): which named
 data scopes a subject is entitled to (``entitled_scope_ids``) and what a scope
 resolves to (``resolve_scope`` — schema + governed-view object allow-set +
 proxy DB identity, the facts the dispatcher stamps into the signed
-query-context token). No chain rows — the dispatch row is the evidence
+query-context token), plus whether a subject may propose one exact action tool
+(``entitled_action``). No chain rows — the dispatch row is the evidence
 surface. Rows are proof-side seed in M8 (portal CRUD is a follow-up;
 per-tenant entitlement changes are Human-only-decision-adjacent per ADR-027).
 
@@ -21,9 +22,8 @@ allow-set downstream (the resolved objects feed the signed query-context
 token's claims). An empty list is legitimate (a scope that allows nothing).
 
 Module-owned Tables on a module-local ``sa.MetaData()`` — the Alembic
-migration at ``db/migrations/versions/20260705_0014_agent_entitlements.py`` is
-the ONLY DDL source; column-shape drift is pinned by
-``tests/unit/db/test_migration_20260705_0014.py``.
+migrations 0014 and 0020 are the ONLY DDL sources; column-shape drift is pinned
+by their migration suites.
 """
 
 from __future__ import annotations
@@ -73,6 +73,25 @@ _entitlements = sa.Table(
     sa.Index("ix_entitlements_tenant_subject", "tenant_id", "subject"),
 )
 
+#: SQLAlchemy Core Table mirroring migration 0020 exactly. Action authority
+#: is independent from data-scope authority and binds the full tool identity.
+_action_entitlements = sa.Table(
+    "action_entitlements",
+    _metadata,
+    sa.Column("id", sa.Uuid(), primary_key=True),
+    sa.Column("tenant_id", sa.String(128), nullable=False),
+    sa.Column("subject", sa.String(256), nullable=False),
+    sa.Column("tool_identity", sa.String(256), nullable=False),
+    sa.Column("created_at", _TS, nullable=False),
+    sa.UniqueConstraint(
+        "tenant_id",
+        "subject",
+        "tool_identity",
+        name="uq_action_entitlements_tenant_subject_tool",
+    ),
+    sa.Index("ix_action_entitlements_tenant_subject", "tenant_id", "subject"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DataScope:
@@ -93,6 +112,31 @@ class EntitlementStore:
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    async def entitled_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        tool_identity: str,
+    ) -> bool:
+        """Whether ``subject`` may propose this exact action tool.
+
+        All three identity legs are required in the WHERE clause. Missing and
+        cross-tenant rows collapse to ``False`` so action authority never
+        inherits from data-scope entitlement or a permissive default.
+        """
+        stmt = (
+            select(_action_entitlements.c.id)
+            .where(
+                _action_entitlements.c.tenant_id == tenant_id,
+                _action_entitlements.c.subject == subject,
+                _action_entitlements.c.tool_identity == tool_identity,
+            )
+            .limit(1)
+        )
+        async with self._engine.connect() as conn:
+            return (await conn.execute(stmt)).scalar_one_or_none() is not None
 
     async def entitled_scope_ids(self, *, tenant_id: str, subject: str) -> frozenset[str]:
         """All scope_ids ``subject`` is entitled to inside ``tenant_id``.

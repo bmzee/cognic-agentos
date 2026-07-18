@@ -154,6 +154,46 @@ Per AGENTS.md "Critical-controls rule": `core/agent/loop.py`, `core/agent/dispat
 
 Instruction-only skill packs (`[pack] kind="skill"` + `[skill] mode="instruction"`, the A7 mode) are **content packs**: SKILL.md + the signed manifest as package data, with **no executable marker of any kind — none exists and none is permitted** (the A7 validator refuses a `cognic.skills` entry point on an instruction manifest; the runtime loader warn-skips one). Boot discovery therefore rides the **manifest-walk arm** added to `PluginRegistry.discover()` by the ADR-002 "Instruction-skill manifest-walk discovery" amendment (2026-07-06): zero-cognic-entry-point distributions whose signed manifest declares instruction-skill are discovered as `DiscoveredPack(entry_point=None)`, trust-registered through the SAME cosign + allow-list + supply-chain pipeline, reach `iter_registered_pack_candidates()`, and are hosted by the skill host; `load()` refuses them with `ManifestOnlyPackNotLoadable`. This is DISTINCT from deferred item 4 above — **agent** packs keep the inert `cognic.agents` marker in M8; only no-executable instruction skills are manifest-walk-discovered. Sign/verify support the same shape (finding #3, 2026-07-06): the wheel-integrity instruction arm derives kind `"skill"` from the exactly-one in-wheel manifest so `agentos sign --bundle` + `agentos verify` accept zero-entry-point instruction wheels (no AgentCard JWS; verify Step 11 runs a real module-import probe) — per the ADR-002 "Sign/verify wheel-integrity instruction arm" paragraph. AGENT packs sign/verify with the SEPARATE AgentCard-JWS custody landed at finding #4 (2026-07-06): an RSA JWS identity distinct from the cosign key, the tracked pack-root `agent-card.pub` trust root, and `joserfc` in the kernel's base dependencies (which also fixes the runtime `core/agent/query_context.py` RS256 packaging) — per the ADR-016 "AgentCard JWS custody split" amendment.
 
+## M8.5-D D2 phase-C action-entitlement amendment (2026-07-17)
+
+The D-S1 unconditional refusal for signed-manifest `action` tools is retired by
+the governed-write path. Before policy evaluation or any MCP call, the
+dispatcher now requires an exact `(tenant_id, originator_subject,
+tool_identity)` row from `action_entitlements`; data-scope entitlement cannot
+authorize a write. Missing and cross-tenant rows collapse to the existing
+`agent_scope_not_entitled` refusal, so the wire vocabulary does not grow.
+
+An entitled action that reaches the MCP approval seam may return a typed
+`AgentToolApprovalPending` boundary signal. The dispatcher records one
+digest-only `agent.run.dispatch` row with `outcome="pending_approval"` and the
+approval request id, then returns a non-refusal pending outcome. The harness
+adapter alone translates `tool_approval_pending`; `core/agent` remains
+independent of protocol exception types. `agents.rego` is unchanged and still
+re-requires the entitlement attestation strictly.
+
+## M8.5-D D2 phase-C action-context and completion amendment (2026-07-17)
+
+`pending_approval` is a terminal agent-run state, not a refusal and not another
+model round. The loop emits `agent.run.pending_approval`, returns a
+kernel-authored pending sentence plus the request id, and the conversation
+persists that complete exchange. Final approval execution never asks the model
+to recreate arguments: the executor replays the digest-verified bytes approved
+at proposal time.
+
+At execution time the kernel adds the reserved `_cognic_action_context`
+argument. Action tool schemas never advertise or accept that key from the
+model. Its attached RS256 JWS has exactly twelve claims: `iss`, `aud`, `sub`,
+`act`, `tenant_id`, `action_id`, `args_sha256`, `approval_request_id`,
+`idempotency_key`, `jti`, `iat`, and `exp`; verification precedence is
+signature, claim shape, expiry, then audience. The argument digest remains the
+pre-stamp digest of the LLM-authored canonical object.
+
+Execution and denial outcomes append `turn_kind="system"` conversation rows.
+They render in the transcript and share conversation erasure, but are excluded
+from prior-context replay and do not consume model turn or token budgets. This
+preserves the visible approval story without letting kernel-authored status
+text become future model input.
+
 ## References
 
 - Design spec: `docs/superpowers/specs/2026-07-04-m8-governed-agent-loop-design.md` · Implementation plan: `docs/superpowers/plans/2026-07-05-m8-governed-agent-loop.md`

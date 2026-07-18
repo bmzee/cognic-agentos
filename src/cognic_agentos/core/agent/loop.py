@@ -458,6 +458,23 @@ class AgentLoop:
             # fail-loud RuntimeError deliberately propagates.
             for tool_call in response.tool_calls:
                 outcome = await self._dispatcher.dispatch(call=tool_call, step_index=n, run=run)
+                if outcome.pending:
+                    approval_request_id = outcome.approval_request_id
+                    if not approval_request_id:
+                        raise RuntimeError("pending dispatch omitted approval_request_id")
+                    answer = f"Requested approval — #{approval_request_id[:4]}, pending."
+                    return await self._finish(
+                        run=run,
+                        state="pending_approval",
+                        answer=answer,
+                        steps_used=n + 1,
+                        prompt_tokens_total=prompt_tokens_total,
+                        completion_tokens_total=completion_tokens_total,
+                        question_sha256=question_sha256,
+                        skills_read=skills_read,
+                        scope_ids_used=scope_ids_used,
+                        approval_request_id=approval_request_id,
+                    )
                 if outcome.refused:
                     content = json.dumps(
                         {
@@ -489,6 +506,7 @@ class AgentLoop:
         refusal_reason: AgentDispatchRefusalReason | None = None,
         bound: RunBoundKind | None = None,
         error_class: str | None = None,
+        approval_request_id: str | None = None,
     ) -> AgentAskResult:
         """One terminal arm: emit exactly ONE digest-only ``agent.run.<state>``
         row, then the best-effort memory digest, then return the result —
@@ -510,6 +528,8 @@ class AgentLoop:
             payload["bound"] = bound
         elif state == "failed":
             payload["error_class"] = error_class
+        elif state == "pending_approval":
+            payload["approval_request_id"] = approval_request_id
         await self._decision_history.append(
             DecisionRecord(
                 decision_type=f"agent.run.{state}",
@@ -536,6 +556,7 @@ class AgentLoop:
             refusal_reason=refusal_reason,
             prompt_tokens=prompt_tokens_total,
             completion_tokens=completion_tokens_total,
+            approval_request_id=approval_request_id,
         )
 
     async def _write_memory_digest_best_effort(

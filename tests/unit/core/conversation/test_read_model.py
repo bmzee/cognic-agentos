@@ -241,6 +241,7 @@ async def _append_turn(
     run_id: str,
     tenant: str = _TENANT,
     creator: str = _CREATOR,
+    approval_request_id: str | None = None,
 ) -> str:
     """Claim + persist one turn (the executor's flow); returns the minted
     correlation request id."""
@@ -264,6 +265,7 @@ async def _append_turn(
         actor_id=creator,
         request_id=rid,
         claim_id=claim.claim_id,
+        approval_request_id=approval_request_id,
     )
     await store.release_claim(cid, tenant_id=tenant, claim_id=claim.claim_id)
     return rid
@@ -321,6 +323,70 @@ async def test_transcript_isolation_triple_reads_none(
     assert (
         await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject="analyst.sara") is None
     )  # cross-actor
+
+
+async def test_transcript_surfaces_pending_approval_request_id(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+) -> None:
+    cid = await _new_conversation(store)
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    await _append_turn(
+        store,
+        cid,
+        1,
+        run_id="agent-run-pending",
+        approval_request_id=approval_id,
+    )
+
+    page = await reader.read_transcript(
+        cid,
+        tenant_id=_TENANT,
+        creator_subject=_CREATOR,
+    )
+
+    assert page is not None
+    assert page.turns[0].approval_request_id == approval_id
+
+
+async def test_transcript_renders_system_turn_with_physical_watermark(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+) -> None:
+    cid = await _new_conversation(store)
+    await _append_turn(store, cid, 1, run_id="agent-run-1")
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id=_TENANT,
+        now=datetime.now(UTC),
+        claim_ttl_s=600.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text="Approved action completed.",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id="conv-system-read",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id=_TENANT, claim_id=claim.claim_id)
+
+    page = await reader.read_transcript(
+        cid,
+        tenant_id=_TENANT,
+        creator_subject=_CREATOR,
+    )
+
+    assert page is not None
+    assert page.conversation.turn_count == 1
+    assert page.watermark == 2
+    assert [(turn.seq, turn.turn_kind) for turn in page.turns] == [
+        (1, "exchange"),
+        (2, "system"),
+    ]
+    assert page.turns[1].user_message is None
+    assert page.turns[1].answer == "Approved action completed."
 
 
 async def test_chain_isolation_triple_reads_none(
@@ -662,6 +728,71 @@ async def test_transcript_missing_tail_is_integrity_failure(
         )
     with pytest.raises(ConversationTranscriptIntegrityError, match="missing tail"):
         await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject=_CREATOR)
+
+
+async def test_transcript_exchange_count_mismatch_is_integrity_failure(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _append_turn(store, cid, 1, run_id="agent-run-1")
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id=_TENANT,
+        now=datetime.now(UTC),
+        claim_ttl_s=600.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text="done",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id="conv-system-corrupt",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id=_TENANT, claim_id=claim.claim_id)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversations)
+            .where(_conversations.c.conversation_id == cid)
+            .values(turn_count=2)
+        )
+
+    with pytest.raises(ConversationTranscriptIntegrityError, match="exchange row"):
+        await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject=_CREATOR)
+
+
+async def test_system_turn_has_no_agent_run_chain_projection(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+) -> None:
+    cid = await _new_conversation(store)
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id=_TENANT,
+        now=datetime.now(UTC),
+        claim_ttl_s=600.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text="done",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id="conv-system-chain",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id=_TENANT, claim_id=claim.claim_id)
+
+    with pytest.raises(TurnNotFound, match="system turn"):
+        await reader.read_turn_chain(
+            cid,
+            1,
+            tenant_id=_TENANT,
+            creator_subject=_CREATOR,
+        )
 
 
 async def test_transcript_cursor_invalid_matrix(

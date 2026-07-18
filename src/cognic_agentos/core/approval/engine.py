@@ -2,12 +2,14 @@
 approval decision core. ``core/`` stop-rule + critical-controls.
 
 Designed as the generic Sprint-14 human-checkpoint primitive: ``classify`` /
-``create_request`` / ``check`` / ``verify_grant_for_action`` / ``grant`` /
-``grant_second`` / ``deny`` — NEVER a wait loop. Value-free: the engine computes
-``envelope_digest`` and never sees raw tool args (the caller supplies a redacted
-envelope + ``args_digest``). This module ships the create-side surface
-(classify/create/check/verify + envelope validation + lazy expiry); the grant-side
-(``grant``/``grant_second``/``deny``) is appended at Sprint 13.5a T6.
+``create_request`` / ``check`` / ``verify_grant_for_action`` /
+``consume_grant_for_action`` / ``grant`` / ``grant_second`` / ``deny`` — NEVER a
+wait loop. Value-free: the engine computes
+``envelope_digest``; the approval envelope carries only a redacted context and
+``args_digest``. D2 separately threads opaque canonical replay bytes to the
+value store without inspecting them here. This module ships the create/check /
+verify/consume surfaces plus envelope validation, lazy expiry, and the grant-side
+(``grant``/``grant_second``/``deny``).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from cognic_agentos.core.approval._types import (
     ApprovalState,
     ApprovalTransitionRefused,
 )
+from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
@@ -60,6 +63,7 @@ _DATA_CLASSES: Final[frozenset[str]] = frozenset(
 _FLOW_TO_TTL_SETTING: Final[dict[str, str]] = {
     "require_single_approval": "approval_single_ttl_s",
     "require_4_eyes": "approval_four_eyes_ttl_s",
+    "require_assigned": "approval_assigned_ttl_s",
 }
 
 #: Tier -> the single RBAC scope that may grant it (spec §6). ``tool.approve.observe``
@@ -105,24 +109,47 @@ class ApprovalEngine:
         store: ApprovalRequestStore,
         settings: Settings,
         clock: Callable[[], datetime],
+        assignments: ApprovalAssignmentStore | None = None,
     ) -> None:
         self._policy = policy
         self._store = store
         self._settings = settings
         self._clock = clock
+        self._assignments = assignments
 
     async def classify(self, *, risk_tier: str) -> ApprovalFlow:
         """tools.rego tier->flow consult (the seam branches auto-vs-approval)."""
         return cast(ApprovalFlow, await self._policy.classify(risk_tier=risk_tier))
 
-    async def create_request(self, *, envelope: ApprovalEnvelope) -> ApprovalRequest:
+    async def create_request(
+        self,
+        *,
+        envelope: ApprovalEnvelope,
+        replay_payload: bytes | None = None,
+    ) -> ApprovalRequest:
         """Validate the envelope (§7, pre-persist), classify the flow, and persist
         a ``pending`` request + emit ``approval.requested``. Refuses an ``auto_run``
         tier (the seam handles auto tiers without a record)."""
         self._validate_envelope(envelope)
-        flow = await self._policy.classify(risk_tier=envelope.risk_tier)
-        if flow == "auto_run":
-            raise ApprovalTransitionRefused("auto_tier_no_approval_required")
+        eligibility = None
+        if self._assignments is not None:
+            eligibility = await self._assignments.resolve(
+                tenant_id=envelope.tenant_id,
+                tool_identity=envelope.tool_identity,
+            )
+        if eligibility is not None:
+            flow: ApprovalFlow = "require_assigned"
+            required_count = eligibility.required_count
+            eligible_approvers = sorted(eligibility.eligible_approvers)
+        else:
+            flow = cast(
+                ApprovalFlow,
+                await self._policy.classify(risk_tier=envelope.risk_tier),
+            )
+            if flow == "auto_run":
+                raise ApprovalTransitionRefused("auto_tier_no_approval_required")
+            required_count = 1 if flow == "require_single_approval" else 2
+            eligible_approvers = None
         envelope_digest = self._envelope_digest(envelope)
         ttl_s = getattr(self._settings, _FLOW_TO_TTL_SETTING[flow])
         now = self._clock()
@@ -142,6 +169,9 @@ class ApprovalEngine:
             request_request_id=_mint_request_id(),
             created_at=now,
             expires_at=now + timedelta(seconds=ttl_s),
+            required_count=required_count,
+            eligible_approvers=eligible_approvers,
+            replay_payload=replay_payload,
         )
         return ApprovalRequest(
             request_id=request_id,
@@ -201,6 +231,45 @@ class ApprovalEngine:
             request_id=request_id, tenant_id=tenant_id
         )  # (4)
 
+    async def consume_grant_for_action(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        expected_args_digest: bytes,
+        expected_tool_identity: str,
+        expected_originator_subject: str,
+        consumed_by: str,
+    ) -> ApprovalCheckResult:
+        """Run the existing replay verification precedence, then claim once."""
+        result = await self.verify_grant_for_action(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            expected_args_digest=expected_args_digest,
+            expected_tool_identity=expected_tool_identity,
+            expected_originator_subject=expected_originator_subject,
+        )
+        if result.state != "granted":
+            return result
+        outcome = await self._store.claim_consumption(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            consumed_by=consumed_by,
+        )
+        if outcome == "first_claim":
+            return result
+        if outcome == "already_consumed":
+            raise ApprovalTransitionRefused("approval_consumed")
+        raise RuntimeError("granted approval became non-granted during consumption")
+
+    async def list_granted_unconsumed_before(
+        self,
+        *,
+        cutoff: datetime,
+    ) -> tuple[tuple[uuid.UUID, str], ...]:
+        """Expose the store's bounded startup-reconciliation predicate."""
+        return await self._store.list_granted_unconsumed_before(cutoff=cutoff)
+
     async def grant(
         self,
         *,
@@ -209,13 +278,12 @@ class ApprovalEngine:
         approver: ApprovalActor,
         reason: str | None = None,
     ) -> ApprovalState:
-        """First grant. ``require_single_approval`` -> granted; ``require_4_eyes``
-        -> awaiting_second (NOT executable until ``grant_second``)."""
+        """Record the next grant decision for single, four-eyes, or N-way flow."""
         return await self._do_decision(
             request_id=request_id,
             tenant_id=tenant_id,
             approver=approver,
-            action="grant_first",
+            action="grant",
             reason=reason,
         )
 
@@ -227,13 +295,11 @@ class ApprovalEngine:
         approver: ApprovalActor,
         reason: str | None = None,
     ) -> ApprovalState:
-        """Second 4-eyes grant -> granted. Requires ``awaiting_second`` + a
-        distinct approver (!= first approver, != originator)."""
-        return await self._do_decision(
+        """Compatibility alias retained for the established portal route."""
+        return await self.grant(
             request_id=request_id,
             tenant_id=tenant_id,
             approver=approver,
-            action="grant_second",
             reason=reason,
         )
 
@@ -286,29 +352,49 @@ class ApprovalEngine:
         required_scope = _TIER_GRANT_SCOPE.get(res.risk_tier)
         if required_scope is not None and required_scope not in approver.scopes:
             raise ApprovalTransitionRefused("approver_scope_not_held")
-        # 3. Reason policy (grant/grant_second on a reason-mandating tier need a
+        # 3. Reason policy (every grant on a reason-mandating tier needs a
         #    reason; deny's reason is required at the signature).
-        if (
-            action in ("grant_first", "grant_second")
-            and res.risk_tier in _REASON_MANDATING_TIERS
-            and not reason
-        ):
+        if action == "grant" and res.risk_tier in _REASON_MANDATING_TIERS and not reason:
             raise ApprovalTransitionRefused("grant_reason_required")
-        # 4. Maker-checker segregation at the first (or sole) grant. The
-        #    originator may withdraw via deny, but cannot approve their own request.
-        if action == "grant_first" and approver.subject == res.originator_subject:
-            raise ApprovalTransitionRefused("originator_cannot_approve")
-        # 5. 4-eyes distinctness (grant_second only): second != first != originator.
-        if action == "grant_second":
-            first = await self._store.first_approver(request_id=request_id, tenant_id=tenant_id)
-            if approver.subject in (first, res.originator_subject):
-                raise ApprovalTransitionRefused("four_eyes_approver_not_distinct")
+        transition_action = action
+        if action == "grant":
+            decision_index = res.decisions_recorded
+            transition_action = "grant_first" if decision_index == 0 else "grant_second"
+            # 4. Maker-checker segregation at every decision index. Index 1
+            # retains the established four-eyes wire reason byte-for-byte.
+            if approver.subject == res.originator_subject:
+                raise ApprovalTransitionRefused(
+                    "four_eyes_approver_not_distinct"
+                    if decision_index == 1
+                    else "originator_cannot_approve"
+                )
+
+            # 4b. Assignment eligibility is frozen onto the request at mint.
+            if res.flow == "require_assigned":
+                eligible = await self._store.eligible_approvers(
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                )
+                if approver.subject not in eligible:
+                    raise ApprovalTransitionRefused("approver_not_assigned")
+            # 5. Advisory N-way distinctness. The database UNIQUE constraint
+            # is the race authority inside the row-locked transition.
+            prior = await self._store.prior_deciders(
+                request_id=request_id,
+                tenant_id=tenant_id,
+            )
+            if approver.subject in prior:
+                raise ApprovalTransitionRefused(
+                    "four_eyes_approver_not_distinct"
+                    if decision_index == 1 and len(prior) == 1
+                    else "approver_not_distinct"
+                )
         # 6. Atomic transition (validate_transition against the row-locked flow; no
         #    caller-supplied flow per the T4 P1 fix).
         return await self._store.transition(
             request_id=request_id,
             tenant_id=tenant_id,
-            action=action,
+            action=transition_action,
             actor_subject=approver.subject,
             reason=reason,
             request_request_id=_mint_request_id(),
@@ -370,5 +456,7 @@ class ApprovalEngine:
             args_digest=row.args_digest,
             envelope_digest=row.envelope_digest,
             originator_subject=row.originator_subject,
+            decisions_recorded=row.decisions_recorded,
+            required_count=row.required_count,
             required_refs=row.required_refs,
         )

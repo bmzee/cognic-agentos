@@ -97,7 +97,11 @@ class _StubExecutor:
         return self._result
 
 
-def _completed_turn(terminal_state: str = "completed") -> TurnResult:
+def _completed_turn(
+    terminal_state: str = "completed",
+    *,
+    approval_request_id: str | None = None,
+) -> TurnResult:
     return TurnResult(
         turn_id=_TURN_ID,
         seq=1,
@@ -105,6 +109,7 @@ def _completed_turn(terminal_state: str = "completed") -> TurnResult:
         agent_run_id="agent-run-1",
         terminal_state=terminal_state,  # type: ignore[arg-type]
         refusal_reason=None,
+        approval_request_id=approval_request_id,
     )
 
 
@@ -307,6 +312,29 @@ def test_governed_refusal_is_200_not_an_error(
     r = client.post(f"/api/v1/conversations/{_CID}/turns", json={"user_message": "q"})
     assert r.status_code == 200
     assert r.json()["terminal_state"] == "refused"
+
+
+def test_pending_turn_surfaces_the_approval_request_id(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+) -> None:
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    ex = _StubExecutor(
+        result=_completed_turn(
+            terminal_state="pending_approval",
+            approval_request_id=approval_id,
+        )
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, store=_StubStore(), executor=ex)
+    response = client.post(
+        f"/api/v1/conversations/{_CID}/turns",
+        json={"user_message": "apply leave"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["terminal_state"] == "pending_approval"
+    assert response.json()["approval_request_id"] == approval_id
 
 
 def test_failed_run_is_502(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
@@ -539,7 +567,13 @@ def _summary() -> Any:
     )
 
 
-def _transcript_page(*, user_message: str = "q1", answer: str = "a1") -> Any:
+def _transcript_page(
+    *,
+    user_message: str = "q1",
+    answer: str = "a1",
+    approval_request_id: str | None = None,
+    turn_kind: str = "exchange",
+) -> Any:
     from cognic_agentos.core.conversation.read_model import TranscriptPage, TranscriptTurn
 
     return TranscriptPage(
@@ -555,6 +589,8 @@ def _transcript_page(*, user_message: str = "q1", answer: str = "a1") -> Any:
                 completion_tokens=20,
                 created_at=datetime(2026, 7, 10, tzinfo=UTC),
                 erased_at=None,
+                approval_request_id=approval_request_id,
+                turn_kind=turn_kind,  # type: ignore[arg-type]
             ),
         ),
         watermark=2,
@@ -718,6 +754,39 @@ def test_transcript_ok_carries_plaintext_and_watermark(
     assert body["next_cursor"] == "abc"
     assert body["turns"][0]["user_message"] == "q1"
     assert body["turns"][0]["erased_at"] is None
+
+
+def test_transcript_surfaces_pending_approval_request_id(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+) -> None:
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    reader = _StubReader(read_transcript=_transcript_page(approval_request_id=approval_id))
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    response = client.get(f"/api/v1/conversations/{_CID}/transcript")
+
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["approval_request_id"] == approval_id
+
+
+def test_transcript_surfaces_system_turn_kind(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+) -> None:
+    reader = _StubReader(
+        read_transcript=_transcript_page(
+            user_message="",
+            answer="Approved action completed.",
+            turn_kind="system",
+        )
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    response = client.get(f"/api/v1/conversations/{_CID}/transcript")
+
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["turn_kind"] == "system"
 
 
 def test_transcript_and_chain_404_bodies_are_byte_identical_to_unknown(

@@ -11,6 +11,18 @@
 > ledger, and the honesty boundary are in `docs/VALIDATION-RESULTS.md` under
 > "M8.5-C — Basic bank harness (ADR-028) — PASS".
 
+> **D2 A-minus extension (2026-07-18): PASSED LIVE.** Attempt 6 completed on
+> `kind` with exit 0 and printed `PROOF M8.5-C (BARS A-G) PASS`. The clean
+> AgentOS anchor/proof revision was
+> `c2f418a79b62fc3ee9e381494ede7d6dc3fba615`; the separately built, signed,
+> and verified Cognic Harness revision remained
+> `4dc64cccb5c3a591f1a4e40885e2f58ad37f075c`. The operator-held 939-line log
+> has SHA-256
+> `5ae3f83ea578614271ada9255a9a6d90f6873a11054c10598509a8c1bc7dc114`
+> and is deliberately not committed. Bars A-F re-passed, and Bar G proved
+> bank-owned 3-of-3 assignment, direct-MCP consume-once, and maker-checker
+> exclusion. The historical run-20 record above remains unchanged.
+
 ## What the passing run proved
 
 M8.5-C stands up the **Cognic Harness v1** — a same-origin BFF (`cognic-harness`
@@ -18,7 +30,7 @@ repo) with three governed screens (chat, approvals inbox, evidence) — in front
 of a deployed AgentOS kernel, and proves the **harness boundary** and the
 **approvals surface**:
 
-- **Real OIDC identity, no fallback.** Every one of the eight proof identities
+- **Real OIDC identity, no fallback.** Every one of the ten proof identities
   arrives as a real Keycloak access token verified locally by the reference
   `ActorBinder` (`overlay_reference/`). The `X-Proof-Role` header binder that
   M8.5-A/B used is **deleted, not gated** (ADR-028 §4) — there is no actor
@@ -106,12 +118,24 @@ of a deployed AgentOS kernel, and proves the **harness boundary** and the
   **exactly the three screen route modules** (+ auth) and no operator/pack/builder
   surface; **no actor-header path**; no `|safe`; htmx absent (no un-pinned
   vendored asset); CSP + `no-store` present.
+- **Bar G — assigned approval and consume-once.** Omar assigns Dana, Erin, and
+  Fiona to the probe tool; a real service token is refused before mutation and
+  exactly one `approval.assignment_changed` row is appended. A direct Postgres
+  witness reads `flow=require_assigned`, `required_count=3`,
+  `decisions_recorded=0`. The deployed detail wire then advances exactly
+  **1/3 -> 2/3 -> 3/3**, with exact chain order and no probe execution. The first
+  exact recall executes once (ledger **1 -> 2**); the second refuses
+  `tool_approval_consumed` and the ledger stays 2. Finally, the same
+  scope-holding originator is refused at decision index 0 with
+  `originator_cannot_approve` and at index 1 with the byte-stable
+  `four_eyes_approver_not_distinct`, after which the normal scope set is
+  restored.
 
 ## Topology (spec §5.1)
 
 The proven M8/M8.5 conversational stack (kernel proof app, oracle pack + XE + AS,
 LiteLLM→cloud, Postgres) **plus**: Keycloak (pinned `26.2` digest, per-run realm
-import, eight generated identities — nothing committed), a dedicated TLS session
+import, ten generated identities — nothing committed), a dedicated TLS session
 Redis (BFF-only ACL, persistence off), **two** harness BFF replicas behind one
 Service, and the approval-probe MCP Service. AgentOS terminates TLS itself; the
 whole human-identity path runs HTTPS under one per-run proof CA with no
@@ -155,18 +179,20 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
 
 ## Honesty boundaries (mandatory — spec §8)
 
-1. **Grants are deliberately not single-use** (ADR-014): the same requester may
-   replay the same granted shape until expiry. "Exact re-call" means
-   actor/tenant/tool/args-bound, **not** exactly-once execution. Single-use
-   `consume`/transaction idempotency is a **named prerequisite before any real
-   high-risk business action or pilot** — recorded, not implemented here.
+1. **Direct-MCP grants are now consume-once.** BAR G claims a granted request
+   atomically, executes the first exact recall, and requires a second identical
+   recall to refuse `tool_approval_consumed` without moving the independent
+   ledger. The historical Bar-D run predates this D2 change and remains a record
+   of the then-current replayable contract.
 2. The harness-PR-CI **kernel fake never counts as milestone evidence** — the
    real-kernel `kind` proof is the authority.
 3. **HP-2 remains open per bank** (issuer, claim mapping, assurance level,
    accepted FAPI profile). The reference binder is a worked example, not a
    shipped bank overlay.
-4. **HP-5 is untouched**: chat is auto-tier; the approvals screen proves the MCP
-   surface only.
+4. **Conversation-correlated auto-execution is not live-proven here.** D2's
+   executor/system-turn path is unit/e2e-proven, but BAR G uses the direct-MCP
+   probe. The live write + system-turn bar needs D5's external action agent and
+   released write pack.
 5. Any plaintext proof-internal MCP transport is disclosed explicitly (above).
 6. The M8.5-C baseline is **RFC 9700**; full **FAPI 2.0** is the bank-deployment
    target — nothing here is called FAPI conformant. The realm pins the RFC 9068
@@ -174,8 +200,7 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
 7. **NOT PILOT-READY.** M8.5-C proves the harness boundary and the approvals
    surface only. Still outstanding before any pilot: HP-5, erasure,
    content-safety/escalation hooks, data-access brokerage (M8.5-D/E), full FAPI
-   2.0 or a formally accepted equivalent, and single-use grant consumption
-   (item 1).
+   2.0 or a formally accepted equivalent, and D5's live write proof.
 
 ### M8.5-C-specific proof-staging disclosures
 
@@ -456,7 +481,7 @@ COGNIC_PROOF_M85C_TIER1_API_KEY=<operator key> \
 (The probe's two trust digests are **not** environment variables — they are
 maintainer-committed literals in `stage-packs.sh`; see prerequisite 2.)
 
-On all-pass it prints `PROOF M8.5-C (BARS A-F) PASS` and exits 0; on any bar
+On all-pass it prints `PROOF M8.5-C (BARS A-G) PASS` and exits 0; on any bar
 failure it captures diagnostics to `docs/VALIDATION-RESULTS.md` and exits
 non-zero — the proof is never redefined downward.
 

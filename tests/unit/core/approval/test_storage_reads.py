@@ -139,6 +139,28 @@ async def test_load_detail_returns_full_projection(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_summary_and_detail_project_two_of_four_progress(tmp_path: Any) -> None:
+    store = await _store(tmp_path)
+    now = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
+    rid = uuid.uuid4()
+    await _seed_request(store, request_id=rid, flow="require_4_eyes", now=now)
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            _approval_requests.update()
+            .where(_approval_requests.c.request_id == rid)
+            .values(decisions_recorded=2, required_count=4)
+        )
+
+    page = await store.list_pending("t1", limit=50, cursor=None)
+    assert len(page.items) == 1
+    assert (page.items[0].decisions_recorded, page.items[0].required_count) == (2, 4)
+
+    detail = await store.load_detail(request_id=rid, tenant_id="t1")
+    assert detail is not None
+    assert (detail.decisions_recorded, detail.required_count) == (2, 4)
+
+
+@pytest.mark.asyncio
 async def test_load_detail_cross_tenant_is_none(tmp_path: Any) -> None:
     store = await _store(tmp_path)
     now = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)

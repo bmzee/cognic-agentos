@@ -8,6 +8,7 @@ import uuid
 import pydantic
 
 from cognic_agentos.core.approval._types import ApprovalFlow, ApprovalState
+from cognic_agentos.core.approval.executor import ExecutionOutcome
 
 
 class _ApprovalBaseModel(pydantic.BaseModel):
@@ -27,6 +28,8 @@ class ApprovalSummaryResponse(_ApprovalResponseModel):
     originator_subject: str
     state: ApprovalState
     first_approver: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: str
     expires_at: str
 
@@ -46,6 +49,8 @@ class ApprovalDetailResponse(_ApprovalResponseModel):
     first_approver: str | None
     second_approver: str | None
     denier: str | None
+    decisions_recorded: int
+    required_count: int | None
     created_at: str
     expires_at: str
 
@@ -61,3 +66,16 @@ class DenyRequest(_ApprovalBaseModel):
 class ApprovalActionResponse(_ApprovalBaseModel):
     request_id: uuid.UUID
     state: ApprovalState
+    execution: ExecutionOutcome | None = None
+
+
+class AssignmentRequest(_ApprovalBaseModel):
+    approver_subjects: list[str]
+
+
+class AssignmentResponse(_ApprovalResponseModel):
+    tool_identity: str
+    approver_subjects: tuple[str, ...]
+    required_count: int
+    updated_by: str
+    updated_at: str

@@ -12,9 +12,11 @@ Pins:
 - Closed-enum literal stability — any addition or rename is a wire-protocol break
   visible in this test's diff. ``PackRBACScope`` is the wire-protocol contract
   carried in every 403 ``scope_not_held`` denial body.
-- Role-group frozensets + ``OVERRIDE_SCOPES`` partition ``PACK_LIFECYCLE_SCOPES``
-  exactly — no scope appears in two groups, none are missing. The override-scope-
-  specific assertions live in ``test_scopes_override_extension.py``.
+- Role-group frozensets + ``OVERRIDE_SCOPES`` partition the owned scope universe
+  ``PACK_LIFECYCLE_SCOPES | {"tool.approve.assign"}`` exactly. The D2-A scope
+  belongs only to OPERATOR; no scope appears in two groups and none are missing.
+  The override-specific assertions live in
+  ``test_scopes_override_extension.py``.
 """
 
 import typing
@@ -130,8 +132,7 @@ def test_reviewer_scopes_match_build_plan_reviewer_surface() -> None:
 
 
 def test_operator_scopes_match_build_plan_operator_surface() -> None:
-    """BUILD_PLAN §624 + ADR-026 D4 — operator scopes pinned to 6 values (the M4
-    ``pack.configure`` runtime-config configure step joins the operator surface)."""
+    """The operator role owns six pack operations plus approval assignment."""
     assert (
         frozenset(
             {
@@ -141,6 +142,7 @@ def test_operator_scopes_match_build_plan_operator_surface() -> None:
                 "pack.disable",
                 "pack.revoke",
                 "pack.uninstall",
+                "tool.approve.assign",
             }
         )
         == OPERATOR_SCOPES
@@ -161,15 +163,22 @@ def test_examiner_scopes_match_build_plan_examiner_surface() -> None:
     )
 
 
-def test_role_groups_partition_pack_lifecycle_scopes_exactly() -> None:
-    """Invariant — the four role-group frozensets plus ``OVERRIDE_SCOPES``
-    partition ``PACK_LIFECYCLE_SCOPES`` with no overlap and no gap. This
+def test_role_groups_partition_owned_scopes_exactly() -> None:
+    """The role groups own every pack scope plus assignment administration.
+
+    The namespace-disjoint assignment scope belongs only to OPERATOR; the
+    remaining values still partition ``PACK_LIFECYCLE_SCOPES``. This
     catches the refactor failure mode where a new scope is added to
     ``PACK_LIFECYCLE_SCOPES`` but forgotten in its group (or vice versa).
     Sprint 7B.3 T8 extended the partition from 4 groups to 5 with the
     addition of ``OVERRIDE_SCOPES`` (the ADR-012 §107-110 override scope)."""
     union = AUTHOR_SCOPES | REVIEWER_SCOPES | OPERATOR_SCOPES | EXAMINER_SCOPES | OVERRIDE_SCOPES
-    assert union == PACK_LIFECYCLE_SCOPES
+    assert union == PACK_LIFECYCLE_SCOPES | {"tool.approve.assign"}
+    assert "tool.approve.assign" in OPERATOR_SCOPES
+    assert all(
+        "tool.approve.assign" not in group
+        for group in (AUTHOR_SCOPES, REVIEWER_SCOPES, EXAMINER_SCOPES, OVERRIDE_SCOPES)
+    )
     # Pairwise disjointness — no scope in two groups.
     groups = [
         AUTHOR_SCOPES,

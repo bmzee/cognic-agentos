@@ -315,7 +315,7 @@ Landed with the M8.5-C T1 kernel slice (spec `docs/superpowers/specs/2026-07-11-
 
 1. **The reviewer queue is a fixed actionable projection over `pending | awaiting_second`.** The originally advertised `?status=` filter is RETIRED from the contract — terminal history belongs to evidence surfaces, never the live queue. `GET /api/v1/approvals/` gains `limit` (1..200, default 50; FastAPI-validated wire bounds) + `cursor` (opaque, versioned, strictly decoded — every decode failure is `422 {"detail": {"reason": "cursor_invalid"}}` with a 256-char pre-decode length cap). The response body stays `list[ApprovalSummaryResponse]`; pagination rides a **relative** `Link: </api/v1/approvals/?cursor=…&limit=…>; rel="next"` response header. Storage walks a `(created_at ASC, request_id ASC)` chronological keyset (Oracle-portable tuple expansion) backed by migration 0017's `ix_approval_requests_tenant_created_request (tenant_id, created_at, request_id)` index.
 2. **Actor-bound grant replay, engine-owned.** `ApprovalEngine.verify_grant_for_action` gains the REQUIRED `expected_originator_subject` parameter and runs the **corrected verification precedence**: tenant-scoped RAW load (absent/cross-tenant collapse; no mutation) → ORIGINATOR (`approval_originator_mismatch`, the 11th `ApprovalTransitionRefusedReason` value; portal 403) → **UNCONDITIONAL binding** (persisted `args_digest`/`tool_identity` are create-time constants — a wrong-shape replay of a *pending* request now refuses `approval_binding_mismatch`, never "pending") → lazy expiry + state projection (the ONLY mutating step; a wrong-originator caller causes zero expiry mutation and zero evidence). The grant is usable only by the **original requesting subject**; the approver remains a distinct human for four-eyes — two identities, two roles, one request. Refusals are value-free (request id + bounded reason; never a subject).
-3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (wire 10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
+3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (the then-10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
 4. **Four-eyes TTL note:** the M8.5-C live proof raises `approval_four_eyes_ttl_s` above its browser-bar worst case via configuration — the 60-second default is unchanged.
 
 ## Maker-checker amendment (2026-07-16) — originator exclusion at every grant index
@@ -327,3 +327,145 @@ the sole grant or the first leg of four-eyes approval. The additive refusal
 distinctness and its `four_eyes_approver_not_distinct` precedence remain
 unchanged; the originator may still `deny` their own request as a legitimate
 self-cancel. This is the code-level maker-checker control for NIST AC-5.
+
+## M8.5-D D2 phase-A amendment (2026-07-16) — approvals as bank-owned assignment
+
+Phase A adds an assignment-governed flow without weakening the existing tier
+policy. A current `(tenant_id, tool_identity)` assignment wins and may tighten
+an otherwise auto-run tier; an absent assignment follows the tier flow exactly
+as before. Empty assignments are unrepresentable, so assignment data cannot
+turn an approval-mandating tier into auto-run. The new flow value is
+`require_assigned`, with an independently configurable positive
+`approval_assigned_ttl_s` (default 60 seconds).
+
+The bank owns the threshold: `required_count` is the size of the persisted,
+request-frozen eligible subject set. Each grant appends one normalized
+`approval_decisions` row at the next zero-based index in the same transaction
+that advances `decisions_recorded` and appends decision-history evidence. A
+named unique constraint on `(request_id, approver_subject)` is the authoritative
+race guard; the engine's prior-decider read is advisory. The first two decisions
+retain the established `approval.granted_first` / `approval.granted_second`
+events and payload shapes. Index 2 and later emit `approval.grant_recorded` with
+only `decision_index` and `required_count` added to the value-free payload.
+
+The decision authority chain remains human -> tenant -> expiry -> tier scope ->
+reason policy, then adds request-frozen assignment membership and N-way
+distinctness before the row-locked transition. The requester remains excluded
+at every grant index; index 1 preserves the existing
+`four_eyes_approver_not_distinct` wire precedence, while later requester or
+repeat decisions use the additive assignment/N-way refusal vocabulary. An
+engine built without an assignment store retains the M8.5-C tier-only four-eyes
+sequence unchanged.
+
+## M8.5-D D2 phase-B replay-custody amendment (2026-07-16)
+
+The approval envelope and every `approval.*` decision-history row remain
+value-free. Exact approved argument bytes instead live in the separate
+`approval_replay_payloads` table as `canonical_bytes()` output, bound to the
+request's existing `args_digest`. The MCP mint path computes those bytes once
+and uses the same value for both the digest and replay persistence; no model,
+user, or approver can re-author them after the request is minted.
+
+Replay custody verifies derived facts at both boundaries: persistence
+recomputes SHA-256 before writing, and every load recomputes it again before
+returning bytes. Terminal result bytes receive the same retained-digest
+contract. Tenant-scoped absence collapses to `replay_not_persisted`; erased
+material returns `replay_erased`; any stored-byte drift returns
+`replay_digest_mismatch`.
+
+Regulator erasure nulls `canonical_args` and `result_canonical` while retaining
+the replay row, both digests, and the erasure timestamp. The replay table emits
+no chain rows: the approval request's existing value-free chain evidence owns
+the argument digest, while this table is erasable retrieval material.
+
+## M8.5-D D2 phase-B single-use amendment (2026-07-16)
+
+An approval grant is actor-bound and single-use. `granted` remains the terminal
+wire state; execution ownership is represented by the nullable `consumed_at`
+and `consumed_by` columns rather than a new state. The store claims those
+columns atomically with `UPDATE ... WHERE state='granted' AND consumed_at IS
+NULL`; exactly one caller receives `first_claim`, while later callers receive
+`already_consumed` and non-granted requests receive `not_granted`.
+
+The winning claim and its value-free `approval.consumed` decision-history row
+commit in one transaction. The row carries only the approval request id, the
+invocation request-id correlator in `consumed_by`, and the immutable tool
+identity. The direct-MCP lane maps a repeated use to the additive
+`tool_approval_consumed` conflict and never dispatches it. Its established
+Bar-D-shaped flow remains compatible: the first exact-shape re-call after the
+final distinct grant claims and dispatches once.
+
+Stored-result replay is deliberately not part of the direct-MCP lane. It is
+owned by the later kernel execution service. The phase-C amendment below
+records both the tool-side idempotency contract and the remaining
+consume-before-send crash boundary; this amendment does not imply that a
+second human POST can execute or retrieve a result.
+
+## M8.5-D D2 phase-C execution amendment (2026-07-17)
+
+Conversation-originated action approvals now have a kernel-owned execution
+handoff. After the final grant transaction commits, the portal awaits
+`ApprovalExecutionService.execute_granted` inline. Non-final grants never
+trigger it. The service resolves the approval's conversation correlation,
+claims consumption once through `MCPHost.execute_consumed_action`, reloads and
+digest-verifies the exact approved canonical argument bytes, stamps a
+short-lived RS256 action-context token, dispatches through the host's existing
+authorization/DLP/audit pipeline, records canonical result bytes, appends a
+replay-excluded system turn, and emits value-free `approval.executed` evidence.
+The public `MCPHost.call_tool` contract is unchanged; its direct-MCP lane still
+returns `tool_approval_consumed` on a second use.
+
+The grant route is retry-safe for a participant whose duplicate-decision guard
+fires before the terminal-state guard: only the established duplicate-decider
+or already-finalized reasons may enter stored-result recovery, and only when
+the request currently projects as `granted`. Maker-checker, scope, assignment,
+and reason-policy refusals remain refusals. A second final-grant POST therefore
+reports `already_executed` without redispatching. Denial never executes and
+posts the exact system-authored outcome `Declined by {approver} — {reason}.`
+
+Delivery in this phase is an inline attempt plus startup recovery of
+`granted AND consumed_at IS NULL` conversation approvals older than the
+configured grace interval. It is not unconditional at-least-once delivery
+across process death: the single-use rule deliberately forbids redispatch once
+the consume claim has committed, leaving a narrow fail-closed window if the
+process dies before the tool receives the call or before the result is stored.
+When a call does reach the tool, the tool must deduplicate the stable
+`idempotency_key = sha256(approval_request_id UTF-8 || raw args digest bytes)`
+and return its original result. Closing the consumed-without-result recovery
+window needs a separately reviewed durable delivery claim; scheduler-lane
+execution also remains deferred.
+
+## M8.5-D D2 phase-D closeout (2026-07-17)
+
+The governed-write arc is now one kernel-owned path: a bank-owned assignment
+freezes the eligible approvers and required count onto the request; N-way
+maker-checker decisions advance under the approval row lock; exact canonical
+arguments remain in the erasable replay store; the final grant is claimed once;
+and the conversation executor replays those bytes through the existing MCP
+authorization, DLP, audit, and decision-history path. Queue summaries and detail
+responses surface `decisions_recorded` / `required_count`, and the approval UI
+event family carries the user-visible request, grant, denial, expiry, and
+execution transitions. `approval.consumed` remains internal claim machinery.
+
+The originator-refusal vocabulary is deliberately index-sensitive. At decision
+index 0, an originator grant refuses `originator_cannot_approve`. At index 1,
+the established four-eyes contract remains byte-stable as
+`four_eyes_approver_not_distinct`; the D2 end-to-end test pins both indices. At
+N-way indices 2 and later, an originator grant again refuses
+`originator_cannot_approve`. This preserves the released four-eyes reason without
+making later N-way decisions pretend to be the second four-eyes leg.
+
+Two operational limits remain explicit. First, retrying a consumed grant whose
+result was never stored posts another "could not proceed" system turn on each
+attempt. That duplicate is known evidence noise, not another tool execution, and
+is subsumed by the future durable-delivery work. Second, multiple replicas may
+run the startup sweep over the same candidate, but the atomic consume claim
+makes that race benign: at most one replica can dispatch. Wave 1 remains a
+single-replica executor posture; scheduler-lane integration must revisit the
+delivery and coordination model.
+
+Per-tool risk-tier overrides remain deferred and were not built in D2. The next
+owned slices are scheduler-lane executor integration; pack-side action-context
+verification plus idempotency persistence in D5; assignment pools whose required
+count is independent of set size; notification push; durable delivery across the
+consumed-without-result window; and the separately operated arc-end live proof.

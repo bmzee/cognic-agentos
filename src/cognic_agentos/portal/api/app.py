@@ -109,7 +109,9 @@ if TYPE_CHECKING:
     # kwargs (mirrors the config-overlay pattern below — the route factory
     # ``build_approval_routes`` is imported at runtime; the store + engine are
     # supplied PRE-CONSTRUCTED by build_runtime / the deploy entrypoint).
+    from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
     from cognic_agentos.core.approval.engine import ApprovalEngine
+    from cognic_agentos.core.approval.executor import ApprovalExecutionService
     from cognic_agentos.core.approval.storage import ApprovalRequestStore
 
     # ADR-023 (Wave-2): type-only refs for the create_app config-overlay
@@ -336,12 +338,16 @@ def create_app(
     runtime_config_materializer: RuntimeConfigMaterializer | None = None,
     # ADR-014 (Sprint 13.5b1): optional approval-router deps. When BOTH are
     # wired, create_app mounts the approval router (queue/detail/grant/
-    # grant-second/deny) + sets app.state.approval_router_mounted. Same opt-in
-    # None-default pattern as config_overlay_store/_resolver — build_runtime
-    # constructs the pair; the deploy entrypoint threads them here. The SAME
-    # engine instance is reused by 13.5b2's MCP-host seam.
+    # grant-second/deny) + sets app.state.approval_router_mounted. The optional
+    # assignment store adds the D2-A PUT/GET/DELETE admin surface without
+    # changing the legacy two-dependency mount. Same opt-in None-default pattern
+    # as config_overlay_store/_resolver — the deploy entrypoint threads the
+    # constructed instances here. The SAME engine instance is reused by
+    # 13.5b2's MCP-host seam.
     approval_store: ApprovalRequestStore | None = None,
     approval_engine: ApprovalEngine | None = None,
+    approval_assignment_store: ApprovalAssignmentStore | None = None,
+    approval_executor: ApprovalExecutionService | None = None,
     # ADR-018 (Sprint 13.6a): optional emergency kill-switch engine. When wired
     # ALONGSIDE decision_history_store, create_app mounts the emergency router
     # (kill-switches list/flip/revert + audit) + sets
@@ -1085,6 +1091,36 @@ def create_app(
                     app.state.conversation_executor = None
                     app.state.conversation_read_model = None
 
+                # M8.5-D D2-C — approved actions auto-execute only when all
+                # three authority-bearing collaborators exist: the signing
+                # key, MCP host, and conversation completer. Construction and
+                # the bounded startup sweep are fail-soft: either failure
+                # leaves grants safely unconsumed for a later retry.
+                if app.state.approval_executor is None:
+                    try:
+                        from cognic_agentos.harness.approval_executor import (
+                            build_approval_executor,
+                        )
+
+                        app.state.approval_executor = await build_approval_executor(
+                            runtime=runtime,
+                            settings=settings,
+                            engine=adapters.relational.engine,
+                            secret_adapter=adapters.secret,
+                            mcp_host=app.state.mcp_host,
+                            conversation_completer=app.state.conversation_executor,
+                        )
+                    except Exception:
+                        logger.error("approval.executor_construction_failed", exc_info=True)
+                        app.state.approval_executor = None
+                if app.state.approval_executor is not None:
+                    try:
+                        await app.state.approval_executor.sweep_granted_unconsumed(
+                            settings.approval_executor_grace_s
+                        )
+                    except Exception:
+                        logger.error("approval.executor_startup_sweep_failed", exc_info=True)
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -1297,6 +1333,7 @@ def create_app(
     # the lifespan populates it with the injected-or-discovered registry.
     app.state.plugin_registry = None
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
+    app.state.approval_executor = approval_executor
     # M5 (ADR-017) — the boot-constructed DLPGuard the lifespan threads into the
     # MCP host. Pre-seeded None (mirrors mcp_host); stays None when the SDK is
     # absent or guard construction fail-softs.
@@ -1546,10 +1583,11 @@ def create_app(
     # ──────────────────────────────────────────────────────────────────
     # Sprint 13.5b1 — approval router mount (ADR-014).
     #
-    # Mirrors the config-overlay 3-state mount above: BOTH deps -> mount
+    # Mirrors the config-overlay 3-state mount above: BOTH base deps -> mount
     # under /api/v1/approvals (the router carries its own prefix) + set
-    # the introspection flag; partial config -> a single structured
-    # fail-loud warning; neither -> no mount (opt-in surface). No
+    # the introspection flag; the optional assignment store enables its admin
+    # routes. Partial config -> a single structured fail-loud warning; neither
+    # -> no mount (opt-in surface). No
     # actor_binder gate at the mount boundary for the same reason as the
     # overlay block: the routes read the binder from app.state at
     # REQUEST time and fail loud there. The ENGINE stays authoritative
@@ -1557,9 +1595,20 @@ def create_app(
     # ──────────────────────────────────────────────────────────────────
     app.state.approval_router_mounted = False
     if approval_store is not None and approval_engine is not None:
-        app.include_router(build_approval_routes(store=approval_store, engine=approval_engine))
+        app.include_router(
+            build_approval_routes(
+                store=approval_store,
+                engine=approval_engine,
+                assignments=approval_assignment_store,
+                executor_provider=lambda: app.state.approval_executor,
+            )
+        )
         app.state.approval_router_mounted = True
-    elif approval_store is not None or approval_engine is not None:
+    elif (
+        approval_store is not None
+        or approval_engine is not None
+        or approval_assignment_store is not None
+    ):
         logger.warning(
             "portal.approval_router_unmounted_partial_config",
             extra={

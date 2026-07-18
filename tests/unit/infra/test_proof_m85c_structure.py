@@ -147,6 +147,13 @@ def test_proof_app_builds_only_the_reference_oidc_binder() -> None:
     )
 
 
+def test_proof_app_wires_assignments_across_its_eager_router_engine() -> None:
+    text = _PROOF_APP.read_text()
+    assert "ApprovalAssignmentStore(decision_history_store)" in text
+    assert "assignments=approval_assignment_store" in text
+    assert "approval_assignment_store=approval_assignment_store" in text
+
+
 # --- the locked grant profile + exact audience (spec §4) ---------------------------
 
 
@@ -226,7 +233,7 @@ def test_realm_users_are_profile_complete_and_have_no_required_actions() -> None
     deliberately refuses required-action detours, so profile completeness is part
     of the generated identity contract."""
     realm = _generate_realm()
-    assert len(realm["users"]) == 8
+    assert len(realm["users"]) == 10
     for user in realm["users"]:
         assert isinstance(user.get("firstName"), str) and user["firstName"]
         assert isinstance(user.get("lastName"), str) and user["lastName"]
@@ -283,6 +290,37 @@ def test_realm_emits_cognic_scopes_as_a_multivalued_array() -> None:
     assert multivalued, (
         "cognic_scopes must be a multivalued mapper (a JSON array, not a bare string)"
     )
+
+
+def test_realm_manages_identity_claim_sources_for_admin_updates() -> None:
+    """Keycloak 26 ignores unmanaged attributes in Admin REST by default.
+
+    Bar G temporarily changes Amir's approval scope through that API, so both
+    mapper source attributes must be explicit, admin-only managed attributes.
+    The disabled unmanaged-attribute posture is represented by omitting the
+    optional policy key; Keycloak 26.2 rejects the literal ``DISABLED`` value.
+    """
+    realm = _generate_realm()
+    providers = realm["components"]["org.keycloak.userprofile.UserProfileProvider"]
+    assert len(providers) == 1
+    provider = providers[0]
+    assert provider["providerId"] == "declarative-user-profile"
+    assert provider["subComponents"] == {}
+
+    encoded = provider["config"]["kc.user.profile.config"]
+    assert isinstance(encoded, list) and len(encoded) == 1
+    profile = json.loads(encoded[0])
+    assert "unmanagedAttributePolicy" not in profile
+    attributes = {item["name"]: item for item in profile["attributes"]}
+    assert {"username", "email", "firstName", "lastName", "tenant_id", "cognic_scopes"} == set(
+        attributes
+    )
+    for name, multivalued in (("tenant_id", False), ("cognic_scopes", True)):
+        assert attributes[name]["permissions"] == {
+            "view": ["admin"],
+            "edit": ["admin"],
+        }
+        assert attributes[name]["multivalued"] is multivalued
 
 
 # --- the live session-case realm levers (lifespan override + event log) ------------
@@ -381,7 +419,7 @@ def test_runner_identity_scopes_match_the_generated_realm() -> None:
         )
 
 
-def test_realm_carries_exactly_eight_identities_including_the_foreign_reader() -> None:
+def test_realm_carries_exactly_ten_identities_including_assignment_humans() -> None:
     realm = _generate_realm()
     usernames = {u["username"] for u in realm["users"]}
     assert usernames == {
@@ -392,12 +430,25 @@ def test_realm_carries_exactly_eight_identities_including_the_foreign_reader() -
         "analyst.sara",
         "approver.dana",
         "approver.erin",
+        "approver.fiona",
+        "assigner.omar",
         "analyst.zara",
     }
     zara = next(u for u in realm["users"] if u["username"] == "analyst.zara")
     assert zara["attributes"]["tenant_id"] == ["proof-foreign"], (
         "the foreign reader must be off-tenant"
     )
+
+    fiona = next(u for u in realm["users"] if u["username"] == "approver.fiona")
+    assert set(fiona["attributes"]["cognic_scopes"]) == {
+        "tool.approve.high_risk_custom",
+        "tool.approve.observe",
+    }
+    omar = next(u for u in realm["users"] if u["username"] == "assigner.omar")
+    assert set(omar["attributes"]["cognic_scopes"]) == {
+        "tool.approve.assign",
+        "tool.approve.observe",
+    }
 
 
 def test_amir_and_sara_are_scope_and_tenant_identical() -> None:
@@ -656,11 +707,21 @@ def test_no_insecure_tls_markers_in_the_proof_shell() -> None:
                 assert flag not in line, f"TLS bypass {flag!r} in {path}: {line!r}"
 
 
-def test_migration_head_is_0017() -> None:
+def test_migration_head_and_d2_shapes_are_0021() -> None:
     text = _RUNNER.read_text()
-    assert 'SCHEMA_REV" = "0017"' in text or '= "0017"' in text, (
-        "runner must assert alembic head 0017"
+    assert 'SCHEMA_REV" = "0021"' in text or '= "0021"' in text, (
+        "runner must assert alembic head 0021"
     )
+    assert 'SHAPE_D2" = "4|5|2|1"' in text, (
+        "runner must read back the D2 assignment, replay, entitlement, and "
+        "conversation-turn schema shapes"
+    )
+
+
+def test_migrate_failure_capture_uses_selector_only_for_job_and_pod() -> None:
+    text = _RUNNER.read_text()
+    assert "get job,pod -l job-name=agentos-migrate -o wide" in text
+    assert "get job/agentos-migrate,pod -l" not in text
 
 
 def test_mcp_authz_is_byte_identical_to_main() -> None:

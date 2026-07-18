@@ -4691,3 +4691,200 @@ def test_attempt19_bar_c_executes_the_exact_refusal_correlation_predicate() -> N
     )
     assert refused.returncode != 0
     assert secret_marker not in refused.stdout + refused.stderr
+
+
+# --------------------------------------------------------------------------- #
+# D2 A-minus — BAR G assigned approval + consume-once live contract.          #
+# --------------------------------------------------------------------------- #
+
+
+def _bar_a_through_f_text() -> str:
+    start_marker = "# ============================ BAR A"
+    end_marker = 'echo "PROOF M8.5-C (BARS A-F) PASS"'
+    assert _RUNNER_TEXT.count(start_marker) == 1
+    assert _RUNNER_TEXT.count(end_marker) == 1
+    start = _RUNNER_TEXT.index(start_marker)
+    end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
+    return _RUNNER_TEXT[start:end]
+
+
+def _bar_g_text() -> str:
+    start_marker = "# ============================ BAR G"
+    end_marker = 'echo "PROOF M8.5-C (BARS A-G) PASS"'
+    assert _RUNNER_TEXT.count(start_marker) == 1, "BAR G is absent or duplicated"
+    assert _RUNNER_TEXT.count(end_marker) == 1, "the A-G terminal marker is absent or duplicated"
+    start = _RUNNER_TEXT.index(start_marker)
+    end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
+    return _RUNNER_TEXT[start:end]
+
+
+def _kc_user_scope_program(end_marker: str) -> str:
+    body = _extract_shell_function("kc_set_user_scope_set")
+    start_marker = "| python3 -c '\n"
+    assert body.count(end_marker) == 1
+    end = body.index(end_marker)
+    start = body.rfind(start_marker, 0, end)
+    assert start >= 0
+    start += len(start_marker)
+    return body[start:end]
+
+
+def test_d2_bar_g_scope_update_refuses_missing_managed_attributes() -> None:
+    source = _kc_user_scope_program('\n\' "$scopes_csv" > "$rep_file"')
+    representation = {
+        "id": "stable-user-id",
+        "username": "analyst.amir",
+        "enabled": True,
+    }
+    probe = subprocess.run(
+        ["python3", "-c", source, "conversation.read,tool.approve.high_risk_custom"],
+        input=json.dumps(representation),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert probe.returncode != 0
+    assert "attributes object" in probe.stderr
+
+
+def test_d2_bar_g_scope_update_preserves_attributes_and_refuses_wrong_shape() -> None:
+    source = _kc_user_scope_program('\n\' "$scopes_csv" > "$rep_file"')
+    valid = subprocess.run(
+        ["python3", "-c", source, "conversation.read"],
+        input=json.dumps(
+            {
+                "id": "stable-user-id",
+                "attributes": {"bank_unit": ["retail"]},
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert valid.returncode == 0, valid.stderr
+    assert json.loads(valid.stdout)["attributes"] == {
+        "bank_unit": ["retail"],
+        "cognic_scopes": ["conversation.read"],
+    }
+
+    malformed = subprocess.run(
+        ["python3", "-c", source, "conversation.read"],
+        input=json.dumps({"id": "stable-user-id", "attributes": []}),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert malformed.returncode != 0
+    assert "attributes object" in malformed.stderr
+
+
+def test_d2_bar_g_scope_update_requires_exact_admin_api_readback() -> None:
+    source = _kc_user_scope_program('\n\' "$scopes_csv" "$TENANT"')
+    expected_scopes = "conversation.read,tool.approve.high_risk_custom"
+    valid = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-m85c"],
+                    "cognic_scopes": [
+                        "tool.approve.high_risk_custom",
+                        "conversation.read",
+                    ],
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    ignored = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-m85c"],
+                    "cognic_scopes": ["conversation.read"],
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert ignored.returncode != 0
+    assert "scope update is not observable" in ignored.stderr
+    assert "conversation.read" not in ignored.stderr
+
+    wrong_tenant = subprocess.run(
+        ["python3", "-c", source, expected_scopes, "proof-m85c"],
+        input=json.dumps(
+            {
+                "attributes": {
+                    "tenant_id": ["proof-foreign"],
+                    "cognic_scopes": expected_scopes.split(","),
+                }
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert wrong_tenant.returncode != 0
+    assert "tenant claim source changed" in wrong_tenant.stderr
+    assert "proof-foreign" not in wrong_tenant.stderr
+
+
+def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
+    assert hashlib.sha256(_bar_a_through_f_text().encode()).hexdigest() == (
+        "92b3942a5b687c072988515f0b6ec6512a3969c5881d5fff342bb26ace778d0a"
+    )
+    assert _RUNNER_TEXT.index("# ============================ BAR G") > _RUNNER_TEXT.index(
+        'echo "PROOF M8.5-C (BARS A-F) PASS"'
+    )
+
+
+def test_d2_bar_g_reads_the_canonical_identity_from_bar_d() -> None:
+    bar = _bar_g_text()
+    assert "request_id='$D_REQ2'" in bar
+    assert "SELECT tool_identity FROM approval_requests" in bar
+    assert 'G_TOOL_ID="mcp:' not in bar
+
+
+def test_d2_bar_g_assignment_and_flow_witness_are_db_observations() -> None:
+    bar = _bar_g_text()
+    assert 'api omar PUT "/api/v1/approvals/assignments/$G_TOOL_ID"' in bar
+    assert 'doc["required_count"] == 3' in bar
+    assert "approval.assignment_changed" in bar
+    assert "SELECT flow || '|' || required_count::text || '|' || decisions_recorded::text" in bar
+    assert 'G_SNAPSHOT" = "require_assigned|3|0|pending"' in bar
+
+
+def test_d2_bar_g_pins_three_way_progress_and_exact_chain_order() -> None:
+    bar = _bar_g_text()
+    for progress in ("1|3|awaiting_second", "2|3|awaiting_second", "3|3|granted"):
+        assert progress in bar
+    assert (
+        "approval.requested,approval.granted_first,approval.granted_second,approval.grant_recorded"
+    ) in bar
+
+
+def test_d2_bar_g_pins_consume_once_and_both_originator_indices() -> None:
+    bar = _bar_g_text()
+    assert bar.count('recall_probe amir "$G_REQ1" "$G_NONCE1"') == 2
+    assert "tool_approval_consumed" in bar
+    assert "originator_cannot_approve" in bar
+    assert "four_eyes_approver_not_distinct" in bar
+    assert "kc_set_user_scope_set analyst.amir" in bar
+    assert 'kc_set_user_scope_set analyst.amir "${IDENTITY_SCOPES[amir]}"' in bar
+
+
+def test_d2_bar_g_real_service_token_cannot_mutate_the_assignment() -> None:
+    bar = _bar_g_text()
+    assert "proof_mcp_service_token" in bar
+    assert "api_with_bearer" in bar
+    assert "actor_unauthenticated" in bar
+    assert "typ_not_at_jwt" in bar
+    assert 'G_ASSIGN_EVENTS_AFTER_SERVICE" = "$G_ASSIGN_EVENTS_AFTER"' in bar

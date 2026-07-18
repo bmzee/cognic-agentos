@@ -46,9 +46,10 @@ goes through this factory's eager engine. They are two SQLAlchemy engines over
 ONE Postgres, so they see the same rows — the four-eyes ledger in Bar D is
 coherent because Postgres, not because the two halves share an object.
 
-**B. The approvals surface.** ``create_app(approval_store=..., approval_engine=...)``
-mounts ``/api/v1/approvals`` — the surface the harness's approvals screen reads
-and acts on, and the surface HP-4 (paginated queue + actor-bound grant replay)
+**B. The approvals surface.** ``create_app(approval_store=...,
+approval_assignment_store=..., approval_engine=...)`` mounts
+``/api/v1/approvals`` — the surface the harness's approvals screen reads and
+acts on, and the surface HP-4 (paginated queue + actor-bound grant replay)
 extended. The engine is built with the SYNC :class:`OPAEngine` constructor: the
 async ``OPAEngine.create()`` differs only by emitting one ``policy.bundle_loaded``
 chain row, which the lifespan's ``build_runtime`` emits anyway from its own
@@ -100,7 +101,7 @@ def _build_actor_binder() -> ActorBinder:
     must not serve. There is no unauthenticated mode, no header mode, and no
     "trust the claims" mode to fall back to.
     """
-    from overlay_reference import build_reference_binder
+    from overlay_reference.binder import build_reference_binder
 
     issuer = os.environ.get(_ISSUER_ENV, "")
     ca_bundle = os.environ.get(_CA_BUNDLE_ENV, "")
@@ -145,7 +146,8 @@ def create_proof_app() -> FastAPI:
     3. builds a real :class:`TrustGate` + the proof-only staged trust-root
        resolver, so the approve 5-gate's SIGNATURE gate cosign-verifies the
        RELEASED, SIGNED packs against a REAL trust root (never stubbed);
-    4. builds the ADR-014 approval store + engine so ``/api/v1/approvals`` mounts;
+    4. builds the ADR-014 approval + assignment stores and assignment-aware
+       engine so ``/api/v1/approvals`` mounts;
     5. builds the REFERENCE OIDC BINDER — the only identity path;
     6. calls ``create_app(...)`` with all of the above.
 
@@ -157,6 +159,7 @@ def create_proof_app() -> FastAPI:
     """
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
     from cognic_agentos.core.approval.engine import ApprovalEngine
     from cognic_agentos.core.approval.policy import ApprovalPolicy
     from cognic_agentos.core.approval.storage import ApprovalRequestStore
@@ -228,6 +231,7 @@ def create_proof_app() -> FastAPI:
     # `high_risk_custom` tier routes to the genuine ADR-014 four-eyes flow — the
     # proof does not hand-wire the flow it claims to be testing.
     approval_store = ApprovalRequestStore(decision_history_store)
+    approval_assignment_store = ApprovalAssignmentStore(decision_history_store)
     approval_engine = ApprovalEngine(
         policy=ApprovalPolicy(
             opa_engine=OPAEngine(
@@ -239,6 +243,7 @@ def create_proof_app() -> FastAPI:
             )
         ),
         store=approval_store,
+        assignments=approval_assignment_store,
         settings=settings,
         clock=lambda: datetime.now(UTC),
     )
@@ -257,6 +262,7 @@ def create_proof_app() -> FastAPI:
         trust_gate=trust_gate,
         trust_root_resolver=trust_root_resolver,
         approval_store=approval_store,
+        approval_assignment_store=approval_assignment_store,
         approval_engine=approval_engine,
     )
     return app

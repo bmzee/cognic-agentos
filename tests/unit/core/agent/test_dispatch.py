@@ -23,6 +23,7 @@ import dataclasses
 import hashlib
 import json
 import pathlib
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -38,6 +39,7 @@ from cognic_agentos.core.agent._types import (
     GrantedCapabilities,
     LoadedAgentRecord,
 )
+from cognic_agentos.core.agent.action_context import ACTION_CONTEXT_ARGUMENT
 from cognic_agentos.core.agent.dispatch import (
     _BUILTIN_NAMES,
     _QUERY_CONTEXT_ARG,
@@ -165,11 +167,19 @@ def _call(name: str, **arguments: Any) -> GatewayToolCall:
 class _StubEntitlements:
     """Spy conformer for the two EntitlementStore reads gate 2 makes."""
 
-    def __init__(self, *, entitled: frozenset[str], scopes: dict[str, DataScope]) -> None:
+    def __init__(
+        self,
+        *,
+        entitled: frozenset[str],
+        scopes: dict[str, DataScope],
+        action_entitled: bool,
+    ) -> None:
         self._entitled = entitled
         self._scopes = scopes
+        self._action_entitled = action_entitled
         self.entitled_calls: list[dict[str, str]] = []
         self.resolve_calls: list[dict[str, str]] = []
+        self.action_calls: list[dict[str, str]] = []
 
     async def entitled_scope_ids(self, *, tenant_id: str, subject: str) -> frozenset[str]:
         self.entitled_calls.append({"tenant_id": tenant_id, "subject": subject})
@@ -178,6 +188,22 @@ class _StubEntitlements:
     async def resolve_scope(self, *, tenant_id: str, scope_id: str) -> DataScope | None:
         self.resolve_calls.append({"tenant_id": tenant_id, "scope_id": scope_id})
         return self._scopes.get(scope_id)
+
+    async def entitled_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        tool_identity: str,
+    ) -> bool:
+        self.action_calls.append(
+            {
+                "tenant_id": tenant_id,
+                "subject": subject,
+                "tool_identity": tool_identity,
+            }
+        )
+        return self._action_entitled
 
 
 class _StubOPAEngine:
@@ -317,10 +343,12 @@ def _harness(
     signing_key_pem: bytes | None = None,
     ttl_s: float = 300.0,
     tool_capability_classes: Mapping[str, str] | None = None,
+    action_entitled: bool = False,
 ) -> _Harness:
     entitlements = _StubEntitlements(
         entitled=entitled,
         scopes=scopes if scopes is not None else {_SCOPE_ID: _SCOPE},
+        action_entitled=action_entitled,
     )
     opa = _StubOPAEngine(allow=allow, exc=opa_exc)
     policy = AgentDispatchPolicy(opa_engine=opa)  # type: ignore[arg-type]
@@ -624,24 +652,28 @@ class TestCapabilityClassGate:
         assert h.entitlements.entitled_calls == []
         assert h.entitlements.resolve_calls == []
 
-    async def test_action_class_refuses_until_ds2(self) -> None:
+    async def test_unentitled_action_refuses_before_policy_or_proxy(self) -> None:
         h = _harness(tool_capability_classes={_OTHER_REF: "action"})
 
         outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
 
         assert outcome.reason == "agent_scope_not_entitled"
+        assert h.entitlements.action_calls == [
+            {
+                "tenant_id": _TENANT,
+                "subject": _ORIGINATOR,
+                "tool_identity": _OTHER_REF,
+            }
+        ]
         assert h.entitlements.entitled_calls == []
         assert h.opa.seen_inputs == []
         assert h.proxy.calls == []
 
-    async def test_action_refuses_even_with_an_entitled_scope_id(
-        self, keypair: tuple[bytes, bytes]
-    ) -> None:
-        """An entitled data scope cannot authorize a write-class tool."""
-        private_pem, _ = keypair
+    async def test_entitled_action_dispatches_without_data_scope_authority(self) -> None:
+        """Action authority comes from the exact tool entitlement, never scope_id."""
         h = _harness(
             tool_capability_classes={_OTHER_REF: "action"},
-            signing_key_pem=private_pem,
+            action_entitled=True,
         )
 
         outcome = await h.dispatcher.dispatch(
@@ -650,11 +682,44 @@ class TestCapabilityClassGate:
             run=_run(),
         )
 
-        assert outcome.reason == "agent_scope_not_entitled"
+        assert outcome.reason is None
+        assert outcome.result == {"rows": []}
+        assert h.entitlements.action_calls[0]["tool_identity"] == _OTHER_REF
         assert h.entitlements.entitled_calls == []
         assert h.entitlements.resolve_calls == []
-        assert h.opa.seen_inputs == []
-        assert h.proxy.calls == []
+        assert h.opa.seen_inputs[0]["entitlement_verified"] is True
+        assert len(h.proxy.calls) == 1
+
+    async def test_entitled_action_pending_is_typed_and_evidenced(self) -> None:
+        pending_id = str(uuid.uuid4())
+        pending = dispatch_module.AgentToolApprovalPending(
+            approval_request_id=pending_id,
+            flow="require_assigned",
+        )
+        h = _harness(
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_entitled=True,
+            proxy_exc=pending,
+        )
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("other_tool", amount=10),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert outcome == DispatchOutcome(
+            refused=False,
+            reason=None,
+            message=None,
+            result=None,
+            pending=True,
+            approval_request_id=pending_id,
+        )
+        row = _only_row(h)
+        assert row.payload["outcome"] == "pending_approval"
+        assert row.payload["approval_request_id"] == pending_id
+        assert row.payload["refusal_reason"] is None
 
 
 def test_the_hardcoded_stamped_tool_list_is_gone() -> None:
@@ -998,6 +1063,41 @@ class TestBuildLlmToolSpecs:
             "max_rows",
         }
         assert by_name["custom_query"].parameters["additionalProperties"] is False
+
+    def test_action_schema_is_closed_and_never_advertises_reserved_context_key(self) -> None:
+        run = _run(
+            granted=GrantedCapabilities(
+                skills=frozenset(),
+                tools=frozenset({_OTHER_REF}),
+            )
+        )
+        (action_spec, *_) = build_llm_tool_specs(
+            run=run,
+            capability_classes={_OTHER_REF: "action"},
+        )
+        assert action_spec.name == "other_tool"
+        assert action_spec.parameters["additionalProperties"] is False
+        assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters["properties"]
+        assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters.get("required", [])
+        (key_pattern,) = action_spec.parameters["patternProperties"]
+        assert re.fullmatch(key_pattern, ACTION_CONTEXT_ARGUMENT) is None
+        assert re.fullmatch(key_pattern, "amount") is not None
+
+
+class TestReservedActionContext:
+    async def test_model_authored_action_context_is_refused_before_approval_or_proxy(self) -> None:
+        h = _harness(
+            action_entitled=True,
+            tool_capability_classes={_OTHER_REF: "action"},
+        )
+        out = await h.dispatcher.dispatch(
+            call=_call("other_tool", amount=1, **{ACTION_CONTEXT_ARGUMENT: "forged"}),
+            step_index=0,
+            run=_run(),
+        )
+        assert out.refused is True
+        assert out.reason == "agent_tool_dispatch_failed"
+        assert h.proxy.calls == []
 
 
 # --- Pin 7 — backend failure (safe message) -------------------------------------------

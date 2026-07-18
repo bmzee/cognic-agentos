@@ -2,8 +2,8 @@
 regressions for the decision_history typed projector table.
 
 Verifies:
-  - All 5 known decision_types (4 exact-match + 1 prefix-match) project to
-    the correct typed family/type slot
+  - Representative original exact-match + prefix-match decision types project
+    to the correct typed family/type slot
   - Unknown decision_types fall through to None (mirror-only path)
   - Projector event_ids are deterministic per (sequence, family.type) tuple
   - Canonical projection order holds: typed at ordinal 0, mirror at ordinal 1
@@ -116,13 +116,14 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             assert evt.type == "rbac_denied"
 
     def test_table_keyset_pinned(self) -> None:
-        """Drift detector — the 17 exact-match keys are the only allowed
+        """Drift detector — the 25 exact-match keys are the only allowed
         Wave-1 vocabulary on the typed-dispatch table (4 frontend_action +
         policy.decision_evaluated + the 2 subagent entries wired in Sprint
         11b T9 + the 4 memory.* entries wired in Sprint 11.5c T6 + the 2
         emergency.kill_switch_* entries wired in Sprint 13.6 T3 per the
         ADR-018 spec + plan of record + the 5 agent.run.* entries wired at
-        M8 A12 per ADR-027 + the ADR-020 phase table). Adding a further
+        M8 A12 per ADR-027 + the ADR-020 phase table + the 7 approval
+        transition entries wired at M8.5-D D2 T10). Adding a further
         entry requires a deliberate plan-of-record amendment + the
         corresponding class added to `_TYPED_PROJECTION_CLASSES`. Note:
         `rbac.*` (prefix) and the subagent depth-cap (scoped
@@ -143,12 +144,21 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             # Sprint 13.6 T3 — emergency kill-switch flip/revert (ADR-018).
             "emergency.kill_switch_flipped",
             "emergency.kill_switch_reverted",
+            # M8.5-D D2 T10 — approval transition projectors.
+            "approval.requested",
+            "approval.granted_first",
+            "approval.granted_second",
+            "approval.grant_recorded",
+            "approval.denied",
+            "approval.expired",
+            "approval.executed",
             # M8 A12 (ADR-027 + ADR-020) — agent.run.* chain event projectors.
             "agent.run.started",
             "agent.run.dispatch",
             "agent.run.completed",
             "agent.run.refused",
             "agent.run.failed",
+            "agent.run.pending_approval",
         }
 
 

@@ -68,9 +68,14 @@ _CURSOR_VERSION: Final[int] = 1
 
 _STATE_VOCAB: Final[frozenset[str]] = frozenset({"active", "closed", "expired", "erased"})
 
-#: The three legal terminal event types (loop.py `_finish`).
+#: The four legal terminal event types (loop.py `_finish`).
 _TERMINAL_EVENT_TYPES: Final[frozenset[str]] = frozenset(
-    {"agent.run.completed", "agent.run.refused", "agent.run.failed"}
+    {
+        "agent.run.completed",
+        "agent.run.refused",
+        "agent.run.failed",
+        "agent.run.pending_approval",
+    }
 )
 
 #: Internal (log-only) integrity reasons — the wire stays generic.
@@ -94,7 +99,7 @@ class CursorInvalid(Exception):
 
 
 class TurnNotFound(Exception):
-    """The conversation IS owned but the seq lies beyond ``1..turn_count``.
+    """The conversation IS owned but no agent-run chain exists at the seq.
     Owner-visible only — ownership failures collapse to the byte-identical
     conversation 404 upstream of this, and an ABSENT row INSIDE the
     watermark is never this exception: the record claims that turn exists,
@@ -263,6 +268,8 @@ class TranscriptTurn:
     completion_tokens: int
     created_at: datetime
     erased_at: datetime | None
+    approval_request_id: str | None = None
+    turn_kind: Literal["exchange", "system"] = "exchange"
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,10 +501,33 @@ class ConversationReadModel:
 
     # -- the isolation gate ------------------------------------------------------
 
-    async def _load_owned(
-        self, conversation_id: uuid.UUID, *, tenant_id: str, creator_subject: str
+    async def _load_owned_with_turn_extent(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        creator_subject: str,
     ) -> Any | None:
-        stmt = sa.select(_conversations).where(
+        """Resolve ownership and physical transcript extent in one snapshot."""
+        physical_watermark = (
+            sa.select(sa.func.coalesce(sa.func.max(_conversation_turns.c.seq), 0))
+            .where(_conversation_turns.c.conversation_id == conversation_id)
+            .scalar_subquery()
+        )
+        exchange_count = (
+            sa.select(sa.func.count())
+            .select_from(_conversation_turns)
+            .where(
+                _conversation_turns.c.conversation_id == conversation_id,
+                _conversation_turns.c.turn_kind == "exchange",
+            )
+            .scalar_subquery()
+        )
+        stmt = sa.select(
+            _conversations,
+            physical_watermark.label("physical_watermark"),
+            exchange_count.label("exchange_count"),
+        ).where(
             _conversations.c.conversation_id == conversation_id,
             _conversations.c.tenant_id == tenant_id,
             _conversations.c.creator_subject == creator_subject,
@@ -573,20 +603,21 @@ class ConversationReadModel:
         limit: int | None = None,
         cursor: str | None = None,
     ) -> TranscriptPage | None:
-        row = await self._load_owned(
+        row = await self._load_owned_with_turn_extent(
             conversation_id, tenant_id=tenant_id, creator_subject=creator_subject
         )
         if row is None:
             return None
+        physical_watermark = max(int(row["physical_watermark"]), int(row["turn_count"]))
         page_size = _clamp_limit(limit)
         if cursor is not None:
             decoded = _decode_transcript_cursor(cursor, conversation_id=conversation_id)
-            # turn_count never decreases; a watermark above it is impossible.
-            if decoded.watermark > row["turn_count"]:
+            # Physical seq never decreases; a watermark above it is impossible.
+            if decoded.watermark > physical_watermark:
                 raise CursorInvalid("transcript cursor watermark exceeds the conversation")
             watermark, after_seq = decoded.watermark, decoded.after_seq
         else:
-            watermark, after_seq = row["turn_count"], 0
+            watermark, after_seq = physical_watermark, 0
 
         summary = ConversationSummary(
             conversation_id=row["conversation_id"],
@@ -633,6 +664,12 @@ class ConversationReadModel:
                 f"conversation {conversation_id}: transcript ends at seq {last_returned}, "
                 f"watermark is {watermark} (missing tail)"
             )
+        if row["exchange_count"] != row["turn_count"]:
+            raise ConversationTranscriptIntegrityError(
+                f"conversation {conversation_id}: missing tail or exchange row; "
+                f"found {row['exchange_count']} exchange rows for "
+                f"turn_count {row['turn_count']}"
+            )
 
         turns = tuple(
             TranscriptTurn(
@@ -645,6 +682,8 @@ class ConversationReadModel:
                 completion_tokens=turn_row["completion_tokens"],
                 created_at=turn_row["created_at"],
                 erased_at=turn_row["erased_at"],
+                approval_request_id=turn_row["approval_request_id"],
+                turn_kind=turn_row["turn_kind"],
             )
             for turn_row in page
         )
@@ -674,13 +713,14 @@ class ConversationReadModel:
         tenant_id: str,
         creator_subject: str,
     ) -> TurnChainJoin | None:
-        row = await self._load_owned(
+        row = await self._load_owned_with_turn_extent(
             conversation_id, tenant_id=tenant_id, creator_subject=creator_subject
         )
         if row is None:
             return None
-        if seq < 1 or seq > row["turn_count"]:
-            raise TurnNotFound(f"seq {seq} outside 1..{row['turn_count']}")
+        physical_watermark = max(int(row["physical_watermark"]), int(row["turn_count"]))
+        if seq < 1 or seq > physical_watermark:
+            raise TurnNotFound(f"seq {seq} outside 1..{physical_watermark}")
         turn_stmt = sa.select(_conversation_turns).where(
             _conversation_turns.c.conversation_id == conversation_id,
             _conversation_turns.c.seq == seq,
@@ -694,8 +734,10 @@ class ConversationReadModel:
                 # never the owner-visible turn_not_found 404.
                 raise ConversationTranscriptIntegrityError(
                     f"conversation {conversation_id}: turn row seq {seq} missing "
-                    f"inside 1..{row['turn_count']}"
+                    f"inside 1..{physical_watermark}"
                 )
+            if turn["turn_kind"] != "exchange":
+                raise TurnNotFound(f"seq {seq} is a system turn without an agent-run chain")
             hop1_rows = (
                 (
                     await conn.execute(

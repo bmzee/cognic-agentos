@@ -5,6 +5,7 @@ import logging
 import typing
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -13,9 +14,13 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from starlette.requests import Request
 
-from cognic_agentos.core.approval._types import ApprovalTransitionRefusedReason
+from cognic_agentos.core.approval._types import (
+    ApprovalTransitionRefused,
+    ApprovalTransitionRefusedReason,
+)
 from cognic_agentos.core.approval.engine import ApprovalEngine
-from cognic_agentos.core.approval.storage import ApprovalRequestStore
+from cognic_agentos.core.approval.executor import ExecutionOutcome
+from cognic_agentos.core.approval.storage import ApprovalRequestStore, _approval_requests
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.portal.api.approvals.routes import _REFUSAL_STATUS, build_approval_routes
@@ -118,6 +123,56 @@ def _client(actor: Actor, store: ApprovalRequestStore, engine: ApprovalEngine) -
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://t")
 
 
+class _TriggerEngine:
+    def __init__(self, states: list[str]) -> None:
+        self.states = states
+
+    async def grant(self, **_: Any) -> str:
+        return self.states.pop(0)
+
+    async def grant_second(self, **_: Any) -> str:
+        return self.states.pop(0)
+
+    async def deny(self, **_: Any) -> str:
+        return "denied"
+
+
+class _TriggerExecutor:
+    def __init__(self, outcome: ExecutionOutcome = "executed") -> None:
+        self.executions: list[tuple[uuid.UUID, str]] = []
+        self.denials: list[dict[str, Any]] = []
+        self.outcome = outcome
+
+    async def supports_request(self, **_: Any) -> bool:
+        return True
+
+    async def execute_granted(self, *, request_id: uuid.UUID, tenant_id: str) -> ExecutionOutcome:
+        self.executions.append((request_id, tenant_id))
+        return self.outcome
+
+    async def post_denied(self, **kwargs: Any) -> bool:
+        self.denials.append(kwargs)
+        return True
+
+
+def _trigger_client(
+    actor: Actor,
+    engine: _TriggerEngine,
+    executor: _TriggerExecutor,
+) -> AsyncClient:
+    app = FastAPI()
+    app.state.actor_binder = _StubBinder(actor)
+    app.state.ui_event_broker = None
+    app.include_router(
+        build_approval_routes(
+            store=cast(ApprovalRequestStore, object()),
+            engine=cast(ApprovalEngine, engine),
+            executor_provider=lambda: executor,
+        )
+    )
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://t")
+
+
 @pytest.mark.asyncio
 async def test_list_queue_returns_tenant_rows(tmp_path: Any) -> None:
     store = await _mk_store(tmp_path)
@@ -139,6 +194,33 @@ async def test_get_detail_renders_hex_digest(tmp_path: Any) -> None:
     assert resp.status_code == 200
     assert resp.json()["request_id"] == str(rid)
     assert resp.json()["args_digest"] == "02" * 32  # hex on the wire, never bytes
+
+
+@pytest.mark.asyncio
+async def test_queue_and_detail_render_two_of_four_progress(tmp_path: Any) -> None:
+    store = await _mk_store(tmp_path)
+    rid = uuid.uuid4()
+    await _seed(store, request_id=rid, flow="require_4_eyes")
+    async with store._engine.begin() as conn:
+        await conn.execute(
+            _approval_requests.update()
+            .where(_approval_requests.c.request_id == rid)
+            .values(decisions_recorded=2, required_count=4)
+        )
+
+    async with _client(_make_actor(), store, _mk_engine(store)) as client:
+        queue_response = await client.get("/api/v1/approvals/")
+        detail_response = await client.get(f"/api/v1/approvals/{rid}")
+
+    assert queue_response.status_code == detail_response.status_code == 200
+    assert {
+        "decisions_recorded": queue_response.json()[0]["decisions_recorded"],
+        "required_count": queue_response.json()[0]["required_count"],
+    } == {"decisions_recorded": 2, "required_count": 4}
+    assert {
+        "decisions_recorded": detail_response.json()["decisions_recorded"],
+        "required_count": detail_response.json()["required_count"],
+    } == {"decisions_recorded": 2, "required_count": 4}
 
 
 @pytest.mark.asyncio
@@ -170,7 +252,7 @@ async def test_list_actor_tenant_id_missing_returns_500(tmp_path: Any) -> None:
 
 
 def test_every_transition_reason_has_a_status_mapping() -> None:
-    # USER PIN: adding a 13th engine reason FAILS here until the wire
+    # USER PIN: adding a 16th engine reason FAILS here until the wire
     # mapping is updated. Drives from typing.get_args of the engine enum.
     assert set(_REFUSAL_STATUS) == set(typing.get_args(ApprovalTransitionRefusedReason))
     assert all(v in (400, 403, 409) for v in _REFUSAL_STATUS.values())
@@ -186,6 +268,15 @@ def test_originator_mismatch_maps_exactly_403() -> None:
 
 def test_originator_cannot_approve_maps_exactly_409() -> None:
     assert _REFUSAL_STATUS["originator_cannot_approve"] == 409
+
+
+def test_consumed_approval_maps_exactly_409() -> None:
+    assert _REFUSAL_STATUS["approval_consumed"] == 409
+
+
+@pytest.mark.parametrize("reason", ["approver_not_assigned", "approver_not_distinct"])
+def test_assignment_refusals_map_exactly_409(reason: str) -> None:
+    assert _REFUSAL_STATUS[reason] == 409
 
 
 @pytest.mark.asyncio
@@ -324,6 +415,144 @@ async def test_grant_second_4eyes_flow_green(tmp_path: Any, caplog: Any) -> None
     names = [r.getMessage() for r in caplog.records]
     assert names.count("portal.approvals.grant") == 1
     assert names.count("portal.approvals.grant_second") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("states", "verbs"),
+    [
+        (["granted"], ["grant"]),
+        (["awaiting_second", "granted"], ["grant", "grant-second"]),
+        (
+            ["awaiting_second", "awaiting_second", "awaiting_second", "granted"],
+            ["grant", "grant-second", "grant-second", "grant-second"],
+        ),
+    ],
+    ids=["single", "two-of-two", "four-of-four"],
+)
+async def test_only_final_grant_triggers_exactly_one_execution(
+    states: list[str], verbs: list[str]
+) -> None:
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor()
+    actor = _make_actor(scopes=frozenset({"tool.approve.customer_data"}))
+    async with _trigger_client(actor, _TriggerEngine(list(states)), executor) as client:
+        responses = [
+            await client.post(f"/api/v1/approvals/{rid}/{verb}", json={}) for verb in verbs
+        ]
+    assert all(response.status_code == 200 for response in responses)
+    assert executor.executions == [(rid, "t1")]
+    assert responses[-1].json()["execution"] == "executed"
+    for response in responses[:-1]:
+        assert "execution" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_non_final_grant_never_triggers_execution() -> None:
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor()
+    actor = _make_actor(scopes=frozenset({"tool.approve.customer_data"}))
+    async with _trigger_client(actor, _TriggerEngine(["awaiting_second"]), executor) as client:
+        response = await client.post(f"/api/v1/approvals/{rid}/grant", json={})
+    assert response.status_code == 200
+    assert executor.executions == []
+    assert "execution" not in response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal_reason",
+    [
+        "approval_already_finalized",
+        "four_eyes_approver_not_distinct",
+        "approver_not_distinct",
+    ],
+)
+async def test_retried_final_grant_returns_stored_execution_without_redispatch(
+    refusal_reason: ApprovalTransitionRefusedReason,
+) -> None:
+    class _FinalEngine(_TriggerEngine):
+        async def grant(self, **_: Any) -> str:
+            raise ApprovalTransitionRefused(refusal_reason)
+
+        async def check(self, **_: Any) -> Any:
+            return SimpleNamespace(state="granted")
+
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor("already_executed")
+    actor = _make_actor(scopes=frozenset({"tool.approve.customer_data"}))
+    async with _trigger_client(actor, _FinalEngine([]), executor) as client:
+        response = await client.post(f"/api/v1/approvals/{rid}/grant", json={})
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_id": str(rid),
+        "state": "granted",
+        "execution": "already_executed",
+    }
+    assert executor.executions == [(rid, "t1")]
+
+
+@pytest.mark.asyncio
+async def test_final_request_never_recovers_maker_checker_refusal() -> None:
+    class _OriginatorEngine(_TriggerEngine):
+        async def grant(self, **_: Any) -> str:
+            raise ApprovalTransitionRefused("originator_cannot_approve")
+
+        async def check(self, **_: Any) -> Any:
+            return SimpleNamespace(state="granted")
+
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor("already_executed")
+    actor = _make_actor(scopes=frozenset({"tool.approve.customer_data"}))
+    async with _trigger_client(actor, _OriginatorEngine([]), executor) as client:
+        response = await client.post(f"/api/v1/approvals/{rid}/grant", json={})
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "originator_cannot_approve"
+    assert executor.executions == []
+
+
+@pytest.mark.asyncio
+async def test_retried_denied_request_keeps_already_finalized_conflict() -> None:
+    class _DeniedEngine(_TriggerEngine):
+        async def grant(self, **_: Any) -> str:
+            raise ApprovalTransitionRefused("approval_already_finalized")
+
+        async def check(self, **_: Any) -> Any:
+            return SimpleNamespace(state="denied")
+
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor("already_executed")
+    actor = _make_actor(scopes=frozenset({"tool.approve.customer_data"}))
+    async with _trigger_client(actor, _DeniedEngine([]), executor) as client:
+        response = await client.post(f"/api/v1/approvals/{rid}/grant", json={})
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "approval_already_finalized"
+    assert executor.executions == []
+
+
+@pytest.mark.asyncio
+async def test_deny_posts_declined_system_turn_and_never_executes() -> None:
+    rid = uuid.uuid4()
+    executor = _TriggerExecutor()
+    actor = _make_actor(
+        subject="approver.dana",
+        scopes=frozenset({"tool.approve.customer_data"}),
+    )
+    async with _trigger_client(actor, _TriggerEngine([]), executor) as client:
+        response = await client.post(
+            f"/api/v1/approvals/{rid}/deny",
+            json={"reason": "insufficient notice"},
+        )
+    assert response.status_code == 200
+    assert executor.executions == []
+    assert executor.denials == [
+        {
+            "request_id": rid,
+            "tenant_id": "t1",
+            "approver_subject": "approver.dana",
+            "reason": "insufficient notice",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
