@@ -5859,7 +5859,7 @@ while [ -z "$H_AUDIT_ROW" ]; do
   set -e
   [ "$H_AUDIT_RC" -eq 0 ] \
     || bar_fail "BAR H.2 unified-audit readback failed"
-  H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$/' | tail -n 1)"
+  H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tail -n 1)"
   [ -n "$H_AUDIT_ROW" ] && break
   [ "$(date +%s)" -lt "$H_AUDIT_DEADLINE" ] \
     || bar_fail "BAR H.2 unified-audit row was not observable within 60s"

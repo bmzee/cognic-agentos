@@ -5131,6 +5131,8 @@ def test_d3_bar_h_recomputes_and_exactly_matches_the_audit_subject_reference() -
     assert "FLUSH_UNIFIED_AUDIT_TRAIL" not in bar
     assert "H_AUDIT_DEADLINE=$(( $(date +%s) + 60 ))" in bar
     assert 'while [ -z "$H_AUDIT_ROW" ]; do' in bar
+    assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'" in bar
+    assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$/'" not in bar
     assert "sleep 2" in bar
     assert "CLIENT_IDENTIFIER" in bar
     assert '[ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ]' in bar
