@@ -5834,19 +5834,19 @@ H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_h
 echo "  Bar H.1 OK: governed query succeeded and its wire rotation reference equals the chain row"
 
 # H.2 — recompute the audit reference from the IdP-owned subject source. The
-# value is never read from an app response or the audit row itself. Flush the
-# unified queue, then demand the exact proxy/user/client triple for the view H.1
-# queried. DBUSERNAME is the proxy identity; DBPROXY_USERNAME is the app user.
+# value is never read from an app response or the audit row itself. Poll the
+# unified trail for the exact proxy/user/client triple for the view H.1 queried;
+# the pinned Free image exposes no DBMS_AUDIT_MGMT flush procedure. DBUSERNAME
+# is the proxy identity; DBPROXY_USERNAME is the app user.
 H_BOUND_SUBJECT="$(bound_subject analyst.amir)"
 H_SUBJECT_REF="$(printf '%s' "$H_BOUND_SUBJECT" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode("utf-8")).hexdigest())')"
 [[ "$H_SUBJECT_REF" =~ ^[0-9a-f]{64}$ ]] \
   || bar_fail "BAR H.2 runner subject-reference recomputation was not 64 lowercase hex"
-set +e
-H_AUDIT_ROW="$(oracle_admin_sql "BEGIN
-  SYS.DBMS_AUDIT_MGMT.FLUSH_UNIFIED_AUDIT_TRAIL;
-END;
-/
-SELECT DBUSERNAME || '|' || NVL(DBPROXY_USERNAME, '') || '|' || CLIENT_IDENTIFIER
+H_AUDIT_DEADLINE=$(( $(date +%s) + 60 ))
+H_AUDIT_ROW=""
+while [ -z "$H_AUDIT_ROW" ]; do
+  set +e
+  H_AUDIT_ROW="$(oracle_admin_sql "SELECT DBUSERNAME || '|' || NVL(DBPROXY_USERNAME, '') || '|' || CLIENT_IDENTIFIER
   FROM UNIFIED_AUDIT_TRAIL
  WHERE UNIFIED_AUDIT_POLICIES LIKE '%D3_GOVERNED_SELECTS%'
    AND ACTION_NAME = 'SELECT'
@@ -5855,11 +5855,16 @@ SELECT DBUSERNAME || '|' || NVL(DBPROXY_USERNAME, '') || '|' || CLIENT_IDENTIFIE
    AND CLIENT_IDENTIFIER = '$H_SUBJECT_REF'
  ORDER BY EVENT_TIMESTAMP_UTC DESC
  FETCH FIRST 1 ROW ONLY;")"
-H_AUDIT_RC=$?
-set -e
-[ "$H_AUDIT_RC" -eq 0 ] \
-  || bar_fail "BAR H.2 unified-audit readback failed"
-H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$/' | tail -n 1)"
+  H_AUDIT_RC=$?
+  set -e
+  [ "$H_AUDIT_RC" -eq 0 ] \
+    || bar_fail "BAR H.2 unified-audit readback failed"
+  H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$/' | tail -n 1)"
+  [ -n "$H_AUDIT_ROW" ] && break
+  [ "$(date +%s)" -lt "$H_AUDIT_DEADLINE" ] \
+    || bar_fail "BAR H.2 unified-audit row was not observable within 60s"
+  sleep 2
+done
 [ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ] \
   || bar_fail "BAR H.2 unified audit did not carry the exact proxy/user/subject-reference triple"
 echo "  Bar H.2 OK: Oracle unified audit correlates AN_AMIR through COGNIC to sha256(bound_subject)"

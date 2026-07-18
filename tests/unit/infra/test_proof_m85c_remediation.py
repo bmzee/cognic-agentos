@@ -5128,6 +5128,10 @@ def test_d3_bar_h_recomputes_and_exactly_matches_the_audit_subject_reference() -
     assert 'H_BOUND_SUBJECT="$(bound_subject analyst.amir)"' in bar
     assert 'hashlib.sha256(sys.stdin.read().encode("utf-8")).hexdigest()' in bar
     assert "UNIFIED_AUDIT_TRAIL" in bar
+    assert "FLUSH_UNIFIED_AUDIT_TRAIL" not in bar
+    assert "H_AUDIT_DEADLINE=$(( $(date +%s) + 60 ))" in bar
+    assert 'while [ -z "$H_AUDIT_ROW" ]; do' in bar
+    assert "sleep 2" in bar
     assert "CLIENT_IDENTIFIER" in bar
     assert '[ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ]' in bar
     assert bar.index("bound_subject analyst.amir") < bar.index("hashlib.sha256")
