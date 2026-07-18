@@ -4,7 +4,7 @@
 -- gvenzl runs every *.sql in /container-entrypoint-initdb.d once, on the first
 -- boot of a fresh volume, AFTER the database and the APP_USER (cognic) are set
 -- up. These init scripts run as an admin in the root container — NOT as the
--- APP_USER — so we ALTER SESSION INTO XEPDB1 and create everything explicitly
+-- APP_USER — so we ALTER SESSION INTO FREEPDB1 and create everything explicitly
 -- (the proof-m6 pattern).
 --
 -- What this seed builds (spec §6 / plan Task C1):
@@ -53,7 +53,7 @@
 SET DEFINE OFF
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 
-ALTER SESSION SET CONTAINER = XEPDB1;
+ALTER SESSION SET CONTAINER = FREEPDB1;
 
 -- ---------------------------------------------------------------------------
 -- 1. Schema owners (NO AUTHENTICATION = schema-only; not directly connectable)

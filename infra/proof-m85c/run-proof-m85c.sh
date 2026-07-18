@@ -9,7 +9,7 @@
 # conversations`) wrapping the PROVEN M8 governed agent loop, live on kind.
 # The deployment is the proof-m8 bring-up VERBATIM (same SEVEN released,
 # signed packs, same M4 governed operator install for the oracle tool, same
-# in-cluster Oracle XE + RS256/JWKS AS + litellm cloud tier); the ONLY new
+# in-cluster Oracle Free + RS256/JWKS AS + litellm cloud tier); the ONLY new
 # surface under test is the conversation API and its evidence:
 #   * conversation.created / conversation.turn_completed chain rows are
 #     DIGEST-ONLY (question_sha256/answer_sha256 + byte counts); plaintext
@@ -73,7 +73,7 @@
 #
 # Operator-run + env-gated (COGNIC_RUN_PROOF_M85C=1); NO default-on CI job
 # (needs an image build + kind + live Vault/Postgres/Redis + in-cluster
-# Oracle XE + a local TLS registry + the host docker socket + the operator's
+# Oracle Free + a local TLS registry + the host docker socket + the operator's
 # CLOUD provider key). The provider key env (COGNIC_PROOF_M85C_TIER1_API_KEY)
 # is REQUIRED at the gate — operator env at run time, never committed, never
 # image-baked.
@@ -439,12 +439,14 @@ _backend_images() {
 
 # Extra (non-backend) images the proof references with imagePullPolicy: IfNotPresent —
 # pre-pulled + kind-loaded so the kind node never reaches the internet for them:
-# oracle-xe + busybox (the oracle-pack wait-for-xe + the topology-perms init) +
+# Oracle Free + busybox (the oracle-pack wait-for-db + topology-perms init) +
 # redis (the scheduler control plane) + registry:2 (the local TLS registry) +
 # the OTLP collector (inherited diagnostics — ruling R6: NO M8.5 bar depends
 # on spans; manifests/otel-collector.yaml).
 _extra_images() {
-  printf '%s\n' "gvenzl/oracle-xe:21-slim" "busybox:1.36" "redis:7.4-alpine" "registry:2" \
+  printf '%s\n' \
+    "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8" \
+    "busybox:1.36" "redis:7.4-alpine" "registry:2" \
     "otel/opentelemetry-collector:0.111.0"
 }
 
@@ -2288,22 +2290,22 @@ bff_fail() {
   bar_fail "$where"
 }
 
-# Step-5 XE-readiness failure path (mirrors proof-m6 xe_fail).
-xe_fail() {
+# Step-5 Oracle-readiness failure path.
+oracle_db_fail() {
   local where="$1"
-  echo "FAIL: oracle-xe ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  echo "FAIL: oracle-db ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local pods desc logs
   pods="$(kubectl -n "$NS" get pods 2>&1 || true)"
-  desc="$(kubectl -n "$NS" describe pod -l app=oracle-xe 2>&1 | tail -90 || true)"
-  logs="$(kubectl -n "$NS" logs -l app=oracle-xe --tail=120 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe pod -l app=oracle-db 2>&1 | tail -90 || true)"
+  logs="$(kubectl -n "$NS" logs -l app=oracle-db --tail=120 2>&1 || true)"
   {
     echo ""
-    echo "## Proof M8.5 slice — Oracle XE readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo "## Proof M8.5 slice — Oracle Free readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
     echo ""
     echo "- Failed step: \`$where\`"
     echo "- pods:"; echo '```'; echo "$pods"; echo '```'
-    echo "- oracle-xe describe (tail 90):"; echo '```'; echo "$desc"; echo '```'
-    echo "- oracle-xe logs (tail 120):"; echo '```'; echo "$logs"; echo '```'
+    echo "- oracle-db describe (tail 90):"; echo '```'; echo "$desc"; echo '```'
+    echo "- oracle-db logs (tail 120):"; echo '```'; echo "$logs"; echo '```'
   } >> docs/VALIDATION-RESULTS.md
   exit 1
 }
@@ -2314,13 +2316,13 @@ backends_fail() {
   echo "FAIL: backends ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local wide ddeploy dpods notready_logs p
   wide="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
-  ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-xe)' 2>&1 | tail -120 || true)"
-  dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-xe)' 2>&1 | tail -150 || true)"
+  ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-db)' 2>&1 | tail -120 || true)"
+  dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-db)' 2>&1 | tail -150 || true)"
   # Every not-ready backend pod gets its OWN logs + previous-instance logs +
   # describe (the M6 run-4/5 + run-18 capture findings: the fault pod must
   # survive the all-pods tail truncation). Comment kept OUTSIDE the command
   # substitution: macOS bash 3.2 mis-parses parens inside comments inside "$( ... )".
-  notready_logs="$(for p in $(kubectl -n "$NS" get pods -l 'app notin (oracle-xe)' \
+  notready_logs="$(for p in $(kubectl -n "$NS" get pods -l 'app notin (oracle-db)' \
       -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
     echo "----- logs: $p (tail 80) -----"
     kubectl -n "$NS" logs "$p" --tail=80 2>&1 || true
@@ -2888,7 +2890,7 @@ kubectl -n "$NS" patch deploy/langfuse --type=strategic \
 # each backend its own budget and name the ACTUAL laggards in the failure message.
 BACKEND_WAIT_FAILURES="$STAGING_DST/.backend-wait-failures"
 rm -f "$BACKEND_WAIT_FAILURES"
-for _d in $(kubectl -n "$NS" get deploy -l 'app notin (oracle-xe)' -o name); do
+for _d in $(kubectl -n "$NS" get deploy -l 'app notin (oracle-db)' -o name); do
   (
     kubectl -n "$NS" wait --for=condition=available --timeout=600s "$_d" >/dev/null 2>&1 \
       || echo "$_d" >> "$BACKEND_WAIT_FAILURES"
@@ -2905,41 +2907,36 @@ echo "  all backend deployments Available"
 kubectl -n "$NS" wait --for=condition=available --timeout=600s deploy/cognic-proof-keycloak \
   || backends_fail "cognic-proof-keycloak not Available within 600s"
 echo "  Keycloak Available"
-kubectl -n "$NS" create configmap oracle-xe-seed \
+kubectl -n "$NS" create configmap oracle-db-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
-kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
-# 2400s: the qemu-emulated (amd64-on-arm64) XE first boot creates the whole
-# database inside the readiness window; run-5 live finding — 1200s expired
-# mid-creation with the listener already up (the image itself is preloaded
-# into the node, so none of this window is pull time).
+kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-db.yaml"
+# Oracle Free's pinned manifest list supplies native amd64 and arm64 images.
+# Keep the proven label-polling posture so a replaced pod is observed instead
+# of waiting forever on a deleted object.
 # Poll loop, NOT one long `kubectl wait` (run-7 live findings, both pinned):
 #   * `kubectl wait -l ...` resolves the selector ONCE at invocation and then
 #     waits on those pod OBJECTS — if the pod is recreated mid-wait, the wait
 #     sits on a deleted object until timeout even when the replacement goes
 #     Ready.
-#   * The qemu-emulated XE occasionally dies within seconds of its FIRST
-#     start (environmental; ORA-01081 on every restart after — stale
-#     instance state in the pod-scoped sandbox never self-heals). The ONLY
-#     recovery is recreating the POD (fresh sandbox). Auto-recreate on a
-#     detected crash loop, at most $_XE_MAX_RECREATES times, and keep
-#     polling the LABEL so the replacement is picked up.
-_XE_DEADLINE=$(( $(date +%s) + 2400 ))
-_XE_MAX_RECREATES=3
-_xe_recreates=0
-until kubectl -n "$NS" get pods -l app=oracle-xe 2>/dev/null | grep -qE "1/1\s+Running"; do
-  if [ "$(date +%s)" -ge "$_XE_DEADLINE" ]; then
-    xe_fail "oracle-xe pod not Ready within 2400s (qemu-emulated XE first boot under kind)"
+# A crash-looping first boot cannot establish evidence, so bounded pod
+# recreation remains a proof-local recovery before failing loud.
+_ORACLE_DB_DEADLINE=$(( $(date +%s) + 2400 ))
+_ORACLE_DB_MAX_RECREATES=3
+_oracle_db_recreates=0
+until kubectl -n "$NS" get pods -l app=oracle-db 2>/dev/null | grep -qE "1/1\s+Running"; do
+  if [ "$(date +%s)" -ge "$_ORACLE_DB_DEADLINE" ]; then
+    oracle_db_fail "oracle-db pod not Ready within 2400s"
   fi
-  _xe_restarts="$(kubectl -n "$NS" get pods -l app=oracle-xe \
+  _oracle_db_restarts="$(kubectl -n "$NS" get pods -l app=oracle-db \
     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
-  if [ "${_xe_restarts:-0}" -ge 2 ]; then
-    if [ "$_xe_recreates" -ge "$_XE_MAX_RECREATES" ]; then
-      xe_fail "oracle-xe crash-looping after $_xe_recreates pod recreations (qemu emulation unstable — restart Docker Desktop / prune the VM and re-run)"
+  if [ "${_oracle_db_restarts:-0}" -ge 2 ]; then
+    if [ "$_oracle_db_recreates" -ge "$_ORACLE_DB_MAX_RECREATES" ]; then
+      oracle_db_fail "oracle-db crash-looping after $_oracle_db_recreates pod recreations"
     fi
-    _xe_recreates=$(( _xe_recreates + 1 ))
-    echo "  oracle-xe crash-looping (restarts=$_xe_restarts) — recreating the pod for a fresh sandbox ($_xe_recreates/$_XE_MAX_RECREATES)"
-    kubectl -n "$NS" delete pod -l app=oracle-xe --wait=false >/dev/null 2>&1 || true
+    _oracle_db_recreates=$(( _oracle_db_recreates + 1 ))
+    echo "  oracle-db crash-looping (restarts=$_oracle_db_restarts) — recreating the pod for a fresh sandbox ($_oracle_db_recreates/$_ORACLE_DB_MAX_RECREATES)"
+    kubectl -n "$NS" delete pod -l app=oracle-db --wait=false >/dev/null 2>&1 || true
     sleep 20
   fi
   sleep 15
@@ -2986,8 +2983,8 @@ echo "    schema readback OK: alembic head 0021; 0016/0017 foundations + D2 shap
 pack_fail() {
   # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left
   # NO diagnostics — the cluster was torn down before anything was captured).
-  # Mirrors the xe_fail/backends_fail shape; includes INIT-container logs
-  # (wait-for-xe) + previous-instance logs so a crash loop or a stuck init
+  # Mirrors the oracle_db_fail/backends_fail shape; includes init-container logs
+  # (wait-for-oracle-db) + previous-instance logs so a crash loop or stuck init
   # is diagnosable post-teardown.
   local where="$1"
   echo "FAIL: oracle-pack/AS ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
@@ -2995,7 +2992,7 @@ pack_fail() {
   pods="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
   desc="$(kubectl -n "$NS" describe pod -l app=proof-oracle-pack 2>&1 | tail -100 || true)"
   logs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --all-containers --tail=100 2>&1 || true)"
-  initlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack -c wait-for-xe --tail=40 2>&1 || true)"
+  initlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack -c wait-for-oracle-db --tail=40 2>&1 || true)"
   prevlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --previous --tail=60 2>&1 || true)"
   aslogs="$(kubectl -n "$NS" logs -l app=proof-as --tail=60 2>&1 || true)"
   {
@@ -3006,7 +3003,7 @@ pack_fail() {
     echo "- deploys/pods:"; echo '\`\`\`'; echo "$pods"; echo '\`\`\`'
     echo "- oracle-pack describe (tail):"; echo '\`\`\`'; echo "$desc"; echo '\`\`\`'
     echo "- oracle-pack logs (all containers, tail):"; echo '\`\`\`'; echo "$logs"; echo '\`\`\`'
-    echo "- wait-for-xe init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
+    echo "- wait-for-oracle-db init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
     echo "- oracle-pack previous-instance logs (tail):"; echo '\`\`\`'; echo "$prevlogs"; echo '\`\`\`'
     echo "- proof-as logs (tail):"; echo '\`\`\`'; echo "$aslogs"; echo '\`\`\`'
   } >> docs/VALIDATION-RESULTS.md
