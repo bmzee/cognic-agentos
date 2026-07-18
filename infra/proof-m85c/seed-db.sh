@@ -8,7 +8,7 @@ PROOF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # 1. KEPT FROM M4/M5/M6 (ADR-026 D2/D3/D7): NO derived MCP carve-out rows.
 #    The runner drives the REAL operator API (submit -> claim -> approve ->
-#    allow-list -> configure -> install) for cognic-tool-oracle-schema@v0.4.0,
+#    allow-list -> configure -> install) for cognic-tool-oracle-schema@v0.5.0,
 #    and the `install` handler's materializer projects the DESIRED
 #    runtime-config record INTO the derived tables (mcp_server_url_override +
 #    mcp_internal_host_allowlist). The materializer is the SOLE writer of

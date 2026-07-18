@@ -29,7 +29,9 @@ spec:
         # NO ORACLE_DATABASE: FREEPDB1 is the image's built-in PDB. Setting
         # ORACLE_DATABASE would request another PDB instead of selecting it.
         - { name: APP_USER, value: "cognic" }
-        - { name: APP_USER_PASSWORD, value: "cognic_dev_only" }
+        - name: APP_USER_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: oracle-app-credential, key: password }
         volumeMounts:
         - { name: seed, mountPath: /container-entrypoint-initdb.d }
         readinessProbe:

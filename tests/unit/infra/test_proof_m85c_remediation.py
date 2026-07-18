@@ -39,6 +39,7 @@ import tempfile
 import time
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -54,6 +55,11 @@ _KERNEL_SEED = _PROOF / "kernel-seed.sql"
 _BFF_YAML = _PROOF / "manifests" / "bff.yaml"
 _PROBE_YAML = _PROOF / "manifests" / "probe-pack.yaml"
 _KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
+_ORACLE_DB_YAML = _PROOF / "manifests" / "oracle-db.yaml"
+_ORACLE_PACK_YAML = _PROOF / "manifests" / "oracle-pack.yaml"
+_ESO_STORE_YAML = _PROOF / "manifests" / "eso-secretstore.yaml"
+_ESO_EXTERNAL_SECRET_YAML = _PROOF / "manifests" / "eso-externalsecret.yaml"
+_SEED_VAULT = _PROOF / "seed-vault.sh"
 _BASE_DOCKERFILE = _REPO / "infra" / "agentos" / "Dockerfile"
 _PROOF_DOCKERFILE = _PROOF / "Dockerfile.agentos-proof"
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -897,14 +903,14 @@ def test_r8_release_digests_are_committed_literals_not_env_reads() -> None:
     """An env-supplied digest is not a pin: whoever runs the proof could swap the
     release and export the matching value.
 
-    Oracle v0.4.0 and probe v0.2.0 were released under GitHub Actions custody.
-    Both trust roots rotated, so the wheels and public keys are exact reviewed
-    literals. Pinning all four makes this test a tamper-detector: a swapped
-    release cannot ride an unreviewed stage-packs.sh edit."""
+    Oracle v0.5.0 and probe v0.2.0 were released under GitHub Actions custody.
+    Their wheels and public keys are exact reviewed literals. Pinning all four
+    makes this test a tamper-detector: a swapped release cannot ride an
+    unreviewed stage-packs.sh edit."""
     assert "COGNIC_PROOF_M85C_PROBE_WHEEL_SHA256" not in _STAGE_TEXT
     assert "COGNIC_PROOF_M85C_PROBE_PUB_SHA256" not in _STAGE_TEXT
     assert (
-        'ORACLE_WHEEL_SHA256="503495439ec4ee3c713f51f2f2cedc198407f4dd62a64b2a8daa6468a1b37e69"'
+        'ORACLE_WHEEL_SHA256="7ece811961714242ce589740151fcf3e897f7b507ad3a4d51e10e25e203c99ef"'
         in _STAGE_TEXT
     )
     assert (
@@ -923,20 +929,20 @@ def test_r8_release_digests_are_committed_literals_not_env_reads() -> None:
     assert 'PROBE_WHEEL_SHA256" != "FILL_AT_RELEASE"' in _STAGE_TEXT
 
 
-def test_task7_release_versions_drive_every_functional_pin_site() -> None:
-    oracle_wheel = "cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
+def test_d3_release_versions_drive_every_functional_pin_site() -> None:
+    oracle_wheel = "cognic_tool_oracle_schema-0.5.0-py3-none-any.whl"
     probe_wheel = "cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
     oracle_dockerfile = (_PROOF / "Dockerfile.oracle-pack").read_text()
     probe_dockerfile = (_PROOF / "Dockerfile.probe-pack").read_text()
 
-    assert 'ORACLE_TAG="v0.4.0"' in _STAGE_TEXT
-    assert 'ORACLE_VERSION="0.4.0"' in _STAGE_TEXT
+    assert 'ORACLE_TAG="v0.5.0"' in _STAGE_TEXT
+    assert 'ORACLE_VERSION="0.5.0"' in _STAGE_TEXT
     assert f'ORACLE_WHEEL="{oracle_wheel}"' in _STAGE_TEXT
     assert 'PROBE_TAG="v0.2.0"' in _STAGE_TEXT
     assert 'PROBE_VERSION="0.2.0"' in _STAGE_TEXT
     assert f'PROBE_WHEEL="{probe_wheel}"' in _STAGE_TEXT
 
-    assert 'PACK_VERSION="0.4.0"' in _RUNNER_TEXT
+    assert 'PACK_VERSION="0.5.0"' in _RUNNER_TEXT
     assert f'PACK_WHEEL="{oracle_wheel}"' in _RUNNER_TEXT
     assert 'PROBE_PACK_VERSION="0.2.0"' in _RUNNER_TEXT
     assert f'PROBE_WHEEL="{probe_wheel}"' in _RUNNER_TEXT
@@ -948,6 +954,128 @@ def test_task7_release_versions_drive_every_functional_pin_site() -> None:
     assert f"RUN pip install --no-cache-dir --no-deps /tmp/{oracle_wheel}" in oracle_dockerfile
     assert f"COPY proof-m85c-staging/wheel/{probe_wheel} /tmp/" in probe_dockerfile
     assert f"RUN pip install --no-cache-dir --no-deps /tmp/{probe_wheel}" in probe_dockerfile
+
+
+# --- D3 Task 9: Vault -> ESO -> file is the only app-credential path ------ #
+
+
+def _deployment_container(path: Path, name: str) -> dict[str, Any]:
+    document = next(doc for doc in _yaml_documents(path) if doc["kind"] == "Deployment")
+    containers = document["spec"]["template"]["spec"]["containers"]
+    return next(container for container in containers if container["name"] == name)
+
+
+def _yaml_documents(path: Path) -> list[dict[str, Any]]:
+    return list(yaml.safe_load_all(path.read_text()))
+
+
+def test_d3_plaintext_oracle_password_channels_are_absent() -> None:
+    text = "\n".join(
+        path.read_text()
+        for path in sorted(_PROOF.rglob("*"))
+        if path.is_file() and path.suffix in {"", ".md", ".py", ".sh", ".sql", ".yaml"}
+    )
+
+    assert re.search(r"COGNIC_ORACLE_PASSWORD(?!_FILE)", text) is None
+    assert "cognic_dev_only" not in text
+
+
+def test_d3_db_and_pack_consume_only_the_eso_materialized_secret() -> None:
+    db = _deployment_container(_ORACLE_DB_YAML, "oracle-db")
+    db_env = {entry["name"]: entry for entry in db["env"]}
+    assert db_env["APP_USER_PASSWORD"] == {
+        "name": "APP_USER_PASSWORD",
+        "valueFrom": {"secretKeyRef": {"name": "oracle-app-credential", "key": "password"}},
+    }
+
+    pack = _deployment_container(_ORACLE_PACK_YAML, "oracle-pack")
+    pack_env = {entry["name"]: entry for entry in pack["env"]}
+    assert pack_env["COGNIC_ORACLE_PASSWORD_FILE"] == {
+        "name": "COGNIC_ORACLE_PASSWORD_FILE",
+        "value": "/var/run/cognic/oracle/password",
+    }
+    mounts = {entry["name"]: entry for entry in pack["volumeMounts"]}
+    assert mounts["oracle-credential"] == {
+        "name": "oracle-credential",
+        "mountPath": "/var/run/cognic/oracle",
+        "readOnly": True,
+    }
+    deployment = next(
+        doc for doc in _yaml_documents(_ORACLE_PACK_YAML) if doc["kind"] == "Deployment"
+    )
+    volumes = {entry["name"]: entry for entry in deployment["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["oracle-credential"]["secret"]["secretName"] == "oracle-app-credential"
+
+
+def test_d3_eso_resources_bind_the_proof_vault_path_to_one_target_secret() -> None:
+    store = yaml.safe_load(_ESO_STORE_YAML.read_text())
+    assert store == {
+        "apiVersion": "external-secrets.io/v1",
+        "kind": "SecretStore",
+        "metadata": {"name": "proof-vault"},
+        "spec": {
+            "provider": {
+                "vault": {
+                    "server": "http://vault:8200",
+                    "path": "secret",
+                    "version": "v1",
+                    "auth": {"tokenSecretRef": {"name": "proof-vault-token", "key": "token"}},
+                }
+            }
+        },
+    }
+
+    external = yaml.safe_load(_ESO_EXTERNAL_SECRET_YAML.read_text())
+    assert external["apiVersion"] == "external-secrets.io/v1"
+    assert external["kind"] == "ExternalSecret"
+    assert external["metadata"] == {"name": "oracle-app-credential"}
+    assert external["spec"]["refreshInterval"] == "15s"
+    assert external["spec"]["secretStoreRef"] == {
+        "name": "proof-vault",
+        "kind": "SecretStore",
+    }
+    assert external["spec"]["target"] == {"name": "oracle-app-credential"}
+    assert external["spec"]["data"] == [
+        {
+            "secretKey": "password",
+            "remoteRef": {
+                "key": "cognic/proof-m85c/oracle-app",
+                "property": "password",
+            },
+        }
+    ]
+
+
+def test_d3_runner_pins_eso_and_materializes_before_oracle_deploy() -> None:
+    eso_image = (
+        "ghcr.io/external-secrets/external-secrets:v2.7.0@sha256:"
+        "6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
+    )
+    assert 'ESO_CHART_VERSION="2.7.0"' in _RUNNER_TEXT
+    assert f'ESO_IMAGE="{eso_image}"' in _RUNNER_TEXT
+    assert 'ORACLE_APP_PASSWORD="$(openssl rand -hex 24)"' in _RUNNER_TEXT
+    assert 'ORACLE_APP_PASSWORD="$ORACLE_APP_PASSWORD" NS="$NS" bash' in _RUNNER_TEXT
+    assert "create secret generic proof-vault-token" in _RUNNER_TEXT
+    assert "--from-file=token=" in _RUNNER_TEXT
+    assert "--from-literal=token=" not in _RUNNER_TEXT
+    assert '--version "$ESO_CHART_VERSION"' in _RUNNER_TEXT
+    assert '--namespace "$NS"' in _RUNNER_TEXT
+    assert "--set installCRDs=true" in _RUNNER_TEXT
+    assert eso_image in _RUNNER_TEXT
+    assert "condition=Ready externalsecret/oracle-app-credential" in _RUNNER_TEXT
+    assert _RUNNER_TEXT.index("condition=Ready externalsecret/oracle-app-credential") < (
+        _RUNNER_TEXT.index("manifests/oracle-db.yaml")
+    )
+
+
+def test_d3_vault_seed_reads_the_password_from_stdin_and_checks_shape_only() -> None:
+    text = _SEED_VAULT.read_text()
+    assert "${ORACLE_APP_PASSWORD:?" in text
+    assert "password=-" in text
+    assert 'password="$ORACLE_APP_PASSWORD"' not in text
+    assert '"secret/cognic/$T/oracle-app"' in text
+    assert "assert isinstance(p, str) and p" in text
+    assert 'print("oracle app credential OK: present")' in text
 
 
 # --------------------------------------------------------------------------- #

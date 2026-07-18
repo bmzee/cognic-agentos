@@ -4,7 +4,7 @@
 # RELEASED ASSETS ONLY (never a source rebuild):
 #
 #   THE SIX PART-B RELEASES (maintainer-locked digest pins):
-#   * cognic-tool-oracle-schema@v0.4.0    — the governed run_readonly_query tool
+#   * cognic-tool-oracle-schema@v0.5.0    — the governed run_readonly_query tool
 #     (M8 B1). Operator-installed via the M4 lifecycle flow by the runner; the
 #     agent's granted tool ref resolves to THIS deployed server. Verifies the
 #     kernel-minted query-context token before honoring any stamped fact.
@@ -27,7 +27,7 @@
 #
 #   PLUS ONE REUSED M5 RELEASE (dependency, byte-identical M5/M6 pins):
 #   * cognic-hook-schema-guard@v0.1.0     — the M5 signed hook pack. REQUIRED
-#     even though M8 adds no hook bar: the oracle v0.4.0 wheel's baked manifest
+#     even though M8 adds no hook bar: the oracle v0.5.0 wheel's baked manifest
 #     declares [data_governance].dlp_pre_hooks = ["refuse_forbidden_schema_arg",
 #     "explode_schema_guard"] — with the hook pack absent, EVERY governed call
 #     to the tool fail-closes at the DLP gate (MCPHost: dlp_pre_hooks declared
@@ -84,14 +84,14 @@
 set -euo pipefail
 
 ORACLE_REPO="bmzee/cognic-tool-oracle-schema"
-ORACLE_TAG="v0.4.0"
-ORACLE_VERSION="0.4.0"
+ORACLE_TAG="v0.5.0"
+ORACLE_VERSION="0.5.0"
 ORACLE_PACK_ID="cognic-tool-oracle-schema"
-ORACLE_WHEEL="cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
+ORACLE_WHEEL="cognic_tool_oracle_schema-0.5.0-py3-none-any.whl"
 # Release-asset digests — maintainer-locked C1 pins. A mismatch means the
 # release moved under us: FAIL CLOSED, never re-pin silently.
-ORACLE_WHEEL_SHA256="503495439ec4ee3c713f51f2f2cedc198407f4dd62a64b2a8daa6468a1b37e69"
-# The trust root rotated at v0.4.0; this is the released cosign.pub digest.
+ORACLE_WHEEL_SHA256="7ece811961714242ce589740151fcf3e897f7b507ad3a4d51e10e25e203c99ef"
+# v0.5.0 retains the v0.4.0 trust root; this pins the released cosign.pub bytes.
 ORACLE_PUB_SHA256="a26ac3906064461bc2222a56fd386a5c71477a995bec01c197028b1bbe2a7a7d"
 
 CUSTOMER_REPO="bmzee/cognic-skill-customer-data"

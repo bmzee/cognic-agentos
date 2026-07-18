@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 NS="${NS:-cognic-proofm85c}"; T="proof-m85c"; ASHOST="192.88.99.9_9000"; AS="http://192.88.99.9:9000"
+: "${ORACLE_APP_PASSWORD:?ORACLE_APP_PASSWORD must be supplied by the proof runner}"
 # KEPT from proof-m4/m5/m6 (ADR-026 D5 — OAuth material provisioned BY REFERENCE):
 # the operator pre-provisions the OAuth client + AS allow-list in Vault; the
 # M4-flow `configure` step then records those Vault PATHS (oauth_credential_ref /
-# as_allowlist_ref) on the desired runtime-config record for the v0.4.0 tool pack,
+# as_allowlist_ref) on the desired runtime-config record for the v0.5.0 tool pack,
 # and `install`'s materializer VALIDATES they resolve + are well-shaped BEFORE it
 # projects the derived carve-out rows. There is NO secret-write API — the operator
 # seeds Vault out of band (this script). Neither the hook pack nor the four
@@ -34,6 +35,13 @@ VX kv put "secret/cognic/$T/mcp-as-allowlist" @/tmp/as-allowlist.json
 # readback assertion: servers must come back as a JSON ARRAY (KV v1 -> data.servers)
 VX kv get -format=json "secret/cognic/$T/mcp-as-allowlist" | python3 -c 'import json,sys; s=json.load(sys.stdin)["data"]["servers"]; assert isinstance(s,list), f"servers not a list: {type(s).__name__}"; print("as-allowlist OK:", s)'
 VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST" client_id=proof-client client_secret=proof-secret auth_method=client_secret_post
+
+# D3: the per-run Oracle application credential enters Vault over stdin. Its
+# bytes never appear in argv or output, and the readback asserts shape only.
+printf '%s' "$ORACLE_APP_PASSWORD" | kubectl -n "$NS" exec -i deploy/vault -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=smoke-root-token \
+  vault kv put "secret/cognic/$T/oracle-app" password=-
+VX kv get -format=json "secret/cognic/$T/oracle-app" | python3 -c 'import json,sys; p=json.load(sys.stdin)["data"]["password"]; assert isinstance(p, str) and p; print("oracle app credential OK: present")'
 
 # M8 finding #6 (2026-07-07): the LiteLLM router (litellm pod) enforces its dev
 # master key; under the prod profile the kernel refuses a PLAINTEXT

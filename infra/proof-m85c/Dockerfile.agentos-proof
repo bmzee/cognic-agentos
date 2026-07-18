@@ -15,11 +15,11 @@ USER root
 # installs + per-pack attestations + trust roots + alembic.ini. stage-packs.sh
 # downloads + sha256-verifies the released assets and arranges
 # proof-m85c-staging/ before build.
-#   * cognic-tool-oracle-schema@v0.4.0 (cognic.tools) — operator-installed via
+#   * cognic-tool-oracle-schema@v0.5.0 (cognic.tools) — operator-installed via
 #     the M4 lifecycle flow by the runner; the agent's granted
 #     run_readonly_query resolves to it.
 #   * cognic-hook-schema-guard@v0.1.0 (cognic.hooks) — baked into the kernel
-#     venv; REQUIRED because the oracle v0.4.0 manifest binds its dlp_pre
+#     venv; REQUIRED because the oracle v0.5.0 manifest binds its dlp_pre
 #     hooks (an absent hook pack would fail-close every governed tool call at
 #     the DLP gate).
 #   * the FOUR instruction skill packs (customer-data / financial-data /

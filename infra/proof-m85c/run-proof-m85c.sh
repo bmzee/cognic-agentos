@@ -189,8 +189,15 @@ AGENT_PACK_ID="cognic-agent-bank-analyst"
 AGENT_ID="bank-analyst"                             # the AGENT.md frontmatter name (the ask path segment)
 SKILL_IDS=("customer-data" "financial-data" "cards-data" "atm-recon")
 SKILL_PACK_IDS=("cognic-skill-customer-data" "cognic-skill-financial-data" "cognic-skill-cards-data" "cognic-skill-atm-recon")
-PACK_VERSION="0.4.0"
-PACK_WHEEL="cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
+PACK_VERSION="0.5.0"
+PACK_WHEEL="cognic_tool_oracle_schema-0.5.0-py3-none-any.whl"
+
+# External Secrets is chart- and image-pinned independently. All three chart
+# workloads use this one multi-platform image digest.
+ESO_CHART_VERSION="2.7.0"
+ESO_IMAGE_TAG="v2.7.0@sha256:6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
+ESO_IMAGE="ghcr.io/external-secrets/external-secrets:v2.7.0@sha256:6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
+ORACLE_APP_PASSWORD=""
 
 # ---- The approval-probe pack's trust pins (Bar D drives the probe) ----------------
 # THE PIN IS A MAINTAINER COMMIT, NOT AN OPERATOR EXPORT (review 2026-07-12, F4).
@@ -439,13 +446,14 @@ _backend_images() {
 
 # Extra (non-backend) images the proof references with imagePullPolicy: IfNotPresent —
 # pre-pulled + kind-loaded so the kind node never reaches the internet for them:
-# Oracle Free + busybox (the oracle-pack wait-for-db + topology-perms init) +
+# Oracle Free + ESO + busybox (oracle-pack wait-for-db + topology-perms init) +
 # redis (the scheduler control plane) + registry:2 (the local TLS registry) +
 # the OTLP collector (inherited diagnostics — ruling R6: NO M8.5 bar depends
 # on spans; manifests/otel-collector.yaml).
 _extra_images() {
   printf '%s\n' \
     "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8" \
+    "$ESO_IMAGE" \
     "busybox:1.36" "redis:7.4-alpine" "registry:2" \
     "otel/opentelemetry-collector:0.111.0"
 }
@@ -2136,7 +2144,7 @@ PY
 }
 
 # ---- Hook-pack registry-admission preflight (M5/M6-inherited) ---------------------
-# The oracle v0.4.0 manifest binds dlp_pre hooks; the hook pack must be admitted
+# The oracle v0.5.0 manifest binds dlp_pre hooks; the hook pack must be admitted
 # at boot or every governed tool call (incl. the agent's run_readonly_query)
 # fail-closes at the DLP gate.
 assert_hook_pack_registered() {
@@ -2429,6 +2437,7 @@ cleanup() {
   # Browser interactions must never resolve packages mid-bar. The driver gets one
   # private runtime before cluster work; remove it with the rest of the run state.
   [ -n "${DRIVER_VENV_TMP:-}" ] && rm -rf "$DRIVER_VENV_TMP" 2>/dev/null || true
+  unset ORACLE_APP_PASSWORD ESO_VAULT_TOKEN 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -2437,6 +2446,10 @@ echo "==> [1/11] tool preflight"
 for tool in docker kind kubectl helm uv cosign syft grype curl python3 gh openssl; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not on PATH"
 done
+# Mint once per run. This variable is never exported globally; only seed-vault
+# receives it, and BAR H retains it transiently to prove the old credential dies.
+ORACLE_APP_PASSWORD="$(openssl rand -hex 24)"
+[ -n "$ORACLE_APP_PASSWORD" ] || die "openssl returned an empty Oracle app credential"
 # Registry host-port preflight — fail LOUD with an actionable message here,
 # not mid-run at `docker run -p` (macOS ControlCenter/AirPlay owns *:5000 by
 # default, which is why the default moved to $REGISTRY_PORT).
@@ -2843,8 +2856,8 @@ cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
   --yes "$EGRESS_PROXY_REF"
 echo "  canonical refs (digest-pinned, proof-signed): runtime=$RUNTIME_PYTHON_REF proxy=$EGRESS_PROXY_REF"
 
-# --- 5. namespace + the six real backends + Redis + OTLP collector, then Oracle XE --
-echo "==> [5/11] bring up the six backends + Redis + otel-collector, then the seeded Oracle XE"
+# --- 5. namespace + real backends + Redis + OTLP, then ESO + Oracle Free ----------
+echo "==> [5/11] bring up the backends + Redis + otel-collector, then ESO + Oracle Free"
 kubectl create namespace "$NS"
 kubectl -n "$NS" apply -f "$CHART/ci/smoke/backends.yaml"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/redis.yaml"
@@ -2907,6 +2920,38 @@ echo "  all backend deployments Available"
 kubectl -n "$NS" wait --for=condition=available --timeout=600s deploy/cognic-proof-keycloak \
   || backends_fail "cognic-proof-keycloak not Available within 600s"
 echo "  Keycloak Available"
+
+# --- 6. Vault seed + ESO materialization -------------------------------------------
+echo "==> [6/11] seed Vault, then materialize the Oracle app credential through ESO"
+ORACLE_APP_PASSWORD="$ORACLE_APP_PASSWORD" NS="$NS" bash "$PROOF_DIR/seed-vault.sh"
+
+# The chart version and every workload image are immutable. The dev-root token
+# is proof posture only: read it from the deployed Vault workload, write it with
+# a shell builtin into the existing private per-run directory, and let kubectl
+# read the file so no token value enters argv.
+helm repo add external-secrets https://charts.external-secrets.io --force-update >/dev/null
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace "$NS" \
+  --version "$ESO_CHART_VERSION" \
+  --set installCRDs=true \
+  --set-string image.tag="$ESO_IMAGE_TAG" \
+  --set-string webhook.image.tag="$ESO_IMAGE_TAG" \
+  --set-string certController.image.tag="$ESO_IMAGE_TAG" \
+  --wait --timeout=300s
+ESO_VAULT_TOKEN="$(kubectl -n "$NS" get deploy/vault \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="VAULT_DEV_ROOT_TOKEN_ID")].value}')"
+[ -n "$ESO_VAULT_TOKEN" ] || die "deployed Vault carries no dev-token value for the proof SecretStore"
+( umask 077; printf '%s' "$ESO_VAULT_TOKEN" > "$KC_CRED_TMP/eso-vault-token" )
+unset ESO_VAULT_TOKEN
+kubectl -n "$NS" create secret generic proof-vault-token \
+  --from-file=token="$KC_CRED_TMP/eso-vault-token"
+kubectl -n "$NS" apply \
+  -f "$PROOF_DIR/manifests/eso-secretstore.yaml" \
+  -f "$PROOF_DIR/manifests/eso-externalsecret.yaml"
+kubectl -n "$NS" wait --for=condition=Ready secretstore/proof-vault --timeout=120s
+kubectl -n "$NS" wait --for=condition=Ready externalsecret/oracle-app-credential --timeout=120s
+kubectl -n "$NS" get secret oracle-app-credential -o json | python3 -c 'import json,sys; d=json.load(sys.stdin).get("data",{}).get("password"); assert isinstance(d,str) and d; print("oracle app Secret OK: materialized")'
+
 kubectl -n "$NS" create configmap oracle-db-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
@@ -2941,10 +2986,6 @@ until kubectl -n "$NS" get pods -l app=oracle-db 2>/dev/null | grep -qE "1/1\s+R
   fi
   sleep 15
 done
-
-# --- 6. Vault init/seed (KV v1 + OAuth + AS-allowlist) ------------------------------
-echo "==> [6/11] seed Vault (KV v1 conversion + OAuth + AS allow-list — by reference, D5)"
-NS="$NS" bash "$PROOF_DIR/seed-vault.sh"
 
 # --- 7. helm install (prod profile; migrations OFF; digest-pinned canonical images) -
 echo "==> [7/11] install the AgentOS chart under the proof-m85c overlay + the proof canonical refs"
@@ -3273,7 +3314,7 @@ kubectl -n "$NS" exec "$_BFF_POD0" -- sh -c 'test -r /etc/harness-tls/tls.key' \
 echo "  BFF custody OK: runs as uid 10001 and can read its own TLS private key (fsGroup honoured)"
 
 # ============================ SETUP (M4 governed install) ==========================
-# Operator-install the DLP-governed ORACLE tool v0.4.0 through the lifecycle
+# Operator-install the DLP-governed ORACLE tool v0.5.0 through the lifecycle
 # M4/M5/M6: the full governed lifecycle via the REAL API. Identity is now REAL
 # OIDC — the author/reviewer/operator steps each ride that user's Keycloak access
 # token (api() mints it via the scripted PKCE flow), verified by the reference
