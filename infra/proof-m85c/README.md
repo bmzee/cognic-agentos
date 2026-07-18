@@ -11,11 +11,17 @@
 > ledger, and the honesty boundary are in `docs/VALIDATION-RESULTS.md` under
 > "M8.5-C — Basic bank harness (ADR-028) — PASS".
 
-> **D2 A-minus extension (2026-07-17): AUTHORED, NOT YET LIVE.** The runner now
-> preserves the proven A-F body byte-for-byte and appends BAR G for bank-owned
-> 3-of-3 assignment, direct-MCP consume-once, and maker-checker exclusion. Its
-> source/structural gates are green, but no A-G PASS or log digest is claimed
-> until the kind run completes. The historical run-20 record above is unchanged.
+> **D2 A-minus extension (2026-07-18): PASSED LIVE.** Attempt 6 completed on
+> `kind` with exit 0 and printed `PROOF M8.5-C (BARS A-G) PASS`. The clean
+> AgentOS anchor/proof revision was
+> `c2f418a79b62fc3ee9e381494ede7d6dc3fba615`; the separately built, signed,
+> and verified Cognic Harness revision remained
+> `4dc64cccb5c3a591f1a4e40885e2f58ad37f075c`. The operator-held 939-line log
+> has SHA-256
+> `5ae3f83ea578614271ada9255a9a6d90f6873a11054c10598509a8c1bc7dc114`
+> and is deliberately not committed. Bars A-F re-passed, and Bar G proved
+> bank-owned 3-of-3 assignment, direct-MCP consume-once, and maker-checker
+> exclusion. The historical run-20 record above remains unchanged.
 
 ## What the passing run proved
 
@@ -24,7 +30,7 @@ repo) with three governed screens (chat, approvals inbox, evidence) — in front
 of a deployed AgentOS kernel, and proves the **harness boundary** and the
 **approvals surface**:
 
-- **Real OIDC identity, no fallback.** Every one of the eight proof identities
+- **Real OIDC identity, no fallback.** Every one of the ten proof identities
   arrives as a real Keycloak access token verified locally by the reference
   `ActorBinder` (`overlay_reference/`). The `X-Proof-Role` header binder that
   M8.5-A/B used is **deleted, not gated** (ADR-028 §4) — there is no actor
@@ -112,12 +118,24 @@ of a deployed AgentOS kernel, and proves the **harness boundary** and the
   **exactly the three screen route modules** (+ auth) and no operator/pack/builder
   surface; **no actor-header path**; no `|safe`; htmx absent (no un-pinned
   vendored asset); CSP + `no-store` present.
+- **Bar G — assigned approval and consume-once.** Omar assigns Dana, Erin, and
+  Fiona to the probe tool; a real service token is refused before mutation and
+  exactly one `approval.assignment_changed` row is appended. A direct Postgres
+  witness reads `flow=require_assigned`, `required_count=3`,
+  `decisions_recorded=0`. The deployed detail wire then advances exactly
+  **1/3 -> 2/3 -> 3/3**, with exact chain order and no probe execution. The first
+  exact recall executes once (ledger **1 -> 2**); the second refuses
+  `tool_approval_consumed` and the ledger stays 2. Finally, the same
+  scope-holding originator is refused at decision index 0 with
+  `originator_cannot_approve` and at index 1 with the byte-stable
+  `four_eyes_approver_not_distinct`, after which the normal scope set is
+  restored.
 
 ## Topology (spec §5.1)
 
 The proven M8/M8.5 conversational stack (kernel proof app, oracle pack + XE + AS,
 LiteLLM→cloud, Postgres) **plus**: Keycloak (pinned `26.2` digest, per-run realm
-import, eight generated identities — nothing committed), a dedicated TLS session
+import, ten generated identities — nothing committed), a dedicated TLS session
 Redis (BFF-only ACL, persistence off), **two** harness BFF replicas behind one
 Service, and the approval-probe MCP Service. AgentOS terminates TLS itself; the
 whole human-identity path runs HTTPS under one per-run proof CA with no

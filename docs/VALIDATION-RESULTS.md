@@ -7871,3 +7871,94 @@ INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
 {"ts": "2026-07-17 19:32:43,747", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c93011b3308346c8a658de6c85f07d9a", "trace_id": "bc51dacd40c8576771b5b5b7f6e62d19", "span_id": "1413008e5e76770a", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 306.924, "client_addr": "10.244.0.1"}
 {"ts": "2026-07-17 19:32:48,381", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7993fd91dbdf430ba2bf952752cd9172", "trace_id": "e28094139d7237aae38c2e3efde34d90", "span_id": "17941ce4d0b5bf48", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.417, "client_addr": "10.244.0.1"}
 ```
+
+## M8.5-D D2 A-minus deployed proof — PASS (2026-07-17T23:55:56Z)
+
+**Verdict:** the full `kind` runner exited 0 and printed every per-bar marker
+from `PROOF M8.5-C (BAR A) PASS` through `PROOF M8.5-C (BAR G) PASS`, followed
+by `PROOF M8.5-C (BARS A-G) PASS`. No `FAIL:` marker appears in the log.
+
+**Provenance and custody:** AgentOS anchor/proof revision
+`c2f418a79b62fc3ee9e381494ede7d6dc3fba615` was clean and verified from the
+built image label. The separately built, signed, and verified Cognic Harness
+revision was `4dc64cccb5c3a591f1a4e40885e2f58ad37f075c`. The zero-spend provider
+preflight returned HTTP 200. The operator-held log is 939 lines with SHA-256
+`5ae3f83ea578614271ada9255a9a6d90f6873a11054c10598509a8c1bc7dc114`;
+it is deliberately not committed. A scan of that log found zero JWT, bearer,
+private-key, provider-key, or host-path value matches. The
+temporary host DNS override was restored and the runner left zero `kind`
+clusters.
+
+### Bar evidence
+
+1. **Bar A — PASS.** S1-S10 plus CSRF and XSS all re-passed against two BFF
+   replicas and TLS Redis. The sleep-sensitive S4 proof was unambiguous: the
+   idle session died at an observed upper-bound age of 77 seconds, strictly
+   inside the 150-second absolute window; the continuously touched session
+   remained alive at 120 seconds and died after the absolute deadline while
+   idle for at most 26 seconds, below the 60-second idle TTL.
+2. **Bar B — PASS.** Real Keycloak login, human approver binding, disabled
+   client-credentials/direct-access grants, manipulated under-scoped RBAC,
+   and the exact `typ_not_at_jwt`, `token_malformed`, `kid_unknown`,
+   `audience_not_exact`, and `token_expired` binder refusals all re-passed.
+3. **Bar C — PASS.** The governed UI turn rejoined its stored chain digests.
+   A revoked financials entitlement rendered `agent_scope_not_entitled`, with
+   no successful financials dispatch and exact run/sequence/digest
+   correlation.
+4. **Bar D — PASS.** The independent probe ledger stayed 0 through pending,
+   deny, and incomplete four-eyes; a distinct second human completed the
+   grant, the exact recall moved it to 1, and Sara's actor-bound replay left it
+   at 1. The 51-request Link walk reproduced the kernel keyset order exactly.
+5. **Bars E-F — PASS.** Both rendered transcript turns re-hashed to their
+   PSQL-witnessed chain rows. The running BFF image retained exactly the three
+   screens plus auth, zero DB modules, no actor-header path or template
+   autoescape bypass, and the expected CSP/`no-store` posture.
+6. **Bar G.1 — PASS.** Omar assigned Dana, Erin, and Fiona to the persisted
+   Bar-D tool identity. Exactly one `approval.assignment_changed` row was
+   appended. A real service token was refused before mutation.
+7. **Bar G.2-G.3 — PASS.** A direct Postgres read witnessed
+   `flow=require_assigned`, `required_count=3`, `decisions_recorded=0`; the
+   deployed detail wire advanced exactly `1/3|awaiting_second` ->
+   `2/3|awaiting_second` -> `3/3|granted`, with exact chain order and no probe
+   execution during decisions.
+8. **Bar G.4 — PASS.** The first exact recall executed once and moved the
+   independent ledger from 1 to 2. The second exact recall refused
+   `tool_approval_consumed`; the ledger stayed 2.
+9. **Bar G.5 — PASS.** The same stable, temporarily scope-holding originator
+   was refused at decision index 0 with `originator_cannot_approve` and at
+   index 1 with `four_eyes_approver_not_distinct`. His exact normal scope set
+   was restored afterward.
+
+### A-minus attempt ledger
+
+1. Attempt 1 stopped at host DNS preflight before cluster work or model spend.
+2. Attempt 2 reached the real migration Job and exposed a stale `0017`
+   readback against deployed head `0021`; `de41fd75` corrected the readback and
+   added the D2 shape witness.
+3. Attempt 3 reached Bar G.5 and exposed Keycloak's omitted empty `attributes`
+   member; `4e82a218` accepted omission without accepting malformed shapes.
+4. Attempt 4 reached Bar G.5 and proved Keycloak 26.2 returned 204 while
+   ignoring updates to unmanaged claim-source attributes; `fd5130c4` added a
+   declarative managed user profile and exact tenant/scope readback.
+5. Attempt 5 reached Bar A S4 but the host entered clamshell sleep for 2,154
+   seconds. S4 correctly refused an ambiguous expiry claim; `c2f418a7` retains
+   the value-free failure evidence without changing runtime assertions.
+6. Attempt 6 ran under host sleep prevention and passed Bars A-G at the clean
+   `c2f418a7` anchor.
+
+### Honesty boundary
+
+1. Bar G proves the direct-MCP A-minus path. D2's
+   conversation-correlated auto-execution and appended system turn remain
+   unit/e2e-proven only; their deployed proof requires D5's external action
+   agent and released write pack.
+2. The real service token is rejected at the reference binder before a portal
+   Actor exists. The route-level `RequireHumanActor` service-Actor arm remains
+   unit/e2e-proven; this run does not relabel the binder refusal as that route
+   gate.
+3. The successful runner does not retain exact completion-call or token totals,
+   so no exact model-spend number is claimed.
+4. This closes the D2 A-minus live-proof gate, not M8.5-D. Per-tool risk-tier
+   overrides, pack-side action-context verification and idempotency,
+   scheduler-lane delivery, D3 credential brokerage, D5's full external-action
+   proof, and the released bank-agent proof remain open.
