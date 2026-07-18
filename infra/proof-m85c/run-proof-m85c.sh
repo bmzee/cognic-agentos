@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# CURRENT EXTENSION (M8.5-D D2 A-minus, 2026-07-17): the historical M8.5-C
-# Bars A-F remain byte-locked below; BAR G appends deployed N-way assignment,
-# single-use direct-MCP consumption, and maker-checker evidence. The aggregate
-# success marker is now BARS A-G. Conversation-correlated auto-execution remains
-# deferred to D5's externally released action-agent/write-pack proof.
+# CURRENT EXTENSION (M8.5-D D3, 2026-07-18): the historical M8.5-C Bars A-F
+# remain byte-locked below; BAR G appends deployed N-way assignment, single-use
+# direct-MCP consumption, and maker-checker evidence; BAR H appends ESO-injected
+# file custody, DB-native attribution, live rotation, and the engine backstop.
+# Conversation-correlated auto-execution remains deferred to D5's externally
+# released action-agent/write-pack proof.
 # Proof M8.5 SLICE (conversational substrate — BARs 1-3) — the vertical-slice
 # gate for ADR-028: the kernel-owned CONVERSATION primitive (`/api/v1/
 # conversations`) wrapping the PROVEN M8 governed agent loop, live on kind.
@@ -82,7 +83,7 @@
 # conversation.% / agent.run.% / dispatch / audit evidence to
 # docs/VALIDATION-RESULTS.md and exits non-zero — the proof is NEVER
 # redefined downward. On all-pass it prints
-# "PROOF M8.5-C (BARS A-G) PASS" and exits 0.
+# "PROOF M8.5-C (BARS A-H) PASS" and exits 0.
 set -euo pipefail
 
 if [[ "${COGNIC_RUN_PROOF_M85C:-}" != "1" ]]; then
@@ -189,8 +190,8 @@ AGENT_PACK_ID="cognic-agent-bank-analyst"
 AGENT_ID="bank-analyst"                             # the AGENT.md frontmatter name (the ask path segment)
 SKILL_IDS=("customer-data" "financial-data" "cards-data" "atm-recon")
 SKILL_PACK_IDS=("cognic-skill-customer-data" "cognic-skill-financial-data" "cognic-skill-cards-data" "cognic-skill-atm-recon")
-PACK_VERSION="0.5.0"
-PACK_WHEEL="cognic_tool_oracle_schema-0.5.0-py3-none-any.whl"
+PACK_VERSION="0.5.1"
+PACK_WHEEL="cognic_tool_oracle_schema-0.5.1-py3-none-any.whl"
 
 # External Secrets is chart- and image-pinned independently. All three chart
 # workloads use this one multi-platform image digest.
@@ -1941,6 +1942,100 @@ bound_subject() {
   printf '%s' "$val"
 }
 
+# governed_rotation_query <ROLE> — run one fresh governed NL->SQL conversation
+# turn and return "<agent_run_id>\t<credential_rotation_ref>". The ref is read
+# from the caller-visible TurnResponse answer: the prompt requires the model to
+# copy the pack's exact result field onto one unadorned line. BAR H compares that
+# wire observation to the independently persisted agent.run.dispatch chain row.
+governed_rotation_query() {
+  local role="$1" created cid turn parsed rc
+  created="$(conv_create "$role")"
+  load_http_code
+  [ "$HTTP_CODE" = "201" ] \
+    || bar_fail "BAR H governed rotation query could not create its fresh conversation (HTTP $HTTP_CODE)"
+  set +e
+  cid="$(printf '%s' "$created" | python3 -c '
+import json, sys, uuid
+doc = json.load(sys.stdin)
+value = doc.get("conversation_id") if isinstance(doc, dict) else None
+assert isinstance(value, str), "conversation_id_missing"
+assert str(uuid.UUID(value)) == value, "conversation_id_not_canonical"
+print(value)
+')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] && [ -n "$cid" ] \
+    || bar_fail "BAR H governed rotation query received no canonical conversation id"
+
+  turn="$(conv_turn "$role" "$cid" "Use the customer-data schema and run_readonly_query to count active rows in RETAIL_ANALYTICS.V_CUSTOMER_PROFILE. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
+  load_http_code
+  [ "$HTTP_CODE" = "200" ] \
+    || bar_fail "BAR H governed rotation query did not complete on the conversation wire (HTTP $HTTP_CODE)"
+  set +e
+  parsed="$(printf '%s' "$turn" | python3 -c '
+from datetime import datetime
+import json, re, sys
+
+doc = json.load(sys.stdin)
+assert isinstance(doc, dict), "turn_not_object"
+assert doc.get("terminal_state") == "completed", "turn_not_completed"
+assert doc.get("refusal_reason") is None, "turn_refused"
+run_id = doc.get("agent_run_id")
+answer = doc.get("answer")
+assert isinstance(run_id, str) and run_id, "run_id_missing"
+assert isinstance(answer, str), "answer_missing"
+refs = re.findall(r"(?m)^[ \t]*CREDENTIAL_ROTATION_REF=([!-~]{1,64})[ \t]*$", answer)
+assert len(refs) == 1, "rotation_ref_marker_not_exactly_once"
+parsed_ref = datetime.fromisoformat(refs[0])
+assert parsed_ref.tzinfo is not None, "rotation_ref_not_timezone_aware"
+print(f"{run_id}\t{refs[0]}")
+')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] && [ -n "$parsed" ] \
+    || bar_fail "BAR H governed rotation query did not return one valid wire rotation reference"
+  printf '%s\n' "$parsed"
+}
+
+# oracle_admin_sql <SQL> — execute load-bearing proof administration through
+# OS authentication in the database pod. SQL rides stdin, never kubectl argv;
+# this matters for BAR H.3, whose ALTER USER statement contains the new app
+# credential. Callers decide whether diagnostics are safe to surface.
+oracle_admin_sql() {
+  local sql="$1"
+  {
+    printf '%s\n' \
+      'SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 VERIFY OFF TERMOUT ON' \
+      'WHENEVER OSERROR EXIT 9' \
+      'WHENEVER SQLERROR EXIT SQL.SQLCODE' \
+      'ALTER SESSION SET CONTAINER = FREEPDB1;'
+    printf '%s\n' "$sql"
+    printf '%s\n' 'EXIT'
+  } | kubectl_capture -n "$NS" exec -i deploy/oracle-db -- \
+    bash -c 'exec sqlplus -s "/ as sysdba"'
+}
+
+# oracle_proxy_sql <PROXY_IDENTITY> <SQL> <PASSWORD> — exercise the DB grant
+# backstop directly. The credential rides kubectl stdin and then SQL*Plus stdin;
+# it is never an operator-host or pod process argument.
+oracle_proxy_sql() {
+  local proxy_identity="$1" sql="$2" password="$3"
+  printf '%s\n' "$password" | kubectl_capture -n "$NS" exec -i deploy/oracle-db -- \
+    bash -c '
+IFS= read -r password
+proxy_identity="$1"
+sql="$2"
+{
+  printf "%s\n" \
+    "SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 VERIFY OFF TERMOUT ON" \
+    "WHENEVER OSERROR EXIT 9" \
+    "WHENEVER SQLERROR EXIT SQL.SQLCODE"
+  printf "CONNECT cognic[%s]/\"%s\"@FREEPDB1\n" "$proxy_identity" "$password"
+  printf "%s\n" "$sql" "EXIT"
+} | sqlplus -L -s /nolog
+' _ "$proxy_identity" "$sql"
+}
+
 # The BAR-3 entitlement axis (kernel-side rows the dispatch gate 2 reads live).
 entitlement_count() {
   local subject="$1" scope="$2"
@@ -2144,7 +2239,7 @@ PY
 }
 
 # ---- Hook-pack registry-admission preflight (M5/M6-inherited) ---------------------
-# The oracle v0.5.0 manifest binds dlp_pre hooks; the hook pack must be admitted
+# The oracle v0.5.1 manifest binds dlp_pre hooks; the hook pack must be admitted
 # at boot or every governed tool call (incl. the agent's run_readonly_query)
 # fail-closes at the DLP gate.
 assert_hook_pack_registered() {
@@ -3314,7 +3409,7 @@ kubectl -n "$NS" exec "$_BFF_POD0" -- sh -c 'test -r /etc/harness-tls/tls.key' \
 echo "  BFF custody OK: runs as uid 10001 and can read its own TLS private key (fsGroup honoured)"
 
 # ============================ SETUP (M4 governed install) ==========================
-# Operator-install the DLP-governed ORACLE tool v0.5.0 through the lifecycle
+# Operator-install the DLP-governed ORACLE tool v0.5.1 through the lifecycle
 # M4/M5/M6: the full governed lifecycle via the REAL API. Identity is now REAL
 # OIDC — the author/reviewer/operator steps each ride that user's Keycloak access
 # token (api() mints it via the scripted PKCE flow), verified by the reference
@@ -5629,4 +5724,174 @@ assert_http_reason "BAR G.5 index one" "$G_ORIGINATOR1" four_eyes_approver_not_d
   || bar_fail "BAR G.5 maker-checker refusals moved the ledger"
 echo "  Bar G.5 OK: scope-holding originator refused at index 0 (originator_cannot_approve) and index 1 (four_eyes_approver_not_distinct); normal scopes restored"
 echo "PROOF M8.5-C (BAR G) PASS"
-echo "PROOF M8.5-C (BARS A-G) PASS"
+
+# ============================ BAR H — credential brokerage ========================
+# D3: the Oracle app credential exists only in Vault -> ESO -> a read-only mounted
+# file; a governed query reports the file's non-secret rotation reference, the
+# kernel chains that same reference, and Oracle's own unified trail carries a
+# deterministic reference to the exact Keycloak subject the kernel authorized.
+# Rotation is live: the new credential succeeds, the reference changes, and the
+# old credential dies. The independent approval-probe ledger must not move.
+echo "==> BAR H — ESO file credential, DB-native attribution, and live rotation"
+H_LEDGER0="$(probe_ledger_count)"
+
+# H.0 — inspect the deployed object, not its source YAML. There is no plaintext
+# env channel; only the file path + read-only Secret projection may remain. ESO's
+# own Ready condition and the target Secret's existence prove materialization.
+set +e
+H_DEPLOY_JSON="$(kubectl_capture -n "$NS" get deploy/proof-oracle-pack -o json)"
+H_DEPLOY_RC=$?
+set -e
+[ "$H_DEPLOY_RC" -eq 0 ] \
+  || bar_fail "BAR H.0 could not read the deployed oracle-pack shape"
+set +e
+printf '%s' "$H_DEPLOY_JSON" | python3 -c '
+import json, sys
+
+doc = json.load(sys.stdin)
+containers = doc["spec"]["template"]["spec"]["containers"]
+assert len(containers) == 1, "container_count_mismatch"
+container = containers[0]
+env = {entry["name"]: entry for entry in container.get("env", [])}
+password_env_name = "COGNIC_ORACLE_" + "PASSWORD"
+assert password_env_name not in env, "plaintext_password_env_present"
+assert env.get("COGNIC_ORACLE_PASSWORD_FILE") == {
+    "name": "COGNIC_ORACLE_PASSWORD_FILE",
+    "value": "/var/run/cognic/oracle/password",
+}, "password_file_env_mismatch"
+mounts = {entry["name"]: entry for entry in container.get("volumeMounts", [])}
+assert mounts.get("oracle-credential") == {
+    "name": "oracle-credential",
+    "mountPath": "/var/run/cognic/oracle",
+    "readOnly": True,
+}, "credential_mount_mismatch"
+volumes = {
+    entry["name"]: entry for entry in doc["spec"]["template"]["spec"].get("volumes", [])
+}
+secret = volumes.get("oracle-credential", {}).get("secret", {})
+assert secret.get("secretName") == "oracle-app-credential", "credential_secret_mismatch"
+' >/dev/null
+H_DEPLOY_SHAPE_RC=$?
+set -e
+[ "$H_DEPLOY_SHAPE_RC" -eq 0 ] \
+  || bar_fail "BAR H.0 deployed oracle-pack custody shape did not match the file-only contract"
+kubectl -n "$NS" wait --for=condition=Ready externalsecret/oracle-app-credential --timeout=120s \
+  >/dev/null || bar_fail "BAR H.0 ExternalSecret was not Ready"
+kubectl -n "$NS" get secret oracle-app-credential >/dev/null \
+  || bar_fail "BAR H.0 ESO target Secret does not exist"
+echo "  Bar H.0 OK: deployed pack has file-only custody; ESO Ready; target Secret materialized"
+
+# H.1 — one fresh governed NL->SQL turn. The caller-visible wire reference must
+# equal the newest successful run_readonly_query dispatch row for that exact run.
+H_QUERY1="$(governed_rotation_query amir)"
+IFS=$'\t' read -r H_RUN1 H_WIRE_REF1 <<<"$H_QUERY1"
+[ -n "$H_RUN1" ] && [ -n "$H_WIRE_REF1" ] \
+  || bar_fail "BAR H.1 governed query returned no run/reference pair"
+H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload ? 'credential_rotation_ref' ORDER BY sequence DESC LIMIT 1;")"
+[ -n "$H_CHAIN_REF1" ] \
+  || bar_fail "BAR H.1 the governed run carried no credential rotation reference in chain evidence"
+[ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ] \
+  || bar_fail "BAR H.1 wire and chain credential rotation references differ"
+echo "  Bar H.1 OK: governed query succeeded and its wire rotation reference equals the chain row"
+
+# H.2 — recompute the audit reference from the IdP-owned subject source. The
+# value is never read from an app response or the audit row itself. Flush the
+# unified queue, then demand the exact proxy/user/client triple for the view H.1
+# queried. DBUSERNAME is the proxy identity; DBPROXY_USERNAME is the app user.
+H_BOUND_SUBJECT="$(bound_subject analyst.amir)"
+H_SUBJECT_REF="$(printf '%s' "$H_BOUND_SUBJECT" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode("utf-8")).hexdigest())')"
+[[ "$H_SUBJECT_REF" =~ ^[0-9a-f]{64}$ ]] \
+  || bar_fail "BAR H.2 runner subject-reference recomputation was not 64 lowercase hex"
+set +e
+H_AUDIT_ROW="$(oracle_admin_sql "BEGIN
+  SYS.DBMS_AUDIT_MGMT.FLUSH_UNIFIED_AUDIT_TRAIL;
+END;
+/
+SELECT DBUSERNAME || '|' || NVL(DBPROXY_USERNAME, '') || '|' || CLIENT_IDENTIFIER
+  FROM UNIFIED_AUDIT_TRAIL
+ WHERE UNIFIED_AUDIT_POLICIES LIKE '%D3_GOVERNED_SELECTS%'
+   AND ACTION_NAME = 'SELECT'
+   AND OBJECT_SCHEMA = 'RETAIL_ANALYTICS'
+   AND OBJECT_NAME = 'V_CUSTOMER_PROFILE'
+   AND CLIENT_IDENTIFIER = '$H_SUBJECT_REF'
+ ORDER BY EVENT_TIMESTAMP_UTC DESC
+ FETCH FIRST 1 ROW ONLY;")"
+H_AUDIT_RC=$?
+set -e
+[ "$H_AUDIT_RC" -eq 0 ] \
+  || bar_fail "BAR H.2 unified-audit readback failed"
+H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$/' | tail -n 1)"
+[ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ] \
+  || bar_fail "BAR H.2 unified audit did not carry the exact proxy/user/subject-reference triple"
+echo "  Bar H.2 OK: Oracle unified audit correlates AN_AMIR through COGNIC to sha256(bound_subject)"
+
+# H.3 — rotate in the authenticator first, then Vault. The new credential rides
+# SQL*Plus/Vault stdin only. Wait for ESO to update the target Secret and for the
+# kubelet projection window before the next governed query reads the file. That
+# query's reference must change; the original credential must then fail ORA-01017.
+H_SECRET_RV1="$(kubectl -n "$NS" get secret oracle-app-credential -o jsonpath='{.metadata.resourceVersion}')"
+[ -n "$H_SECRET_RV1" ] || bar_fail "BAR H.3 target Secret has no resourceVersion baseline"
+H_PASSWORD2="$(openssl rand -hex 24)"
+[ -n "$H_PASSWORD2" ] && [ "$H_PASSWORD2" != "$ORACLE_APP_PASSWORD" ] \
+  || bar_fail "BAR H.3 could not mint a distinct replacement credential"
+set +e
+oracle_admin_sql "ALTER USER cognic IDENTIFIED BY \"$H_PASSWORD2\";" >/dev/null
+H_ALTER_RC=$?
+set -e
+[ "$H_ALTER_RC" -eq 0 ] \
+  || bar_fail "BAR H.3 Oracle rejected the credential rotation"
+set +e
+printf '%s' "$H_PASSWORD2" | kubectl_capture -n "$NS" exec -i deploy/vault -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=smoke-root-token \
+  vault kv put "secret/cognic/$TENANT/oracle-app" password=- >/dev/null
+H_VAULT_ROTATE_RC=$?
+set -e
+[ "$H_VAULT_ROTATE_RC" -eq 0 ] \
+  || bar_fail "BAR H.3 Vault rejected the replacement credential"
+kubectl -n "$NS" annotate externalsecret/oracle-app-credential \
+  force-sync="$(date +%s)" --overwrite >/dev/null \
+  || bar_fail "BAR H.3 could not force an ESO reconciliation"
+H_SECRET_DEADLINE=$(( $(date +%s) + 120 ))
+H_SECRET_RV2="$H_SECRET_RV1"
+while [ "$H_SECRET_RV2" = "$H_SECRET_RV1" ]; do
+  [ "$(date +%s)" -lt "$H_SECRET_DEADLINE" ] \
+    || bar_fail "BAR H.3 ESO did not update the target Secret within 120s"
+  sleep 3
+  H_SECRET_RV2="$(kubectl -n "$NS" get secret oracle-app-credential -o jsonpath='{.metadata.resourceVersion}')"
+done
+# Kubernetes projected Secret volumes update asynchronously after the Secret
+# object. Wait one bounded sync window; the next observation is still the pack's
+# own fresh read, never an exec into its mount.
+sleep 75
+H_QUERY2="$(governed_rotation_query amir)"
+IFS=$'\t' read -r H_RUN2 H_WIRE_REF2 <<<"$H_QUERY2"
+[ -n "$H_RUN2" ] && [ -n "$H_WIRE_REF2" ] \
+  || bar_fail "BAR H.3 post-rotation query returned no run/reference pair"
+H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload ? 'credential_rotation_ref' ORDER BY sequence DESC LIMIT 1;")"
+[ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ] \
+  || bar_fail "BAR H.3 post-rotation wire and chain references differ"
+[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ] \
+  || bar_fail "BAR H.3 the governed query did not observe a changed credential rotation reference"
+set +e
+H_OLD_PASSWORD_OUT="$(oracle_proxy_sql AN_AMIR 'SELECT 1 FROM dual;' "$ORACLE_APP_PASSWORD")"
+H_OLD_PASSWORD_RC=$?
+set -e
+[ "$H_OLD_PASSWORD_RC" -ne 0 ] && grep -q "ORA-01017" <<<"$H_OLD_PASSWORD_OUT" \
+  || bar_fail "BAR H.3 the original credential did not fail with ORA-01017"
+echo "  Bar H.3 OK: rotated query succeeded with a changed reference; original credential is dead"
+
+# H.4 — the new substrate retains the database grant boundary. AN_SARA owns
+# cards/retail views, not FIN; a direct proxy-session SELECT against FIN must die
+# at Oracle with ORA-00942. None of H may touch the independent approval probe.
+set +e
+H_SCOPE_OUT="$(oracle_proxy_sql AN_SARA 'SELECT COUNT(*) FROM fin.v_gl_balances;' "$H_PASSWORD2")"
+H_SCOPE_RC=$?
+set -e
+[ "$H_SCOPE_RC" -ne 0 ] && grep -q "ORA-00942" <<<"$H_SCOPE_OUT" \
+  || bar_fail "BAR H.4 AN_SARA cross-scope reach did not fail with ORA-00942"
+[ "$(probe_ledger_count)" = "$H_LEDGER0" ] \
+  || bar_fail "BAR H.4 credential/attribution work moved the independent approval-probe ledger"
+unset H_PASSWORD2 ORACLE_APP_PASSWORD H_OLD_PASSWORD_OUT H_SCOPE_OUT
+echo "  Bar H.4 OK: Oracle retained the cross-scope ORA-00942 backstop; probe ledger unchanged"
+echo "PROOF M8.5-C (BAR H) PASS"
+echo "PROOF M8.5-C (BARS A-H) PASS"

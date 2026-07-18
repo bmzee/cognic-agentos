@@ -60,6 +60,7 @@ _ORACLE_PACK_YAML = _PROOF / "manifests" / "oracle-pack.yaml"
 _ESO_STORE_YAML = _PROOF / "manifests" / "eso-secretstore.yaml"
 _ESO_EXTERNAL_SECRET_YAML = _PROOF / "manifests" / "eso-externalsecret.yaml"
 _SEED_VAULT = _PROOF / "seed-vault.sh"
+_ORACLE_SEED_SQL = _PROOF / "oracle-seed" / "seed_schema.sql"
 _BASE_DOCKERFILE = _REPO / "infra" / "agentos" / "Dockerfile"
 _PROOF_DOCKERFILE = _PROOF / "Dockerfile.agentos-proof"
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -903,14 +904,14 @@ def test_r8_release_digests_are_committed_literals_not_env_reads() -> None:
     """An env-supplied digest is not a pin: whoever runs the proof could swap the
     release and export the matching value.
 
-    Oracle v0.5.0 and probe v0.2.0 were released under GitHub Actions custody.
+    Oracle v0.5.1 and probe v0.2.0 were released under GitHub Actions custody.
     Their wheels and public keys are exact reviewed literals. Pinning all four
     makes this test a tamper-detector: a swapped release cannot ride an
     unreviewed stage-packs.sh edit."""
     assert "COGNIC_PROOF_M85C_PROBE_WHEEL_SHA256" not in _STAGE_TEXT
     assert "COGNIC_PROOF_M85C_PROBE_PUB_SHA256" not in _STAGE_TEXT
     assert (
-        'ORACLE_WHEEL_SHA256="7ece811961714242ce589740151fcf3e897f7b507ad3a4d51e10e25e203c99ef"'
+        'ORACLE_WHEEL_SHA256="3f093b22c36a9653c9a41c8ef8d241d3fcd62b02d9189aec3d4fe22eeb2b6b26"'
         in _STAGE_TEXT
     )
     assert (
@@ -930,19 +931,19 @@ def test_r8_release_digests_are_committed_literals_not_env_reads() -> None:
 
 
 def test_d3_release_versions_drive_every_functional_pin_site() -> None:
-    oracle_wheel = "cognic_tool_oracle_schema-0.5.0-py3-none-any.whl"
+    oracle_wheel = "cognic_tool_oracle_schema-0.5.1-py3-none-any.whl"
     probe_wheel = "cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
     oracle_dockerfile = (_PROOF / "Dockerfile.oracle-pack").read_text()
     probe_dockerfile = (_PROOF / "Dockerfile.probe-pack").read_text()
 
-    assert 'ORACLE_TAG="v0.5.0"' in _STAGE_TEXT
-    assert 'ORACLE_VERSION="0.5.0"' in _STAGE_TEXT
+    assert 'ORACLE_TAG="v0.5.1"' in _STAGE_TEXT
+    assert 'ORACLE_VERSION="0.5.1"' in _STAGE_TEXT
     assert f'ORACLE_WHEEL="{oracle_wheel}"' in _STAGE_TEXT
     assert 'PROBE_TAG="v0.2.0"' in _STAGE_TEXT
     assert 'PROBE_VERSION="0.2.0"' in _STAGE_TEXT
     assert f'PROBE_WHEEL="{probe_wheel}"' in _STAGE_TEXT
 
-    assert 'PACK_VERSION="0.5.0"' in _RUNNER_TEXT
+    assert 'PACK_VERSION="0.5.1"' in _RUNNER_TEXT
     assert f'PACK_WHEEL="{oracle_wheel}"' in _RUNNER_TEXT
     assert 'PROBE_PACK_VERSION="0.2.0"' in _RUNNER_TEXT
     assert f'PROBE_WHEEL="{probe_wheel}"' in _RUNNER_TEXT
@@ -954,6 +955,9 @@ def test_d3_release_versions_drive_every_functional_pin_site() -> None:
     assert f"RUN pip install --no-cache-dir --no-deps /tmp/{oracle_wheel}" in oracle_dockerfile
     assert f"COPY proof-m85c-staging/wheel/{probe_wheel} /tmp/" in probe_dockerfile
     assert f"RUN pip install --no-cache-dir --no-deps /tmp/{probe_wheel}" in probe_dockerfile
+    assert "0.5.0" not in "\n".join(
+        path.read_text(errors="replace") for path in _PROOF.rglob("*") if path.is_file()
+    )
 
 
 # --- D3 Task 9: Vault -> ESO -> file is the only app-credential path ------ #
@@ -4838,9 +4842,9 @@ def _bar_a_through_f_text() -> str:
 
 def _bar_g_text() -> str:
     start_marker = "# ============================ BAR G"
-    end_marker = 'echo "PROOF M8.5-C (BARS A-G) PASS"'
+    end_marker = 'echo "PROOF M8.5-C (BAR G) PASS"'
     assert _RUNNER_TEXT.count(start_marker) == 1, "BAR G is absent or duplicated"
-    assert _RUNNER_TEXT.count(end_marker) == 1, "the A-G terminal marker is absent or duplicated"
+    assert _RUNNER_TEXT.count(end_marker) == 1, "the BAR G terminal marker is absent or duplicated"
     start = _RUNNER_TEXT.index(start_marker)
     end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
     return _RUNNER_TEXT[start:end]
@@ -4972,6 +4976,9 @@ def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
     assert _RUNNER_TEXT.index("# ============================ BAR G") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BARS A-F) PASS"'
     )
+    assert hashlib.sha256(_bar_g_text().encode()).hexdigest() == (
+        "af2a0bbeaaf61697d7cfd7feb741ed01ac5318d7671373e89d92ec85ebeae02e"
+    )
 
 
 def test_d2_bar_g_reads_the_canonical_identity_from_bar_d() -> None:
@@ -5016,3 +5023,87 @@ def test_d2_bar_g_real_service_token_cannot_mutate_the_assignment() -> None:
     assert "actor_unauthenticated" in bar
     assert "typ_not_at_jwt" in bar
     assert 'G_ASSIGN_EVENTS_AFTER_SERVICE" = "$G_ASSIGN_EVENTS_AFTER"' in bar
+
+
+# --------------------------------------------------------------------------- #
+# D3 Sprint 3 — BAR H file custody, attribution, and rotation.                #
+# --------------------------------------------------------------------------- #
+
+
+def _bar_h_text() -> str:
+    start_marker = "# ============================ BAR H"
+    end_marker = 'echo "PROOF M8.5-C (BARS A-H) PASS"'
+    assert _RUNNER_TEXT.count(start_marker) == 1, "BAR H is absent or duplicated"
+    assert _RUNNER_TEXT.count(end_marker) == 1, "the A-H terminal marker is absent or duplicated"
+    start = _RUNNER_TEXT.index(start_marker)
+    end = _RUNNER_TEXT.index(end_marker) + len(end_marker)
+    return _RUNNER_TEXT[start:end]
+
+
+def test_d3_bar_h_seed_enables_unified_audit_for_every_queried_view() -> None:
+    seed = _ORACLE_SEED_SQL.read_text()
+    assert "CREATE AUDIT POLICY D3_GOVERNED_SELECTS" in seed
+    assert "SELECT ON retail_analytics.v_customer_profile" in seed
+    assert "SELECT ON fin.v_gl_balances" in seed
+    assert "AUDIT POLICY D3_GOVERNED_SELECTS" in seed
+
+
+def test_d3_bar_h_live_structure_proves_only_file_custody_and_eso_ready() -> None:
+    bar = _bar_h_text()
+    assert "get deploy/proof-oracle-pack -o json" in bar
+    assert '"COGNIC_ORACLE_" + "PASSWORD"' in bar
+    assert '"COGNIC_ORACLE_PASSWORD"' not in bar
+    assert '"COGNIC_ORACLE_PASSWORD_FILE"' in bar
+    assert '"/var/run/cognic/oracle/password"' in bar
+    assert '"oracle-app-credential"' in bar
+    assert "condition=Ready externalsecret/oracle-app-credential" in bar
+
+
+def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
+    bar = _bar_h_text()
+    helper = _extract_shell_function("governed_rotation_query")
+    assert "conv_create" in helper
+    assert "conv_turn" in helper
+    assert "CREDENTIAL_ROTATION_REF=" in helper
+    assert "payload->>'credential_rotation_ref'" in bar
+    assert "event_type='agent.run.dispatch'" in bar
+    assert "payload->>'capability_ref'='$PACK_ID/run_readonly_query'" in bar
+    assert "payload->>'tool_name'='run_readonly_query'" not in bar
+    assert '[ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ]' in bar
+    assert '[ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ]' in bar
+    assert '[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ]' in bar
+
+
+def test_d3_bar_h_recomputes_and_exactly_matches_the_audit_subject_reference() -> None:
+    bar = _bar_h_text()
+    assert 'H_BOUND_SUBJECT="$(bound_subject analyst.amir)"' in bar
+    assert 'hashlib.sha256(sys.stdin.read().encode("utf-8")).hexdigest()' in bar
+    assert "UNIFIED_AUDIT_TRAIL" in bar
+    assert "CLIENT_IDENTIFIER" in bar
+    assert '[ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ]' in bar
+    assert bar.index("bound_subject analyst.amir") < bar.index("hashlib.sha256")
+    assert bar.index("hashlib.sha256") < bar.index("UNIFIED_AUDIT_TRAIL")
+
+
+def test_d3_bar_h_rotation_kills_the_old_password_and_keeps_db_backstop() -> None:
+    bar = _bar_h_text()
+    proxy_helper = _extract_shell_function("oracle_proxy_sql")
+    assert 'H_PASSWORD2="$(openssl rand -hex 24)"' in bar
+    assert "ALTER USER cognic IDENTIFIED BY" in bar
+    assert "vault kv put" in bar
+    assert "force-sync" in bar
+    assert "ORA-01017" in bar
+    assert "sqlplus -L -s /nolog" in proxy_helper
+    assert "AN_SARA" in bar
+    assert "fin.v_gl_balances" in bar
+    assert "ORA-00942" in bar
+    assert '[ "$(probe_ledger_count)" = "$H_LEDGER0" ]' in bar
+
+
+def test_d3_bar_h_is_appended_after_locked_bars_and_owns_the_final_banner() -> None:
+    assert _RUNNER_TEXT.index("# ============================ BAR H") > _RUNNER_TEXT.index(
+        'echo "PROOF M8.5-C (BAR G) PASS"'
+    )
+    assert 'echo "PROOF M8.5-C (BARS A-G) PASS"' not in _RUNNER_TEXT
+    assert 'echo "PROOF M8.5-C (BAR H) PASS"' in _bar_h_text()
+    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-C (BARS A-H) PASS"')

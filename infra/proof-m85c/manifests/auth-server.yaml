@@ -1,7 +1,7 @@
 # infra/proof-m85c/manifests/auth-server.yaml — RS256 AS (M8). Mirrors
 # infra/proof-m6/manifests/auth-server.yaml at the same genuine-global externalIP,
 # with COGNIC_PROOF_AS_SIGNING_MODE=rs256 so the AS mints RS256-signed JWTs + serves
-# JWKS (the released oracle v0.5.0 pack's real verifier needs them — the OAuth leg
+# JWKS (the released oracle v0.5.1 pack's real verifier needs them — the OAuth leg
 # is UNCHANGED from M4/M5/M6; the M8 query-context token is a SEPARATE kernel-signed
 # artifact verified inside run_readonly_query, not here).
 apiVersion: apps/v1

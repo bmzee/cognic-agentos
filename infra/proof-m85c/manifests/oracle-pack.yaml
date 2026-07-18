@@ -1,5 +1,5 @@
 # infra/proof-m85c/manifests/oracle-pack.yaml — the released oracle-schema MCP
-# tool Service (v0.5.0 — the file-credential + SET_IDENTIFIER release the
+# tool Service (v0.5.1 — the file-credential + SET_IDENTIFIER release the
 # agent's granted tool ref resolves to; the six metadata tools unchanged).
 # Static private ClusterIP 10.96.0.51 (the operator-install flow materializes
 # the override + allow-list rows for this exact IP). jwt mode = the REAL

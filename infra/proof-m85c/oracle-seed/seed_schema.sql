@@ -432,4 +432,16 @@ GRANT SELECT ON retail_analytics.v_customer_profile TO an_sara;
 -- raw-table statement that somehow survived the kernel + tool gates dies at
 -- the engine with ORA-00942 (table or view does not exist) — BAR 4b.
 
+-- ---------------------------------------------------------------------------
+-- 7. Unified-audit policy for the exact governed views BAR H exercises
+-- ---------------------------------------------------------------------------
+-- The policy is object-scoped: the successful retail query proves per-human
+-- attribution, while the cross-scope FIN query proves the engine denial. The
+-- runner flushes and reads UNIFIED_AUDIT_TRAIL independently; the pack never
+-- reads or reports its own audit row.
+CREATE AUDIT POLICY D3_GOVERNED_SELECTS
+    ACTIONS SELECT ON retail_analytics.v_customer_profile,
+            SELECT ON fin.v_gl_balances;
+AUDIT POLICY D3_GOVERNED_SELECTS;
+
 EXIT
