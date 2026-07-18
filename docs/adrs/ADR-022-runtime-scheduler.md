@@ -1,4 +1,7 @@
 # ADR-022 — Runtime Scheduler / Work Queue
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** — DRAFT 2026-05-16 → APPROVED 2026-05-27. Scheduler-relevant portions implemented in **Sprint 10.5 (10.5a + 10.5b)**, merged to `main` via PR #40 (squash commit `6791eec`). The credential-projection sub-arc originally bundled as 10.5c was split to **Sprint 10.6** at the Z1b VALVE CHECK; see the §"Sprint 10.5 implementation closeout (2026-05-27)" addendum at the foot of this ADR.

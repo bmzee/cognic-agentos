@@ -1,4 +1,7 @@
 # Sprint 14B-Z1b-c — OTLP exporter protocol primitive (gRPC/HTTP) + Langfuse-OTLP chart wiring Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

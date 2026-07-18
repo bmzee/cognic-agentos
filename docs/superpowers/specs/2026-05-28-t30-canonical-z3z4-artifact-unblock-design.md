@@ -1,4 +1,7 @@
 # T30 — Canonical Z3/Z4 Production Artifact Unblock (Design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DRAFT — design-only. No Dockerfiles, no shim code, no backend edits in this document. Implementation follows in a separate plan (`writing-plans`) after this spec is reviewed.
 

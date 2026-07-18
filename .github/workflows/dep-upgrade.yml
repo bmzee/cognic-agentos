@@ -61,7 +61,8 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "::group::uv.lock diff"
-            git --no-pager diff -- uv.lock | head -200
+            git --no-pager diff -- uv.lock > "$RUNNER_TEMP/uv-lock.diff"
+            sed -n '1,200p' "$RUNNER_TEMP/uv-lock.diff"
             echo "::endgroup::"
           fi
 

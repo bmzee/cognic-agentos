@@ -1,4 +1,7 @@
 # Cognic — Future Roadmap
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 ## Updated April 2026 (v5.0 sync) · Near-Term Wave 2 Expansion + Growth Levers
 
 > ⚠️ **LEGACY CONTEXT FOR THIS REPO. BUILD_PLAN.md + ROADMAP.md WIN ON CONFLICT.** This is the parent monorepo's product roadmap. Engineering execution in this repo follows [`docs/ROADMAP.md`](../ROADMAP.md) (phase-level) + [`docs/BUILD_PLAN.md`](../BUILD_PLAN.md) (sprint-level).

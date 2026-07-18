@@ -1,4 +1,7 @@
 # Sprint 14A-A4b — Manifest-Driven High-Risk Managed-Run Path (Design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Design (brainstorm-approved 2026-06-17; pending written spec review)
 **ADRs:** ADR-022 (runtime scheduler) + ADR-004 (sandbox) + ADR-014 (runtime tool approval) — referenced; A4b is an activation of A4a's affordance, no new policy loosening.

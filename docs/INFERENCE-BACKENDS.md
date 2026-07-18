@@ -1,4 +1,7 @@
 # Inference Backends — Operator Guide
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** Sprint 1D operator reference. Companion to
 > [`ADR-009`](adrs/ADR-009-pluggable-infrastructure-adapters.md) §"LLM serving"

@@ -1,4 +1,7 @@
 # Cognic AgentOS — Build Plan
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > Sprint-level plan for the 4 phases in [`ROADMAP.md`](ROADMAP.md). Each sprint is a shippable unit. **Approve sprint-by-sprint** — I will not start Sprint N until you say go.
 

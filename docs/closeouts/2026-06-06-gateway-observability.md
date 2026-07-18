@@ -1,4 +1,7 @@
 # Gateway Observability — Closeout (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Branch:** `feat/gateway-observability` · **Gateway-observability workstream** — wire the generic `ObservabilityAdapter` through `LLMGateway.completion` so every caller emits a value-free OTel span, + the live eval-judge proof.
 

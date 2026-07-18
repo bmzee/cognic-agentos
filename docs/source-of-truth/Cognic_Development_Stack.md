@@ -1,4 +1,7 @@
 # Cognic — Development Stack Reference
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 ## Canonical build-time stack for Claude Code and engineering team · April 2026
 ## Last refreshed: post-Brick-10 (2026-04-05)
 

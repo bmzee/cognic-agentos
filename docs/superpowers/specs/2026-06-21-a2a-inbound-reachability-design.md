@@ -1,4 +1,7 @@
 # A2A Inbound Reachability (receiver-only, Wave-1) — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** LANDED (2026-06-21) — implemented on `feat/a2a-inbound-reachability` (Sprints 1-5). The deferred JSON-RPC route-integration serializer (see the §3 plan-grounding note) is built; `tenant_header_missing` was renamed from `a2a_tenant_header_missing` to honour the no-`a2a_`-prefix invariant. CC count stays 133; no migration. Conformance: `tests/conformance/a2a/test_receiver_wave1_posture.py`.
 

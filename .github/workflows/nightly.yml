@@ -1,0 +1,187 @@
+name: nightly
+
+# HONESTY BOUNDARY: the full M8.5-C live proof (Bars A-G) is not nightly.
+# It needs the operator-held provider key and Playwright identities; moving
+# that key into GitHub secrets is a HUMAN custody decision not taken here.
+# Nightly covers the shared gate ladder and the credential-free kind lanes only.
+
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate-ladder:
+    name: full gate ladder + credential-free kind proofs
+    uses: ./.github/workflows/python.yml
+    with:
+      run_credential_free_kind_lanes: true
+
+  morning-report:
+    name: create, update, or close the morning report
+    needs: gate-ladder
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    env:
+      GATE_RESULT: ${{ needs.gate-ladder.result }}
+    steps:
+      - name: Reconcile the pinned nightly issue
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const title = "nightly: morning report";
+            const label = "nightly-red";
+            const {owner, repo} = context.repo;
+            const gateResult = process.env.GATE_RESULT;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+            const matches = issues.filter(
+              (item) => item.title === title && item.pull_request === undefined,
+            );
+            if (matches.length > 1) {
+              throw new Error(`refusing duplicate morning reports: ${matches.length}`);
+            }
+            let issue = matches[0];
+
+            const isPinned = async (issueId) => {
+              const result = await github.graphql(
+                `query($issueId: ID!) {
+                  node(id: $issueId) {
+                    ... on Issue { isPinned }
+                  }
+                }`,
+                {issueId},
+              );
+              if (result.node === null) {
+                throw new Error("morning report node disappeared");
+              }
+              return result.node.isPinned === true;
+            };
+
+            if (gateResult === "success") {
+              if (issue === undefined) {
+                core.info("nightly green; no morning report exists");
+                return;
+              }
+              if (await isPinned(issue.node_id)) {
+                await github.graphql(
+                  `mutation($issueId: ID!) {
+                    unpinIssue(input: {issueId: $issueId}) { issue { id } }
+                  }`,
+                  {issueId: issue.node_id},
+                );
+              }
+              if (issue.state === "open") {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: `Recovered on [nightly run ${context.runId}](${runUrl}).`,
+                });
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                  state_reason: "completed",
+                });
+              }
+              return;
+            }
+
+            const jobs = await github.paginate(
+              github.rest.actions.listJobsForWorkflowRun,
+              {owner, repo, run_id: context.runId, per_page: 100},
+            );
+            const failedConclusions = new Set([
+              "action_required",
+              "cancelled",
+              "failure",
+              "stale",
+              "startup_failure",
+              "timed_out",
+            ]);
+            const failures = jobs
+              .filter((job) => failedConclusions.has(job.conclusion))
+              .sort((left, right) => left.name.localeCompare(right.name));
+            if (failures.length === 0) {
+              throw new Error(`gate result ${gateResult} has no observable failing jobs`);
+            }
+
+            const body = [
+              "# Nightly gate failure",
+              "",
+              `Run: [${context.runId}](${runUrl})`,
+              `Commit: \`${context.sha}\``,
+              "",
+              "## Failing jobs",
+              "",
+              ...failures.map(
+                (job) => `- [${job.name}](${job.html_url}): \`${job.conclusion}\``,
+              ),
+              "",
+              "This issue is updated in place and closes on the next green nightly run.",
+            ].join("\n");
+
+            try {
+              await github.rest.issues.getLabel({owner, repo, name: label});
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name: label,
+                color: "B60205",
+                description: "The latest nightly gate ladder is red",
+              });
+            }
+
+            if (issue === undefined) {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+                labels: [label],
+              });
+              issue = created.data;
+            } else {
+              const updated = await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                title,
+                body,
+                labels: [label],
+                state: "open",
+              });
+              issue = updated.data;
+            }
+
+            if (!(await isPinned(issue.node_id))) {
+              await github.graphql(
+                `mutation($issueId: ID!) {
+                  pinIssue(input: {issueId: $issueId}) { issue { id } }
+                }`,
+                {issueId: issue.node_id},
+              );
+            }

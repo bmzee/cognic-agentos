@@ -1,4 +1,7 @@
 # M3-E2 — FastMCP tool-pack authoring path + `cognic-tool-oracle-schema` (design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-28
 **Status:** APPROVED (design) — ready for implementation planning (`writing-plans`)

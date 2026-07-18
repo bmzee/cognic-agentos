@@ -1,4 +1,7 @@
 # Wave-1 Deploy-Safety Fixes — Closeout (2026-06-04)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Branch:** `feat/wave-1-deploy-safety` · **Workstream #1** of the deployable-without-code-surgery sequence (Pre-GA Configurability Audit → Wave-1 fixes → … ).
 

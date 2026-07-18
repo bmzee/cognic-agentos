@@ -1,4 +1,7 @@
 # Sprint 11 — Sub-Agent Primitive Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Every task touches the `subagent/` stop-rule isolation boundary or a `core/` stop-rule → halt-before-commit per `[[feedback_strict_review_off_gate]]`, `core-controls-engineer` + `/critical-module-mode`.**
 

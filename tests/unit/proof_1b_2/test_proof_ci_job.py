@@ -1,20 +1,21 @@
 """Structural gate (author-time): the Proof 1b-2 CI job in
 ``.github/workflows/python.yml`` pins the load-bearing CI-wiring invariants
 OFFLINE — without GitHub Actions, a ``kind`` cluster, ``docker``, or running the
-proof (the job RUNS only when an operator opts in; see below).
+proof (the job runs only through an explicit selector; see below).
 
 Per the Proof 1b-2 plan (Task 10), the workflow ships an OPTIONAL ``proof-1b-2``
 job that runs the operator end-to-end runner
 (``infra/proof-1b-2/run-proof-1b-2.sh``) in a ``kind`` cluster. The job is
-**NEVER default-on** — it executes ONLY when the repo var
-``COGNIC_RUN_PROOF_1B2 == '1'`` OR on a manual ``workflow_dispatch``; it builds
-four images + spins kind + a live Vault/Postgres, far too heavy for every PR.
+**NEVER default-on for push/PR** — it executes only when the repo var
+``COGNIC_RUN_PROOF_1B2 == '1'``, on a manual ``workflow_dispatch``, or when the
+nightly reusable-workflow input explicitly enables the credential-free kind lanes.
+It builds four images + spins kind + a live Vault/Postgres, far too heavy for every PR.
 
 **Two-gate contract (HARD BAR #3).** There are TWO independent gates and BOTH are
 required:
 
-* the GitHub ``vars.COGNIC_RUN_PROOF_1B2`` (the job ``if``) gates whether the JOB
-  runs at all, and
+* the job ``if`` requires an explicit repository-variable, manual, or nightly
+  reusable-workflow selector, and
 * the ENV ``COGNIC_RUN_PROOF_1B2=1`` set inside the runner step enables the
   RUNNER (the runner self-gates on that ENV var and exits ``0`` cleanly when it is
   unset — ``run-proof-1b-2.sh:23-26``).
@@ -46,7 +47,7 @@ _JOB = "proof-1b-2"
 _RUNNER_PATH = "infra/proof-1b-2/run-proof-1b-2.sh"
 
 # The ENV gate the runner step MUST set (enables the RUNNER; distinct from the
-# GitHub `vars.` gate that gates the JOB).
+# job-level selector that gates the JOB).
 _ENV_GATE = "COGNIC_RUN_PROOF_1B2=1"
 
 
@@ -86,16 +87,14 @@ def test_proof_1b2_job_exists() -> None:
     assert _JOB in _workflow()["jobs"], f"the {_JOB!r} job must exist under `jobs`"
 
 
-# --- NEVER default-on: BOTH gate clauses present (the user's #1 emphasis) --------
+# --- NEVER default-on: all three explicit job selectors remain present -----------
 
 
-def test_proof_1b2_job_is_never_default_on() -> None:
+def test_proof_1b2_job_is_never_default_on_for_push_or_pull_request() -> None:
     # The job `if` is the JOB gate. It MUST reference BOTH the repo var
-    # (`vars.COGNIC_RUN_PROOF_1B2`) AND a manual `workflow_dispatch` — and nothing
-    # else may make it run. The presence of the `if` at all is what keeps the job
-    # off every normal PR/push; pin both clauses so a refactor can't quietly drop
-    # the var gate (which would make it default-on for dispatch) or the dispatch
-    # clause (which would make it unrunnable by hand).
+    # (`vars.COGNIC_RUN_PROOF_1B2`), a manual `workflow_dispatch`, AND the explicit
+    # reusable-workflow input. The presence of the `if` keeps the job off every
+    # normal PR/push; pin all three opt-in paths.
     job = _proof_job()
     assert "if" in job, f"the {_JOB!r} job MUST carry an `if` gate (never default-on)"
     gate = job["if"]
@@ -105,6 +104,9 @@ def test_proof_1b2_job_is_never_default_on() -> None:
     )
     assert "workflow_dispatch" in gate, (
         "the job `if` must allow a manual `workflow_dispatch` trigger"
+    )
+    assert "inputs.run_credential_free_kind_lanes == true" in gate, (
+        "the job `if` must allow the nightly reusable workflow to opt in explicitly"
     )
 
 

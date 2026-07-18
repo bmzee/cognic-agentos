@@ -1,4 +1,7 @@
 # ADR-025 — Governed Agent Skills
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED** on 2026-07-02 (design decisions locked with the maintainer; this ADR number was previously reserved for `SKILL.md` hosting and is written for the merged milestone). It lands as milestone **M6 — "Governed Agent Skill proof"**, which merges checklist milestones **M6 + M7** into one shape (see §"M6 + M7 merge"). Source design spec: `docs/superpowers/specs/2026-07-02-m6-governed-agent-skill-design.md`; implementation on branch `feat/m6-governed-agent-skill`.

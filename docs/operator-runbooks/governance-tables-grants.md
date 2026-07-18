@@ -1,4 +1,7 @@
 # Operator Runbook — Governance-Table GRANTs
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Audience:** bank database operators rolling out Cognic AgentOS for the first time, or rotating credentials.
 >

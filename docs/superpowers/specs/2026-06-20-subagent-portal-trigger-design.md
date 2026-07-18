@@ -1,4 +1,7 @@
 # Sub-Agent Portal Trigger — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** LANDED (2026-06-20) — implemented on `feat/subagent-portal-trigger` (T1-T5); CC stays 133, no migration.
 > **Date:** 2026-06-20

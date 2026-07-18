@@ -1,4 +1,7 @@
 # Proof 1b-2 — Deployed Governed MCP Invocation Loop — Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **This is a DEPLOYED-PROOF plan — most tasks build infra/images/manifests; only T1–T3 carry unit tests, and the proof RUN itself (T9) is gated behind `COGNIC_RUN_PROOF_1B2=1` and is operator-run, never in PR CI.**
 

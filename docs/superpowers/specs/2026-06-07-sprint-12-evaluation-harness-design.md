@@ -1,4 +1,7 @@
 # Sprint 12 — Evaluation Harness — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-07
 **ADR:** ADR-010 (Evaluation harness) — this sprint ships an **ADR-010 amendment**, not a new ADR.

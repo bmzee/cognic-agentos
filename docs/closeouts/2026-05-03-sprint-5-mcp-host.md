@@ -1,4 +1,7 @@
 # Sprint 5 — MCP host (Streamable HTTP + STDIO threat model + OAuth/PRM authz) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-03
 **Sprints closed:** 5 (MCP plugin protocol per ADR-002 amendment April 2026 — Streamable HTTP transport, STDIO restricted via four-gate threat model + Decision Lock, OAuth/PRM admission-side authorization with RFC 8707 resource indicator, signed-manifest extraction + capability validation, MCPHost orchestrator with ADR-014 transitional risk-tier gate, audit-chain + decision-history correlation, fixture pack + admission/orchestrator smoke, runtime negative-path canary, critical-controls coverage gate extension to 21 modules).

@@ -1,4 +1,7 @@
 # Gateway Observability — Design Spec (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Wire `ObservabilityAdapter`/Langfuse through `LLMGateway.completion` for every caller (Option A — metadata-only OTel span), + the live eval-judge proof.**
 

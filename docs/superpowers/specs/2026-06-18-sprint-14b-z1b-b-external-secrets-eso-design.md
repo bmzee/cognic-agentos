@@ -1,4 +1,7 @@
 # Sprint 14B-Z1b-b — External secrets (ESO-first, conditional ExternalSecret) — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-18
 **Status:** DRAFT — design approved in brainstorming (2026-06-18); awaiting spec review before planning.

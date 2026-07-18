@@ -1,4 +1,7 @@
 # Sprint 13c — Adversarial Promotion Gate (design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Goal:** Wire the Sprint-13b adversarial evidence into the existing 5-gate pack-approval composer — a submit-time, reference-based producer that resolves a 13b adversarial eval-run, verifies it, computes baseline regression, and freezes a mapped snapshot into `payload["adversarial"]` so gate-3 of `compose_approval_gates` becomes live.
 

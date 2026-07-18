@@ -1,4 +1,7 @@
 # Sprint 13b — Adversarial Testing (ADR-011) — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** design locked 2026-06-09 (brainstorming complete; awaiting spec review → implementation plan).
 **ADR:** ADR-011 (APPROVED 2026-04-26). This is the second of three Sprint-13 sub-projects: **13a live replay** (merged, PR #56) → **13b adversarial testing** (this) → **13c promotion gate** (depends on 13b).

@@ -1,4 +1,7 @@
 # Sprint 11 — Sub-Agent Primitive (ADR-005) — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DRAFT — awaiting user review (no implementation started).
 **Date:** 2026-05-30.

@@ -1,4 +1,7 @@
 # Sprint 2 — Governance Foundation — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-04-29
 **Sprints closed:** 2 (chain-of-custody foundation: schemas, canonical form, audit + decision_history append-only stores, chain verifier, alembic baseline + initial migration, runtime-role canary).

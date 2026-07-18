@@ -1,4 +1,7 @@
 # Sprint 14A-A3a — Run-persistence foundation (durable `RunRecord` substrate) — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **ADR:** ADR-022 (scheduler/run) + ADR-004 (sandbox/checkpoint). **Status:** design locked, ready for plan.
 **Date:** 2026-06-15. **Predecessor:** 14A-A2 (route + sandbox approval threading, MERGED `main @ 3895311`).

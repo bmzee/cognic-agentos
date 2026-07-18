@@ -1,4 +1,7 @@
 # #477 live-proof evidence — sandbox checkpoint/suspend/wake
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Task #477 status: LIVE PROOF RECORDED — eligible to close.**
 >

@@ -1,4 +1,7 @@
 # M8.5-C — Cognic Harness v1 + HP-4 kernel slice — design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** design ratified through three review chunks (2026-07-11); implements the recon locks committed at `07327fb1` (ADR-028 spec §0.2 HP-1..HP-5 + §0.3 naming lock + §0.4). This spec never relitigates a lock; where it repeats one, the lock text governs.
 

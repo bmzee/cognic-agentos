@@ -1,4 +1,7 @@
 # Sprint 14A-A4c — High-Risk WAKE Live Exercise — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-17
 **Status:** DRAFT — recon-gated; the read-only recon (2026-06-17) PROVED the slice small (e2e-only, zero production-code gap).

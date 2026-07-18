@@ -1,4 +1,7 @@
 # Operator runbook — Helm chart production install
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## What this covers
 

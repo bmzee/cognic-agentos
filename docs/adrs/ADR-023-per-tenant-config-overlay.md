@@ -1,4 +1,7 @@
 # ADR-023 — Per-Tenant Configuration Overlay (Wave-2)
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 

@@ -11,7 +11,7 @@ This repo ships **AgentOS only**: the hardened governance + runtime + protocol k
 | Governance kernel (`core/`) | Layer C agents (`cognic-agent-<name>` repos) |
 | Harness (`harness/base_agent.py`) | Per-agent workflows (ship in agent packs) |
 | LLM gateway, retrieval orchestrator, persistence, observability | Per-agent eval scorers (ship in agent packs) |
-| Channels, RBAC, portal API + workbench | Cognic Harness (`cognic-harness` separate product repo — the v1 three-screen runtime client as a browser + same-origin BFF, growing into the v2 ADK; no independent authorization or governance authority — security-sensitive for the OIDC flow, session/token custody, CSRF, and request forwarding, non-authoritative for identity and authorization; distinct from the kernel-internal `harness/` composition layer) |
+| RBAC, portal API + workbench | Cognic Harness (`cognic-harness` separate product repo — the v1 three-screen runtime client as a browser + same-origin BFF, growing into the v2 ADK; no independent authorization or governance authority — security-sensitive for the OIDC flow, session/token custody, CSRF, and request forwarding, non-authoritative for identity and authorization; distinct from the kernel-internal `harness/` composition layer) |
 | Plugin registry + MCP host + A2A endpoint | Tool packs (`cognic-tool-<name>` MCP servers) |
 | Sandbox + sub-agent primitives | Skill packs (`cognic-skill-<name>` — a `SKILL.md` package, optionally carrying one governed action) |
 | ISO 42001 compliance evidence | Bank-specific overlays (themes, OIDC, custom CBS adapters) |

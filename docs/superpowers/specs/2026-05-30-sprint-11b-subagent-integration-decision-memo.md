@@ -1,4 +1,7 @@
 # Sprint 11b — Sub-agent integration: decision memo
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DECISIONS LOCKED (2026-05-30) — the three deferred decisions, confirmed before 11b code. **No re-litigation of ADR-005 or 11a.**
 **Date:** 2026-05-30. **Branch:** `feat/sprint-11b-subagent-integration` (off `main` @ `6d3285e`).

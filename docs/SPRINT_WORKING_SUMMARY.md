@@ -1,4 +1,7 @@
 # Cognic AgentOS Sprint Working Summary
+<!-- STATUS: SUPERSEDED-BY: ./PROJECT_STATUS.md -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 Source: `docs/BUILD_PLAN.md` · Status source: [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md)
 

@@ -1,4 +1,7 @@
 # #489 — Production checkpoint-reaper wiring — design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-21
 **Status:** approved — see implementation plan `docs/superpowers/plans/2026-05-21-489-prod-checkpoint-reaper-wiring.md`

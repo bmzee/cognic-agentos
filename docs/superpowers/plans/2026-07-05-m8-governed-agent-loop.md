@@ -1,4 +1,7 @@
 # M8 — Governed Agent Loop — Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Implement this plan in the long-running batches named below, then return a complete report per batch for controller review. Steps use checkbox (`- [ ]`) syntax for tracking.
 

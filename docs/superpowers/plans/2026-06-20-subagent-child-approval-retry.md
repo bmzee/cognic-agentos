@@ -1,4 +1,7 @@
 # Sub-Agent Child Approval-Retry Semantics — Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax. **This slice is inside the `subagent/` + ADR-020 `ui_events` stop-rule boundaries — use `core-controls-engineer` + `/critical-module-mode`; every change is backward-compatible-additive.**
 

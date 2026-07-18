@@ -1,4 +1,7 @@
 # Proof 1a — Real-App In-Process Pack-Governance Loop — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-21
 **Status:** Design — approved with the MCP-auth correction (2026-06-21)

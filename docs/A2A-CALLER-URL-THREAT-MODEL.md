@@ -1,4 +1,7 @@
 # A2A Caller-Controlled URL Threat Model
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Authoritative reference for why outbound A2A dispatch URLs in Cognic AgentOS MUST come from JWS-verified Agent Cards or operator-controlled `Settings` fields, never from caller input or model output. This document complements [`ADR-003`](adrs/ADR-003-a2a-inter-agent.md) (A2A inter-agent protocol) and the Sprint-6 plan-of-record's §"Doctrine Decision B".
 

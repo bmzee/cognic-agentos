@@ -1,4 +1,7 @@
 # Cognic AgentOS — Project Plan
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Active baseline (doctrine). For as-built execution status see [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md) + the status blocks in [`docs/BUILD_PLAN.md`](BUILD_PLAN.md).\
 **Date:** 2026-04-26 (capability-map pointer added 2026-06-12)\

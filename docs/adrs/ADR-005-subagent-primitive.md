@@ -1,4 +1,7 @@
 # ADR-005 — Sub-Agent Primitive (Orchestrator-Worker Spawning)
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26.

@@ -1,4 +1,7 @@
 # Sprint 7A — Authoring SDK + CLI (per ADR-008 Phase A) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-09
 **Sprints closed:** 7A (authoring platform — SDK base classes for Tool / Skill / Agent + ToolRegistry protocol + testing pytest fixtures + ISO 42001 control-declaration helpers + `agentos` CLI entry point + three init scaffolders + `agentos validate` orchestrator + six per-concern validators + `agentos test-harness` Wave-1-narrow runner + `agentos sign --bundle` full bundle generator + `agentos verify` offline trust gate per ADR-016 with the R15 PIVOT replacing static-AST loadability with an isolated-subprocess `EntryPoint.load()` probe + three `examples/` reference packs gated by a full-lifecycle CI test + critical-controls coverage gate extended to 37 modules + three Wave-1 author docs).

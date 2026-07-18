@@ -1,4 +1,7 @@
 # Proof 1b-2 — Deployed Governed MCP Invocation Loop — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** design approved 2026-06-25; spec for review before the implementation plan.
 

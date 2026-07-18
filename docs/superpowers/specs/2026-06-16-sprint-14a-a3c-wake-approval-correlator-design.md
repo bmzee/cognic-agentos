@@ -1,4 +1,7 @@
 # Sprint 14A-A3c — Wake Approval Correlator — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** design (brainstorm-locked) · **Date:** 2026-06-16 · **ADRs:** ADR-022 (runtime scheduler / managed run) + ADR-004 (sandbox resumable session) + ADR-014 (runtime tool approval) · **Arc:** checkpoint→wake / run-persistence, slice **3/3** (A3a foundation → A3b resolver/resume → **A3c wake approval correlator**).
 

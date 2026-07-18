@@ -1,4 +1,7 @@
 # Skill Engineering & Accuracy — the discipline
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DRAFT for maintainer review
 **Date:** 2026-07-14

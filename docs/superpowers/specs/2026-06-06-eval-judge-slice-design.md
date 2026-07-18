@@ -1,4 +1,7 @@
 # Eval Judge Slice — Design Spec (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **ADR-010 LLM-as-judge — the first in-repo consumer of the harness-built `app.state.llm_gateway`.**
 

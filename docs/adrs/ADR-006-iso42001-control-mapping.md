@@ -1,4 +1,7 @@
 # ADR-006 — ISO/IEC 42001 Control Mapping
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 

@@ -1,4 +1,7 @@
 # Harness Injection — Design Spec (2026-06-05)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** Design — approved in brainstorming; pending spec review before plan.
 >

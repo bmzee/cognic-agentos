@@ -1,4 +1,7 @@
 # Operator runbook — kind Ready-smoke
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## What the smoke proves
 

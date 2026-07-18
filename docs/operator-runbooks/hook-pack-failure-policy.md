@@ -1,4 +1,7 @@
 # Hook pack failure-policy operator runbook
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Audience.** AgentOS operators on-call. Pairs with the alert
 catalogue + the audit-event taxonomy.

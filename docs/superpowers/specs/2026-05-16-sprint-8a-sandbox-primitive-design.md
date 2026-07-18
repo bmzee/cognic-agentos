@@ -1,4 +1,7 @@
 # Sprint 8A — Sandbox primitive (core + Docker sibling backend + canonical image catalog) — Design spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DRAFT pending review
 **Authored:** 2026-05-16

@@ -1,4 +1,7 @@
 # A2A Conformance Matrix
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Authoritative reference for which A2A 1.0 features Cognic AgentOS supports, restricts, or defers per wave.
 

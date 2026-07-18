@@ -1,4 +1,7 @@
 # Sprint 14B-Z1b-d-2 — AKS live-cloud capstone (Bicep IaC + env-gated WI/ESO-from-Key-Vault smoke + 8th all-surfaces render) — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-19
 **Status:** DRAFT — design approved in brainstorming (2026-06-18 → 2026-06-19); awaiting spec review before planning.

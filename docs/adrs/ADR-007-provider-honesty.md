@@ -1,4 +1,7 @@
 # ADR-007 — Provider-Honesty Enforcement
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26.

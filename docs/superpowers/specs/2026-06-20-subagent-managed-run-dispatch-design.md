@@ -1,4 +1,7 @@
 # Live SubAgentSpawner dispatch — first production slice (child-is-a-managed-run)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-20
 **Status:** design locked (brainstorming complete; ready for writing-plans)

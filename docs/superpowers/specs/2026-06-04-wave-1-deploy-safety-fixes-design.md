@@ -1,4 +1,7 @@
 # Wave-1 Deploy-Safety Fixes — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Date:** 2026-06-04
 > **Status:** Design spec — pending review; **no code yet**

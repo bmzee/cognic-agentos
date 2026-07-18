@@ -1,4 +1,7 @@
 # Sprint 7B.4 — UI Event-Stream Endpoints + RBAC Denial Chain Events (per ADR-020) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-16
 **Sprints closed:** 7B.4 (3 SSE GET endpoints + POST /actions + portable JSON schema + submit_elicitation 5-step gate + `policy.rbac_denied` chain events promotion + `UIEventBroker` primitive + deterministic chain-derived event_id cursor + `ElicitationAdapter` Protocol + `elicitation.rego` stop-rule + `UIRBACScope` 8-value peer Literal + 5 new closed-enum vocabularies + 3 CC promotions).

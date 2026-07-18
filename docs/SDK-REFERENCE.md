@@ -1,4 +1,7 @@
 # Cognic AgentOS SDK reference
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 Python API surface for pack authors. Covers the four base classes
 (`Tool`, `Skill`, `Agent`, `Hook`), the `ToolRegistry` protocol skills

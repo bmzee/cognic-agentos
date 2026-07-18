@@ -1,4 +1,7 @@
 # Cognic — Master Strategy Document
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 ## Version 5.0 · April 2026 · Digital Workforce Architecture
 
 > ⚠️ **LEGACY CONTEXT FOR THIS REPO. BUILD_PLAN.md WINS ON CONFLICT.**

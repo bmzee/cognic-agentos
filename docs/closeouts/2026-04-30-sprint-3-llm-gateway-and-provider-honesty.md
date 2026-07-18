@@ -1,4 +1,7 @@
 # Sprint 3 — LLM Gateway + Provider-Honesty — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-04-30
 **Sprints closed:** 3 (LLM gateway, cloud-policy enforcer, provider-honesty ledger, two operator-facing portal endpoints, cloud aliases + denial-path exerciseability).

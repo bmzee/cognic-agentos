@@ -1,4 +1,7 @@
 # How to write a Cognic AgentOS plugin pack
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 This doc tells you how to build a plugin pack that AgentOS will register
 at startup. It is the pack-author counterpart to ADR-002 (plugin
