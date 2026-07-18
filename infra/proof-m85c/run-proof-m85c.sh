@@ -1969,7 +1969,7 @@ print(value)
   [ "$rc" -eq 0 ] && [ -n "$cid" ] \
     || bar_fail "BAR H governed rotation query received no canonical conversation id"
 
-  turn="$(conv_turn "$role" "$cid" "Use the customer-data schema and run_readonly_query to count active rows in RETAIL_ANALYTICS.V_CUSTOMER_PROFILE. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
+  turn="$(conv_turn "$role" "$cid" "Call run_readonly_query exactly once with scope_id=retail_analytics, max_rows=1, and sql exactly: SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE WHERE STATUS = 'ACTIVE'. Do not use any placeholder or any other scope_id. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
   load_http_code
   [ "$HTTP_CODE" = "200" ] \
     || bar_fail "BAR H governed rotation query did not complete on the conversation wire (HTTP $HTTP_CODE)"
@@ -1988,7 +1988,10 @@ assert isinstance(run_id, str) and run_id, "run_id_missing"
 assert isinstance(answer, str), "answer_missing"
 refs = re.findall(r"(?m)^[ \t]*CREDENTIAL_ROTATION_REF=([!-~]{1,64})[ \t]*$", answer)
 assert len(refs) == 1, "rotation_ref_marker_not_exactly_once"
-parsed_ref = datetime.fromisoformat(refs[0])
+try:
+    parsed_ref = datetime.fromisoformat(refs[0])
+except (OverflowError, TypeError, ValueError):
+    raise AssertionError("rotation_ref_not_iso8601") from None
 assert parsed_ref.tzinfo is not None, "rotation_ref_not_timezone_aware"
 print(f"{run_id}\t{refs[0]}")
 ')"
@@ -5823,7 +5826,7 @@ H_QUERY1="$(governed_rotation_query amir)"
 IFS=$'\t' read -r H_RUN1 H_WIRE_REF1 <<<"$H_QUERY1"
 [ -n "$H_RUN1" ] && [ -n "$H_WIRE_REF1" ] \
   || bar_fail "BAR H.1 governed query returned no run/reference pair"
-H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
+H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'scope_id'='retail_analytics' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
 [ -n "$H_CHAIN_REF1" ] \
   || bar_fail "BAR H.1 the governed run carried no credential rotation reference in chain evidence"
 [ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ] \
@@ -5903,7 +5906,7 @@ H_QUERY2="$(governed_rotation_query amir)"
 IFS=$'\t' read -r H_RUN2 H_WIRE_REF2 <<<"$H_QUERY2"
 [ -n "$H_RUN2" ] && [ -n "$H_WIRE_REF2" ] \
   || bar_fail "BAR H.3 post-rotation query returned no run/reference pair"
-H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
+H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'scope_id'='retail_analytics' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
 [ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ] \
   || bar_fail "BAR H.3 post-rotation wire and chain references differ"
 [ "$H_WIRE_REF2" != "$H_WIRE_REF1" ] \

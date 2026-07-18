@@ -5079,9 +5079,12 @@ def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
     helper = _extract_shell_function("governed_rotation_query")
     assert "conv_create" in helper
     assert "conv_turn" in helper
+    assert "scope_id=retail_analytics" in helper
+    assert "Do not use any placeholder or any other scope_id" in helper
     assert "CREDENTIAL_ROTATION_REF=" in helper
     assert "payload->>'credential_rotation_ref'" in bar
     assert bar.count("payload->>'credential_rotation_ref' IS NOT NULL") == 2
+    assert bar.count("payload->>'scope_id'='retail_analytics'") == 2
     assert "payload ? 'credential_rotation_ref'" not in bar
     assert "event_type='agent.run.dispatch'" in bar
     assert "payload->>'capability_ref'='$PACK_ID/run_readonly_query'" in bar
@@ -5089,6 +5092,35 @@ def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
     assert '[ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ]' in bar
     assert '[ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ]' in bar
     assert '[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ]' in bar
+
+
+def test_d3_bar_h_malformed_model_rotation_ref_is_refused_value_free() -> None:
+    helper = _extract_shell_function("governed_rotation_query")
+    start_marker = "  parsed=\"$(printf '%s' \"$turn\" | python3 -c '\n"
+    end_marker = "\n')\""
+    assert helper.count(start_marker) == 1
+    start = helper.index(start_marker) + len(start_marker)
+    assert helper.count(end_marker, start) == 1
+    parser = helper[start : helper.index(end_marker, start)]
+
+    hostile_ref = "MODEL_AUTHORED_SENTINEL_DO_NOT_ECHO"
+    result = subprocess.run(
+        ["python3", "-c", parser],
+        input=json.dumps(
+            {
+                "terminal_state": "completed",
+                "refusal_reason": None,
+                "agent_run_id": "agent-run-test",
+                "answer": f"CREDENTIAL_ROTATION_REF={hostile_ref}",
+            }
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "rotation_ref_not_iso8601" in result.stderr
+    assert hostile_ref not in result.stdout + result.stderr
 
 
 def test_d3_bar_h_recomputes_and_exactly_matches_the_audit_subject_reference() -> None:
