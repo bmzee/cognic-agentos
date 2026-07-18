@@ -7,6 +7,14 @@ CLUSTER="${KIND_CLUSTER:-cognic-z1a-smoke}"
 NS="cognic-smoke"
 IMAGE="${COGNIC_IMAGE:-cognic-agentos:smoke}"
 CHART="infra/charts/agentos"
+BACKEND_IMAGES=(
+  "postgres:16-alpine"
+  "qdrant/qdrant:v1.17.1"
+  "hashicorp/vault:1.18"
+  "ollama/ollama:0.5.4"
+  "langfuse/langfuse:2"
+  "ghcr.io/berriai/litellm:main-stable"
+)
 
 cleanup() { kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -15,6 +23,12 @@ echo "==> build + load the default-adapters image"
 docker build -f infra/agentos/Dockerfile --target default-adapters -t "$IMAGE" .
 kind create cluster --name "$CLUSTER"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
+
+echo "==> preload the exact backend image inventory into kind"
+for backend_image in "${BACKEND_IMAGES[@]}"; do
+  docker image inspect "$backend_image" >/dev/null 2>&1 || docker pull "$backend_image"
+  kind load docker-image "$backend_image" --name "$CLUSTER"
+done
 
 echo "==> bring up the six real backends"
 kubectl create namespace "$NS"

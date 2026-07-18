@@ -16,4 +16,6 @@ secrets:
   databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
   vaultToken: "smoke-root-token"
 podSecurityContext:
-  fsGroup: 10001                    # vanilla kind has no SCC to assign fsGroup; the image GID makes emptyDirs writable
+  runAsUser: 10001                  # kind cannot prove named image USER "cognic" satisfies runAsNonRoot
+  runAsGroup: 10001
+  fsGroup: 10001                    # vanilla kind has no SCC; the image GID makes emptyDirs writable

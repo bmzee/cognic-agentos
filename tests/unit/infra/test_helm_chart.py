@@ -7,6 +7,7 @@ snapshot. Drift fails the gate with the exact regeneration command.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,6 +18,11 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CHART_DIR = _REPO_ROOT / "infra" / "charts" / "agentos"
 _CI = _CHART_DIR / "ci"
+_CHART_README = _CHART_DIR / "README.md"
+_VALUES = _CHART_DIR / "values.yaml"
+_SMOKE_BACKENDS = _CI / "smoke" / "backends.yaml"
+_SMOKE_RUNNER = _CI / "smoke" / "run-smoke.sh"
+_SMOKE_VALUES = _CI / "smoke-values.yaml"
 _SNAPSHOT_VALUES = _CI / "snapshot-values.yaml"
 _HELM_DIR = Path(__file__).resolve().parent / "helm"
 _SNAPSHOT = _HELM_DIR / "agentos_rendered.yaml"
@@ -85,10 +91,12 @@ def _helm_matches_snapshot_version() -> bool:
     return out.startswith(_SNAPSHOT_HELM_VERSION)
 
 
-def _render(values_files: list[Path]) -> str:
+def _render(values_files: list[Path], *, set_values: tuple[str, ...] = ()) -> str:
     cmd = ["helm", "template", "rel", str(_CHART_DIR), "--namespace", "cognic"]
     for vf in values_files:
         cmd += ["-f", str(vf)]
+    for value in set_values:
+        cmd += ["--set", value]
     raw = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
     # `helm template` ends its combined output with a trailing blank line; normalize
     # to exactly one final newline so the committed snapshot is git-clean.
@@ -126,12 +134,8 @@ def test_chart_lints_clean() -> None:
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")
-def test_migration_job_inherits_configmap_env() -> None:
-    """Gap 6 (Proof 1b-1): the migration Job must ``envFrom`` the chart ConfigMap so deployed
-    migrations see the same non-secret ``COGNIC_*`` config as the Deployment. Otherwise prod-only
-    settings fall back to dev defaults and the strict-profile guard refuses ``get_settings()``
-    before ``alembic upgrade head`` runs. Version-independent (envFrom shape is stable), so this
-    runs on any helm — unlike the v4.2.2-pinned byte-snapshot gate above."""
+def test_migration_job_inherits_matching_configmap_env() -> None:
+    """Gap 6: migration and Deployment ConfigMaps must carry identical data."""
     rendered = _render([_SNAPSHOT_VALUES])
     docs = [d for d in yaml.safe_load_all(rendered) if d]
     jobs = [
@@ -143,7 +147,145 @@ def test_migration_job_inherits_configmap_env() -> None:
     container = jobs[0]["spec"]["template"]["spec"]["containers"][0]
     env_from = container.get("envFrom", [])
     names = [e.get("configMapRef", {}).get("name") for e in env_from]
-    # release "rel" + chart "agentos" → fullname "rel-agentos" → ConfigMap "rel-agentos-config".
-    assert "rel-agentos-config" in names, (
-        f"migration Job must envFrom the chart ConfigMap; got envFrom={env_from!r}"
+    assert names == ["rel-agentos-migrate-config"]
+
+    config_maps = {doc["metadata"]["name"]: doc for doc in docs if doc.get("kind") == "ConfigMap"}
+    assert (
+        config_maps["rel-agentos-migrate-config"]["data"]
+        == config_maps["rel-agentos-config"]["data"]
     )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")
+def test_create_mode_bootstrap_hooks_precede_migration_job() -> None:
+    rendered = _render([_SNAPSHOT_VALUES])
+    docs = [doc for doc in yaml.safe_load_all(rendered) if doc]
+    secrets = [
+        doc
+        for doc in docs
+        if doc.get("kind") == "Secret" and doc["metadata"]["name"] == "rel-agentos-secrets"
+    ]
+    jobs = [
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"] == "rel-agentos-migrate"
+    ]
+    assert len(secrets) == 1
+    assert len(jobs) == 1
+
+    secret_annotations = secrets[0]["metadata"].get("annotations", {})
+    job_annotations = jobs[0]["metadata"]["annotations"]
+    assert secret_annotations["helm.sh/hook"] == "pre-install,pre-upgrade"
+    assert secret_annotations["helm.sh/hook-delete-policy"] == "before-hook-creation"
+    assert "hook-succeeded" not in secret_annotations["helm.sh/hook-delete-policy"]
+    assert int(secret_annotations["helm.sh/hook-weight"]) < int(
+        job_annotations["helm.sh/hook-weight"]
+    )
+
+    bootstrap = [
+        doc
+        for doc in docs
+        if (doc.get("kind"), doc["metadata"]["name"])
+        in {
+            ("ServiceAccount", "rel-agentos-migrate"),
+            ("ConfigMap", "rel-agentos-migrate-config"),
+        }
+    ]
+    assert len(bootstrap) == 2
+    for resource in bootstrap:
+        annotations = resource["metadata"]["annotations"]
+        assert annotations["helm.sh/hook"] == "pre-install,pre-upgrade"
+        assert annotations["helm.sh/hook-delete-policy"] == ("before-hook-creation,hook-succeeded")
+        assert int(annotations["helm.sh/hook-weight"]) < int(job_annotations["helm.sh/hook-weight"])
+
+    pod_spec = jobs[0]["spec"]["template"]["spec"]
+    assert pod_spec["serviceAccountName"] == "rel-agentos-migrate"
+    assert pod_spec["containers"][0]["envFrom"] == [
+        {"configMapRef": {"name": "rel-agentos-migrate-config"}}
+    ]
+
+    normal_resources = [
+        doc
+        for doc in docs
+        if (doc.get("kind"), doc["metadata"]["name"])
+        in {
+            ("ServiceAccount", "rel-agentos"),
+            ("ConfigMap", "rel-agentos-config"),
+        }
+    ]
+    assert len(normal_resources) == 2
+    assert all(
+        "helm.sh/hook" not in resource["metadata"].get("annotations", {})
+        for resource in normal_resources
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")
+def test_existing_secret_mode_creates_no_chart_secret() -> None:
+    rendered = _render(
+        [_SNAPSHOT_VALUES],
+        set_values=("secrets.create=false", "secrets.existingSecret=operator-bootstrap"),
+    )
+    docs = [doc for doc in yaml.safe_load_all(rendered) if doc]
+    assert all(doc.get("kind") != "Secret" for doc in docs)
+
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    assert len(jobs) == 1
+    pod_spec = jobs[0]["spec"]["template"]["spec"]
+    assert pod_spec["serviceAccountName"] == "rel-agentos"
+    assert pod_spec["containers"][0]["envFrom"] == [
+        {"configMapRef": {"name": "rel-agentos-config"}}
+    ]
+    env = pod_spec["containers"][0]["env"]
+    assert env[0]["valueFrom"]["secretKeyRef"]["name"] == "operator-bootstrap"
+    assert not {(doc.get("kind"), doc["metadata"]["name"]) for doc in docs}.intersection(
+        {
+            ("ServiceAccount", "rel-agentos-migrate"),
+            ("ConfigMap", "rel-agentos-migrate-config"),
+        }
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")
+def test_eso_mode_is_unhooked_and_documents_post_gate_migrations() -> None:
+    rendered = _render(
+        [_SNAPSHOT_VALUES, _CI / "snapshot-values-externalsecret.yaml"],
+        set_values=("migrations.enabled=false",),
+    )
+    docs = [doc for doc in yaml.safe_load_all(rendered) if doc]
+    external_secrets = [doc for doc in docs if doc.get("kind") == "ExternalSecret"]
+    assert len(external_secrets) == 1
+    assert "helm.sh/hook" not in external_secrets[0]["metadata"].get("annotations", {})
+    assert all(doc.get("kind") != "Job" for doc in docs)
+
+    readme = _CHART_README.read_text(encoding="utf-8")
+    values = _VALUES.read_text(encoding="utf-8")
+    assert "migrations.enabled=false" in readme
+    assert "post-gate non-hook Job" in readme
+    assert "migrations-off" in values
+
+
+def test_smoke_preloads_the_exact_backend_image_inventory() -> None:
+    docs = [doc for doc in yaml.safe_load_all(_SMOKE_BACKENDS.read_text()) if doc]
+    expected = {
+        container["image"]
+        for doc in docs
+        if doc.get("kind") == "Deployment"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+    }
+
+    runner = _SMOKE_RUNNER.read_text()
+    block = re.search(r"^BACKEND_IMAGES=\(\n(?P<body>.*?)^\)\n", runner, re.MULTILINE | re.DOTALL)
+    assert block is not None
+    preloaded = set(re.findall(r'^\s+"([^\"]+)"\s*$', block.group("body"), re.MULTILINE))
+    assert preloaded == expected
+    assert 'kind load docker-image "$backend_image" --name "$CLUSTER"' in runner
+
+
+def test_kind_smoke_pins_the_image_numeric_non_root_identity() -> None:
+    values = yaml.safe_load(_SMOKE_VALUES.read_text())
+    assert values["podSecurityContext"] == {
+        "fsGroup": 10001,
+        "runAsGroup": 10001,
+        "runAsUser": 10001,
+    }

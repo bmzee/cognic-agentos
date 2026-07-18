@@ -15,23 +15,6 @@ metadata:
 automountServiceAccountToken: false
 
 ---
-# Source: agentos/templates/secret.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: rel-agentos-secrets
-  labels:
-    app.kubernetes.io/name: agentos
-    app.kubernetes.io/instance: rel
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: cognic-agentos
-    helm.sh/chart: agentos-0.1.0
-type: Opaque
-stringData:
-  COGNIC_DATABASE_URL: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
-  COGNIC_VAULT_TOKEN: "snapshot-token"
-
----
 # Source: agentos/templates/configmap-litellm.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -216,6 +199,76 @@ spec:
           emptyDir:
             sizeLimit: 5Gi
 ---
+# Source: agentos/templates/migration-bootstrap.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rel-agentos-migrate
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+# Source: agentos/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rel-agentos-secrets
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+type: Opaque
+stringData:
+  COGNIC_DATABASE_URL: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  COGNIC_VAULT_TOKEN: "snapshot-token"
+
+---
+# Source: agentos/templates/migration-bootstrap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rel-agentos-migrate-config
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  COGNIC_RUNTIME_PROFILE: "prod"
+  COGNIC_API_PREFIX: "/api/v1"
+  COGNIC_QDRANT_URL: "http://qdrant:6333"
+  COGNIC_VAULT_ADDR: "http://vault:8200"
+  COGNIC_EMBED_DRIVER: "ollama"
+  COGNIC_EMBEDDING_BASE_URL: "http://ollama:11434"
+  COGNIC_EMBEDDING_MODEL: "nomic-embed-text"
+  COGNIC_EMBEDDING_DIMENSIONS: "768"
+  COGNIC_LANGFUSE_HOST: "http://langfuse:3000"
+  COGNIC_LITELLM_BASE_URL: "http://litellm:4000"
+  COGNIC_SANDBOX_RUNTIME_ENABLED: "false"
+  COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE: "registry.example.com/cognic-agentos/sandbox-runtime-python@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE: "registry.example.com/cognic-agentos/sandbox-egress-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  COGNIC_CACHE_DRIVER: "none"
+
+---
 # Source: agentos/templates/migration-job.yaml
 apiVersion: batch/v1
 kind: Job
@@ -241,7 +294,7 @@ spec:
         app.kubernetes.io/instance: rel
     spec:
       restartPolicy: Never
-      serviceAccountName: rel-agentos
+      serviceAccountName: rel-agentos-migrate
       securityContext:
         runAsNonRoot: true
       containers:
@@ -268,7 +321,7 @@ spec:
           # COGNIC_* config as the Deployment (else strict-profile guards refuse get_settings()).
           envFrom:
             - configMapRef:
-                name: rel-agentos-config
+                name: rel-agentos-migrate-config
           env:
             - name: COGNIC_DATABASE_URL
               valueFrom:

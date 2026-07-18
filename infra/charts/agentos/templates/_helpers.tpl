@@ -19,6 +19,33 @@ app.kubernetes.io/name: {{ include "agentos.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "agentos.configData" -}}
+COGNIC_RUNTIME_PROFILE: {{ .Values.runtimeProfile | quote }}
+COGNIC_API_PREFIX: {{ .Values.apiPrefix | quote }}
+COGNIC_QDRANT_URL: {{ .Values.qdrant.url | quote }}
+COGNIC_VAULT_ADDR: {{ .Values.vault.addr | quote }}
+COGNIC_EMBED_DRIVER: {{ .Values.embedding.driver | quote }}
+COGNIC_EMBEDDING_BASE_URL: {{ .Values.embedding.baseUrl | quote }}
+COGNIC_EMBEDDING_MODEL: {{ .Values.embedding.model | quote }}
+COGNIC_EMBEDDING_DIMENSIONS: {{ .Values.embedding.dimensions | quote }}
+COGNIC_LANGFUSE_HOST: {{ .Values.langfuse.host | quote }}
+COGNIC_LITELLM_BASE_URL: {{ .Values.litellm.baseUrl | quote }}
+COGNIC_SANDBOX_RUNTIME_ENABLED: {{ .Values.sandbox.runtimeEnabled | quote }}
+COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE: {{ .Values.sandbox.canonicalRuntimeImage | quote }}
+COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE: {{ .Values.sandbox.canonicalEgressProxyImage | quote }}
+{{- if .Values.cache.enabled }}
+COGNIC_CACHE_DRIVER: "redis"
+COGNIC_REDIS_URL: {{ .Values.cache.url | quote }}
+{{- else }}
+COGNIC_CACHE_DRIVER: "none"
+{{- end }}
+{{- if .Values.otel.exporter.endpoint }}
+COGNIC_OTEL_EXPORTER_ENDPOINT: {{ .Values.otel.exporter.endpoint | quote }}
+COGNIC_OTEL_EXPORTER_PROTOCOL: {{ .Values.otel.exporter.protocol | quote }}
+COGNIC_OTEL_EXPORTER_INSECURE: {{ .Values.otel.exporter.insecure | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "agentos.image" -}}
 {{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
