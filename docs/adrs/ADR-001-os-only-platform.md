@@ -1,4 +1,7 @@
 # ADR-001 — Cognic AgentOS as OS-Only Platform
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **ACCEPTED** on 2026-04-26 (foundational decision for this repo).

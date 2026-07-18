@@ -1,5 +1,8 @@
 <!-- docs/VALIDATION-RESULTS.md -->
 # AgentOS — Validation Results
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Proof 1a — real-app in-process pack-governance loop.**
 

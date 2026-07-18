@@ -1,4 +1,7 @@
 # A2A Inbound Reachability (receiver-only, Wave-1) Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan sprint-by-sprint. Steps use checkbox (`- [ ]`) syntax. Each **Sprint** is one cohesive, TDD, commit-gated unit (executed by a fresh subagent, controller-reviewed, per-sprint commit token — the same cadence we used for tasks). The subagent implements + tests but does **NOT** stage/commit; the controller commits on the user's token.
 

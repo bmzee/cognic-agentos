@@ -1,4 +1,7 @@
 # MCP/A2A Startup Discovery + Trust-Registration (single-tenant `_default`) — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** LANDED 2026-06-21 (rev. 4 — signed-wheel blob + dual-`TrustGate` root reconciliation). Merged across 5 subagent-driven sprints (the setting → the on-gate resolver → the boot-builder + `mcp_admission` seam → the lifespan unification → the headline-join conformance). See the ADR-002 "MCP/A2A startup discovery + trust-registration amendment (2026-06-21)" + AS_BUILT milestone 6l. **AS-BUILT note:** `opa_engine=None` was accepted for the boot's `mcp_admission` — non-sampling MCP packs register; sampling-capable packs default-deny (the real sampling `OPAEngine` is a documented extension).
 >

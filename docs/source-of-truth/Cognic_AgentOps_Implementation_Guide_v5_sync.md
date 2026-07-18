@@ -1,4 +1,7 @@
 # Cognic — AgentOps Implementation Guide
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 ## Reference Document for Engineering Team · March 2026
 
 > ⚠️ **LEGACY CONTEXT FOR THIS REPO. BUILD_PLAN.md WINS ON CONFLICT.** This guide describes AgentOps practices in the parent `bmzee/cognic` monorepo and references in-repo agents, in-repo tools, and AI Governance Agent as a product agent. In Cognic AgentOS (this repo), agents/tools/skills are external plugin packs; AI Governance is split into deterministic platform monitor + separate LLM-driven reporting pack (see [`ARCHITECTURE.md §8`](ARCHITECTURE.md)). Sprint-level execution follows [`BUILD_PLAN.md`](../BUILD_PLAN.md).

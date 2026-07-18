@@ -1,4 +1,7 @@
 # Hand-off: Memory approval routing → Sprint 13.5 (ADR-014)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Forward-looking hand-off record. **No engine and no code ship in Sprint 11.5c** — this documents the Sprint-13.5 cutover so the runtime-approval sprint inherits the seam without re-discovering it.
 

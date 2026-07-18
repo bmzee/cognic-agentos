@@ -1,4 +1,7 @@
 # ADR-016 — Supply-Chain Controls (SLSA / in-toto / Sigstore Bundles / Vulnerability + License Policy)
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26.

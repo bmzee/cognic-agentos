@@ -1,4 +1,7 @@
 # Sprint 8B — Wave-1 KubernetesPodSandboxBackend (per `project_openshift_deployment_target` + ADR-004 amendment) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-18
 **Sprint closed:** 8B (bank-production Wave-1 sandbox backend — `KubernetesPodSandboxBackend` conforming to the Sprint-8A `SandboxBackend` Protocol; AgentOS-owned `backend_factory.get_backend()` selection seam + `Settings.sandbox_backend` Literal field + `COGNIC_SANDBOX_BACKEND` env-var override per ADR-004 §32; consumer-owned `_shared_exec.py` helper module with cross-backend behavioural drift detector; 15-arm `SandboxRefusalReason` registration-coverage matrix closing the deferred Sprint-8A T2 §T10c carry-forward; OPA v1.16.1 wired into the `lint + test` CI job so `sandbox.rego` + `elicitation.rego` regressions run on every PR; **1 CC module promoted** at T8B-d (`sandbox/backends/kubernetes_pod.py`) lifting the durable per-file critical-controls coverage gate from **70 → 71** entries with fresh-coverage verification per the `feedback_verify_promotion_meets_floor_at_promotion_time` tightening edit B).

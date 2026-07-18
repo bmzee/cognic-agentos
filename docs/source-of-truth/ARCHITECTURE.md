@@ -1,4 +1,7 @@
 # Cognic AgentOS — Canonical Architecture
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Foundational (revision 1, 2026-04-26)
 **Supersedes:** the cognic monorepo's mixed OS+agents+UI layout

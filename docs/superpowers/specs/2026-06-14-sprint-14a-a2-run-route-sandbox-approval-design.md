@@ -1,4 +1,7 @@
 # Sprint 14A-A2 — Portal run route + sandbox approval threading — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **ADR:** ADR-022 (scheduler) + ADR-004 (sandbox) + ADR-014 (approval). **Status:** design locked, ready for plan.
 **Date:** 2026-06-14. **Predecessor:** 14A-A (executor + DockerSibling backend construction, WIRED-DORMANT).

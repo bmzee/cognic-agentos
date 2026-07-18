@@ -1,4 +1,7 @@
 # Harness Injection — Closeout (2026-06-05)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Branch:** `feat/harness-injection` · **Workstream #2** of the deployable-without-code-surgery sequence (Pre-GA Configurability Audit → Wave-1 Deploy-Safety → **Harness Injection**).
 

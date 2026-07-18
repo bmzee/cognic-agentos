@@ -1,4 +1,7 @@
 # Sprint 9 — ISO 42001 control mapping — design spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-21
 **Status:** approved

@@ -1,4 +1,7 @@
 # ADR-002 amendment — boot-time registration vs MCP discovery-probe coupling (design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status: DESIGN DRAFT — for Codex review. No implementation. No decision finalized.**
 > Origin: Proof 1b-1 finding (`docs/VALIDATION-RESULTS.md`). This spec proposes the ADR-002

@@ -1,4 +1,7 @@
 # Sprint 14A-A — Managed Agent Runtime: thinnest vertical slice — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **ADR:** ADR-022 (scheduler) + ADR-004 (sandbox) + ADR-005 (sub-agent, future). **Status:** design locked, ready for plan.
 **Date:** 2026-06-13. **Predecessors:** 13.7 (scheduler constructed, dormant), 13.8 (MCP host constructed, dormant).

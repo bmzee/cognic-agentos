@@ -1,4 +1,7 @@
 # Cognic AgentOS — Project Status
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-26 · **Branch:** `main` · **Merged PRs at this snapshot:** 103
 

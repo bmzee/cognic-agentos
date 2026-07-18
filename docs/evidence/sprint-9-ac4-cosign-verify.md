@@ -1,4 +1,7 @@
 # Sprint 9 AC4 — external cosign verify-blob evidence
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 Date: 2026-05-22
 Branch: `feat/sprint-9-iso42001-control-mapping`

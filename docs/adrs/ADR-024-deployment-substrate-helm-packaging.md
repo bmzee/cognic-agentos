@@ -1,4 +1,7 @@
 # ADR-024 — Deployment Substrate / Helm Packaging
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **ACCEPTED** — DRAFT 2026-06-17 → ACCEPTED 2026-06-18. The packaging-core portion (Helm chart + always-on CI render/validation gate + the env-gated `kind` Ready-smoke) is implemented in **Sprint 14B-Z1a**, on branch `feat/sprint-14b-z1a-deployment-packaging`. Z1a is **pure additive infra-as-code**: it changes **no kernel code** (the critical-controls coverage gate stays at **131** modules; the only Python added is the rendered-YAML snapshot test). The AKS/cloud bring-up, external-secrets depth, Ingress/Route + TLS, and observability wiring are deferred to **Z1b**; see §"Out of scope (Z1b)" and the §"Sprint 14B-Z1a implementation closeout" at the foot of this ADR.

@@ -1,4 +1,7 @@
 # Sprint 6 — A2A endpoint (pinned to A2A 1.0 spec) + UI event-stream stub — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-06
 **Sprints closed:** 6 (A2A inter-agent protocol per ADR-003 — Streamable HTTP + JSON-RPC 2.0 inbound endpoint with task lifecycle state machine, A2A 1.0 wire-format types pinned to `a2a-sdk == 1.0.2`, three-pass Agent Card validator + JWS verification against per-tenant trust root, per-tenant pinned-token authorization, `A2A-Version` header negotiation matrix, task streaming wire-format adapter, artifacts + capabilities + cancellation + error taxonomy, UI event-stream typed schema + emit-hook layer per ADR-020, fixture pack admission/conformance fixtures, runtime canary for the caller-URL threat model, critical-controls coverage gate extension to 28 modules).

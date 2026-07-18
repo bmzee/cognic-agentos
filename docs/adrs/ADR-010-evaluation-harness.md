@@ -1,4 +1,7 @@
 # ADR-010 — Evaluation Harness (Bulk Testing, Simulated Scenarios, Live Case Replay, LLM-Judged Verdicts)
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26.

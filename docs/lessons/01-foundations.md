@@ -1,4 +1,7 @@
 # Cognic AgentOS — Foundational Lessons
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > Read these in order. Each is a self-contained mental model. Together they teach what AgentOS is, what it does at runtime, and how plugins extend it without touching the kernel.
 

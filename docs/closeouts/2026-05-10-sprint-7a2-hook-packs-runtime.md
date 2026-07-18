@@ -1,4 +1,7 @@
 # Sprint 7A2 — Hook packs + runtime hook engine (per ADR-008 + ADR-017) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-10
 **Sprints closed:** 7A2 (hook packs + runtime hook engine — `Hook` ABC + `HookContext` + `HookResult` + closed-enum `HookPhase` SDK surface + `agentos init-hook` scaffolder + `[hooks]` block manifest validator + orchestrator-level pack-kind constraint refusing `[a2a]` / `[mcp]` blocks on hook packs + `cli/sign.py` / `cli/verify.py` extension to `kind = "hook"` through the same ADR-016 supply-chain bundle pipeline + `[data_governance].dlp_pre_hooks` / `dlp_post_hooks` shape validator + `examples/cognic-hook-example-minimal/` reference pack with full-lifecycle CI gate + runtime `HookRegistry` admission gate + deterministic `HookDispatcher` runtime engine with 5 closed-enum failure modes + `DLPGuard` adapter wiring `dlp_pre` / `dlp_post` phases per ADR-017 line 97 + critical-controls coverage gate extended to 41 modules + 4 doc surfaces extended in lockstep + new operator runbook + ADR amendments A1-A4 + AGENTS.md "Authoring — Hook packs (Sprint 7A2)" subsection).

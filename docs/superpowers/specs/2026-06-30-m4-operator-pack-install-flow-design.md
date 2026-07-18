@@ -1,4 +1,7 @@
 # M4 — Operator-Grade Pack Install Flow — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DRAFT (brainstorming output; pending user review → implementation plan)
 **Milestone:** M4 (production-grade milestone checklist, B-track pack ecosystem)

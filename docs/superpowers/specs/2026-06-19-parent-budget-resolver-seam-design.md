@@ -1,4 +1,7 @@
 # Parent budget resolver seam — Design (ADR-005 / ADR-022)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** approved 2026-06-19; **revised 2026-06-19 (post-recon)** — see the Revision note. Slice **(a) resolver seam only** — the read primitive + composition wiring. The live sub-agent dispatch caller + the sibling/shared-pool depletion ledger are the *next* slice **(b)**.
 

@@ -1,4 +1,7 @@
 # AgentOS v1 — As-Built Capability Map
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-26 · **Baseline:** `main @ 8ebf952` (post Proof 1b-2, PR #103) · **Status:** AUTHORITATIVE "what v1 is now" map
 **Rule:** every claim below is grounded in repo evidence (source modules, ADR sections, tests, e2es). Nothing aspirational. Where a capability is named but unbuilt, its state says so plainly.

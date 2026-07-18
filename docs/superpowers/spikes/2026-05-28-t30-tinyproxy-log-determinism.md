@@ -1,4 +1,7 @@
 # T30 Spike — tinyproxy log determinism (plan Task 1)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-28
 **Question (spec §8 / plan T1):** can the egress-proxy shim derive the `ProxyAccessRecord` fields — specifically `outcome ∈ {allowed, refused}` and `refusal_reason ∈ {not_in_allow_list, non_http_connect_target}` — by **tailing tinyproxy's native log** (Path 1), or must it become an **in-path decision shim** (Path 2)?

@@ -1,4 +1,7 @@
 # ADR-008 — Authoring Platform: SDK Now, Studio Later
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26.

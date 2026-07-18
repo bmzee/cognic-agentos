@@ -1,4 +1,7 @@
 # Pre-GA Configurability / Hard-Code Audit — Findings Inventory
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Date:** 2026-06-03
 > **Status:** SWEEP COMPLETE — all 5 batches done (19 subsystem agents; 2 re-run after socket drops). Consolidated ranking + structural findings + fix-wave mapping at the foot, followed by an **ultracode Verification Addendum** (adversarial verification of every P0/P1 + exhaustive coverage of every previously-unswept directory).

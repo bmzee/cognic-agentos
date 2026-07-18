@@ -1,4 +1,7 @@
 # Kernel Review Remediation — Checklist (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Source:** `docs/reviews/2026-06-06-multiagent-code-review.md` (17-agent fan-out + Opus-skeptic verification of every high/critical).
 **Branch:** `fix/kernel-review-remediation` (from `main` @ `9be577b`).

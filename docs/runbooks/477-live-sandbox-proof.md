@@ -1,4 +1,7 @@
 # Runbook — #477 live sandbox checkpoint/suspend/wake proof
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Audience:** an operator running the env-gated sandbox conformance suite against a
 live Docker daemon **and** a live OpenShift cluster, to produce the recorded

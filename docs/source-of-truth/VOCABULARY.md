@@ -1,4 +1,7 @@
 # Cognic AgentOS — Canonical Vocabulary
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Normative annex to `ARCHITECTURE.md` (revision 1, 2026-07-09)
 **Scope:** the nouns AgentOS uses for the artefacts that install on top of it, and the rules for using them in prose, in operator surfaces, and in code.

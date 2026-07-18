@@ -1,4 +1,7 @@
 # cosign 3.x Legacy-Compat Bridge — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-22
 **Status:** Design — Fork A (legacy-compat bridge) approved with the `--tlog-upload=false` correction (2026-06-22)

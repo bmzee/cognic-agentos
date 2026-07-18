@@ -1,4 +1,7 @@
 # Sprint 11b — Sub-agent integration Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax. **Every `subagent/*` change is a stop-rule isolation boundary → halt-before-commit per `[[feedback_strict_review_off_gate]]`, `core-controls-engineer` + `/critical-module-mode`.** Each commit gated on a green full suite (the 11a rhythm).
 

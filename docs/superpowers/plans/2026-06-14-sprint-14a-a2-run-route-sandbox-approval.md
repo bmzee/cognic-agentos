@@ -1,4 +1,7 @@
 # Sprint 14A-A2 Run Route + Sandbox Approval Threading Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. (This arc is executed INLINE per the operator's standing discipline — halt-before-commit reviewer gate on every task, separate full-word commit tokens.)
 

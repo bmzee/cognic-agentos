@@ -1,4 +1,7 @@
 # M6 — Governed Agent Skill proof — design spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** DESIGN — brainstormed + decisions locked with the maintainer (2026-07-02); pending spec review, then implementation plan.
 

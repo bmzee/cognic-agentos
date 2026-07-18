@@ -1,4 +1,7 @@
 # Eval Judge Slice — Closeout (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Branch:** `feat/eval-judge-slice` · **Gateway-consumption workstream** — the first in-repo consumer of the harness-built `app.state.llm_gateway` (ADR-010 LLM-as-judge).
 

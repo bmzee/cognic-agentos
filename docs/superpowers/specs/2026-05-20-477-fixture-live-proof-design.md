@@ -1,4 +1,7 @@
 # #477 — Sandbox fixture-image path for live `checkpoint`/`suspend`/`wake` proof — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-20
 **Status:** APPROVED (brainstorm 2026-05-20; 5 design-call questions Q1-Q5 + 4 review rounds resolved — see §13; user-approved 2026-05-20; live-proof amendment recorded 2026-05-21).

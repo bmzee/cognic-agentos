@@ -1,4 +1,7 @@
 # Sub-Agent Child Approval-Retry Semantics — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status:** LANDED (2026-06-20) — implemented on `feat/subagent-child-approval-retry` (T1-T6). The operator e2e surfaced + fixed a real `spawn.py` `request → ChildRunContext` threading gap (the unit tests structurally missed it). CC unchanged (no new gate module), no migration.
 > **Date:** 2026-06-20

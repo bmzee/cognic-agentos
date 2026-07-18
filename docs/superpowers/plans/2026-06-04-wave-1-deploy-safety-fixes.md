@@ -1,4 +1,7 @@
 # Wave-1 Deploy-Safety Fixes — Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Every task is critical-controls** (core/config.py validators, secret resolution, sandbox backend, portal gate) → run under `core-controls-engineer` + `/critical-module-mode` + **halt-before-commit**.
 

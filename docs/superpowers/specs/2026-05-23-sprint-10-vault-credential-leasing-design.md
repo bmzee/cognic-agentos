@@ -1,4 +1,7 @@
 # Sprint 10 — Vault credential leasing: design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** brainstorm output (2026-05-23). Authored on `main@985264f` after PR #35 (9.5a) + PR #36 (9.5b) + PR #37 (7B.4 latency hardening) all merged. Awaiting user review before plan derivation.
 

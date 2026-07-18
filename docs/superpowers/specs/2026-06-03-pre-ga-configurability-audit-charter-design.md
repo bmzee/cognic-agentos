@@ -1,4 +1,7 @@
 # Pre-GA Configurability / Hard-Code Audit — Charter
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Date:** 2026-06-03
 > **Status:** Charter (methodology spec) — pending review; **no execution yet**

@@ -1,4 +1,7 @@
 # Cognic AgentOS pack manifest specification
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 Stable specification for `cognic-pack-manifest.toml` — the canonical
 machine-readable manifest every plugin pack ships at its root.

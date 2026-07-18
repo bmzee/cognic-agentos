@@ -1,4 +1,7 @@
 # Operator runbook — checkpoint-retention reaper
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## What the reaper does
 

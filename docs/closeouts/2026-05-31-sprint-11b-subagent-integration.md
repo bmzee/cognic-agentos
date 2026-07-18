@@ -1,4 +1,7 @@
 # Sprint 11b — Sub-agent Integration — Pre-Merge Closeout Report
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-31
 **Branch:** `feat/sprint-11b-subagent-integration`

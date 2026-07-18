@@ -1,4 +1,7 @@
 # ADR-009 — Pluggable Infrastructure Adapters
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for implementation** on 2026-04-26. Foundational for Sprint 1.

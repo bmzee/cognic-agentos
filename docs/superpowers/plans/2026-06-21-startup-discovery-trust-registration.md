@@ -1,4 +1,7 @@
 # MCP/A2A Startup Discovery + Trust-Registration (single-tenant `_default`) Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Each **Sprint** is one cohesive, TDD, commit-gated unit (fresh subagent, controller two-stage review, per-sprint commit token). The subagent implements + tests but does **NOT** stage/commit; the controller commits on the user's token. **The resolver (Sprint 2) is a trust-input primitive: spec/contract review THEN security/negative-path review before commit. The user inspects diffs + runs fresh focused gates before each token.**
 

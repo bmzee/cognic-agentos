@@ -1,4 +1,7 @@
 # ADR-027 — Governed Agent Loop
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED** on 2026-07-05 (maintainer-reviewed design; Parts 1+2 approved with corrections folded in). It lands as milestone **M8 — "First deployed bank LLM-agent loop using tools and skills"** (`docs/PRODUCTION_GRADE_MILESTONE_CHECKLIST.md`), on the substrate proven by M5 (hooks on `MCPHost.call_tool`), M6 (governed executable skills + broker), and M7 (hosted `SKILL.md` instruction layer) per ADR-025. Source design spec: `docs/superpowers/specs/2026-07-04-m8-governed-agent-loop-design.md`; implementation plan: `docs/superpowers/plans/2026-07-05-m8-governed-agent-loop.md`; implementation on branch `feat/m8-governed-agent-loop`. (ADR-026 is taken by the M4 operator pack-install runtime-config decision.)

@@ -1,4 +1,7 @@
 # MCP Conformance Matrix
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Authoritative reference for which MCP features Cognic AgentOS supports, restricts, or defers per wave.
 

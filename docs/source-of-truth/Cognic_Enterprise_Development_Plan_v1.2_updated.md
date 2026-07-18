@@ -1,4 +1,7 @@
 # Cognic — Enterprise Development Plan
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 ## Brick-by-Brick Build Sequence · v1.2 · April 2026
 
 > ⚠️ **LEGACY CONTEXT FOR THIS REPO. BUILD_PLAN.md WINS ON CONFLICT.** This is the parent `bmzee/cognic` monorepo's brick sequence — useful for product/business context. Sprint-level execution in this repo follows [`docs/BUILD_PLAN.md`](../BUILD_PLAN.md). Where this doc references `src/cognic/`, in-repo agents/tools/skills, AI Governance Agent as a product agent, mock data in runtime paths, or bundled portal UI, the translations in [`ARCHITECTURE.md §8`](ARCHITECTURE.md) and the [`PROJECT_PLAN.md §2`](../PROJECT_PLAN.md) translation rule apply.

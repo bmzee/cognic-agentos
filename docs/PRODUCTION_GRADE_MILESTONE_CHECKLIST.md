@@ -1,4 +1,7 @@
 # AgentOS Production-Grade Milestone Checklist
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-27  
 **Purpose:** keep AgentOS deployable at every milestone, and make "complete" mean production-grade deployment on AKS with the full v1 feature scope proven.

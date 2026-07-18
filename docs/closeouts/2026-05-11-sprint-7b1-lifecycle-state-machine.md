@@ -1,4 +1,7 @@
 # Sprint 7B.1 — Bank pack lifecycle state machine + storage + harness 4-kind expansion (per ADR-012 + ADR-006 + ADR-009) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-11
 **Sprints closed:** 7B.1 (pure-functional lifecycle state machine at `packs/lifecycle.py` with 11-state taxonomy + 10 transitions + closed-enum 13-value `LifecycleRefusalReason` + canonical ISO 42001 control mapping helper `iso_controls_for(transition)` + Postgres+Oracle-portable record store at `packs/storage.py` with single-transaction atomic chain-insert + state-cache UPDATE + chain-head UPDATE via `DecisionHistoryStore.append_with_precondition` + Alembic migration `20260510_0003_packs_lifecycle.py` with dialect-portable SQLAlchemy types + 4 PG/Oracle integration canaries + `pack.lifecycle.<target_state>` audit-chain namespace + `cli/test_harness.py` 4-kind vocabulary expansion via public SDK seams + 3-way drift detector + critical-controls floor 41 → 43 with `packs/lifecycle.py` + `packs/storage.py` promoted + AGENTS.md "Authoring — Bank pack lifecycle (Sprint 7B.1)" subsection).

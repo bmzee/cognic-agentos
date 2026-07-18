@@ -1,4 +1,7 @@
 # M5 — Real Hook Pack Proof — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-07-01
 **Milestone:** M5 (production-grade milestone checklist, `docs/PRODUCTION_GRADE_MILESTONE_CHECKLIST.md`)

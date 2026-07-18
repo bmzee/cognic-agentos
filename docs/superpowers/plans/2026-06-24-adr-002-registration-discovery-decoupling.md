@@ -1,4 +1,7 @@
 # Implementation plan (DRAFT) — registration / MCP discovery-probe decoupling
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status: PLAN DRAFT — for Codex review. Do NOT execute.** Depends on the design decision in
 > `docs/superpowers/specs/2026-06-24-adr-002-registration-discovery-decoupling-design.md` being

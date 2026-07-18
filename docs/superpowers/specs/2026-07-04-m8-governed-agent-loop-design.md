@@ -1,4 +1,7 @@
 # M8 — Governed Agent Loop: the bank data-analyst agent (design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 - **Date:** 2026-07-04
 - **Status:** APPROVED (maintainer-reviewed design; Parts 1+2 approved with corrections, all folded in)

@@ -1,4 +1,7 @@
 # Sprint 13a — Live Replay — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-08
 **ADR:** ADR-010 (Evaluation harness) — ships as part of the ADR-010 line (Sprint 13a; the ADR-010 Sprint-12 amendment already records replay as deferred-to-Sprint-13).

@@ -1,4 +1,7 @@
 # ADR-026 — Operator-Grade Pack Install: Lifecycle-Governed Runtime Configuration (Desired/Derived State)
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 ## Status
 **APPROVED for M4 implementation** on 2026-06-30. Targets milestone **M4** (production-grade milestone checklist, B-track pack ecosystem). Full design: `docs/superpowers/specs/2026-06-30-m4-operator-pack-install-flow-design.md`. Amends **ADR-012** (lifecycle extension — see the "M4 amendment" section there).

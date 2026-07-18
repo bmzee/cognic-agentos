@@ -1,4 +1,7 @@
 # MCP STDIO Threat Model
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Authoritative reference for why STDIO is a restricted MCP transport in Cognic AgentOS, what the four gates from [ADR-002 §"MCP STDIO threat model"](adrs/ADR-002-mcp-plugin-protocol.md) mean operationally, and what Sprint 5 enforces vs. what it deliberately does NOT enforce.
 

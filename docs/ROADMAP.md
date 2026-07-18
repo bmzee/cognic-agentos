@@ -1,4 +1,7 @@
 # Cognic AgentOS — Roadmap (retired pointer)
+<!-- STATUS: SUPERSEDED-BY: AS_BUILT_CAPABILITY_MAP.md -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Retired 2026-06-12** at the Build Plan Reconciliation. This file's sprint checklist froze at "Pre-code (2026-04-26)" while execution moved into `docs/BUILD_PLAN.md`'s in-place status blocks; maintaining two roadmaps guaranteed divergence, so the checklist is retired rather than refreshed.
 

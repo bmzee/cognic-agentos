@@ -1,4 +1,7 @@
 # Sprint 4 — Plugin Registry + Trust Gate + Supply-Chain Attestations + Policy-Engine Seed — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-01
 **Sprints closed:** 4 (plugin discovery, cosign trust gate, full Sprint-4 attestation pipeline per ADR-016, OPA Rego policy-engine seed per ADR-015, default policy bundles, ObjectStoreAdapter, registry integration, system/plugins endpoint, fixture pack, Dockerfile binary pinning, pack-author docs, critical-controls gate extension).

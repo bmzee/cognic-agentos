@@ -1,4 +1,7 @@
 # PR-2b — MCP per-(tenant,pack) `server_url` override + per-tenant internal-host allow-list — Threat Model & Design DRAFT
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status: DRAFT for review.** Deliverable is this threat model + the open decisions at the end. **No implementation** until Codex reviews and approves the threat model. Follow-up to PR-1 (trust-register-then-defer, #99 @ e9c6446) and PR-2a (five-leg OAuth/discovery SSRF hardening, #100 @ 78eb477).
 >

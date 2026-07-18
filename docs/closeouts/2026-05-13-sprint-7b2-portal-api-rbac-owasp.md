@@ -1,4 +1,7 @@
 # Sprint 7B.2 — Portal API + RBAC + OWASP conformance integration (per ADR-012 + ADR-014 + ADR-008) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-13
 **Sprints closed:** 7B.2 (Portal RBAC primitives at `portal/rbac/*.py` with 6 closed-enum vocabularies + 4 FastAPI dependency factories + Postgres-backed lifecycle handlers at `portal/api/packs/*.py` covering author / review / operator / inspection surfaces × 18 endpoints + OWASP Agentic Top 10 conformance matrix at `packs/conformance/owasp_agentic.py` with applicability gate + yellow-precedence + chain-payload serialization adapter at `packs/conformance/runner.py` + non-gating evidence auto-run on submit transition + chain-row `payload["conformance"]` + dual-surface emission on reject (`payload["evidence_attachments"]` + structured log) + locked manifest-digest TOCTOU close + `agentos conformance` + `agentos test-harness` OWASP integration CLI extensions + critical-controls floor 43 → 55 with 8 modules promoted at T12 plus 4 incrementally promoted at T6 / T8 / T9 + AGENTS.md "Portal RBAC (Sprint 7B.2)" + "Authoring — Portal pack API (Sprint 7B.2)" + "Pack conformance evidence (Sprint 7B.2)" + "Conformance CLI surfaces (Sprint 7B.2, off-floor)" subsections + R45 CC-ADJ risk-tier vocabulary alignment with ADR-014's canonical 8-value `RiskTier` set + drift detector enforcing `cli → packs` architectural arrow).

@@ -1,4 +1,7 @@
 # Phase 1 Foundation — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-04-28
 **Sprints closed:** 1A (bootstrap) + 1B (observability) + 1C (adapter protocols + reference adapters) + 1D (enterprise adapters)

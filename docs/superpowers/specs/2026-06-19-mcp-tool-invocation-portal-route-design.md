@@ -1,4 +1,7 @@
 # MCP tool-invocation portal route — live-exercise `call_tool` + the approval seam — Design
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-19
 **Status:** DRAFT — design approved in brainstorming (2026-06-19); awaiting spec review before planning.

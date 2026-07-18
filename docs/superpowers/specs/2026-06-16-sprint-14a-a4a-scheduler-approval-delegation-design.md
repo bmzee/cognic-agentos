@@ -1,4 +1,7 @@
 # Sprint 14A-A4a — Scheduler `approval-delegated-to-sandbox` Affordance (Design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Design (brainstorm-approved 2026-06-16; pending written spec review)
 **ADRs:** ADR-022 (runtime scheduler) + ADR-014 (runtime tool approval) — both amended by this sprint

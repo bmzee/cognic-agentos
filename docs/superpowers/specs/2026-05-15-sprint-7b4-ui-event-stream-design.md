@@ -1,4 +1,7 @@
 # Sprint 7B.4 — UI Event-Stream Endpoints + RBAC Denial Chain Events — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** APPROVED (brainstorming locked across Sections 1-6; awaiting user review of this written spec before transitioning to `writing-plans`).
 **Date:** 2026-05-15.

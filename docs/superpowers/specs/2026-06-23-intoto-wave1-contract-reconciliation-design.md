@@ -1,4 +1,7 @@
 # in-toto Wave-1 Layout Contract Reconciliation — Design Spec
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-06-23
 **Status:** Design — approved (option (b), 2026-06-23)

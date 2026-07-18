@@ -1,4 +1,7 @@
 # Sprint 8A — Sandbox Primitive (Wave-1 DockerSibling backend per ADR-004) — Closeout Note
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-05-17
 **Sprint closed:** 8A (substantive sandbox primitive — `SandboxBackend` + `SandboxSession` Protocols + `SandboxPolicy` 2-stage admission + 15-value `SandboxRefusalReason` + 6-value `SandboxPolicyViolationReason` + 8-value `SandboxLifecycleEvent` audit taxonomy + canonical image catalog with real cosign + real syft SBOM + dual-container egress proxy + `SandboxWarmPool` ≤500ms-P95 substrate + `DockerSiblingSandboxBackend` Wave-1 backend + `sandbox.rego` Wave-1 5-rule admission bundle + 7 CC modules promoted to the durable coverage gate + 3 ADR amendments).

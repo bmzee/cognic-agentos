@@ -1,4 +1,7 @@
 # PR 2a — MCP OAuth/discovery-leg SSRF hardening (threat model + design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **Status: DESIGN — for review before implementation.** Sub-project **2a** of PR 2 (the ADR-002
 > trust-register-then-defer follow-up). PR 2a is **pure security hardening** and lands **first**;

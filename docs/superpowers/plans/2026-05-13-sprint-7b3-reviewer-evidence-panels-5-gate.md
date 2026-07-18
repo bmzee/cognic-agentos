@@ -1,4 +1,7 @@
 # Sprint 7B.3 — Reviewer Evidence Panels + 5-Gate Approval Composer + Reviewer-Acknowledgement Enforcement + Override Path Implementation Plan
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Every CRITICAL CONTROLS task uses **halt-before-commit** per `feedback_strict_review_off_gate.md`.
 

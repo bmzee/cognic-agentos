@@ -1,4 +1,7 @@
 # Sprint 14A-A3b — Run→Session Resolver + Resume Route (Design)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** LOCKED source of truth. The implementation plan mirrors this exactly.
 **Date:** 2026-06-15

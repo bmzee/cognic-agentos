@@ -1,4 +1,7 @@
 # Per-Tenant Configuration Overlay — Design (2026-06-06)
+<!-- STATUS: HISTORICAL -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Status:** Design (approved in brainstorming; pending spec review → implementation plan)
 **Workstream:** Wave-2 per-tenant config overlay — closes the Pre-GA Configurability Audit §9 gate.

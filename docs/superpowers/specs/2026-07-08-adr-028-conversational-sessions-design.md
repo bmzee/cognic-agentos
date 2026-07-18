@@ -1,4 +1,7 @@
 # ADR-028 — Conversational Sessions (kernel-owned conversation primitive) — Design Spec
+<!-- STATUS: CURRENT -->
+<!-- OWNER: cognic-agentos maintainers -->
+<!-- LAST-VERIFIED: 2026-07-18 -->
 
 **Date:** 2026-07-08
 **Status:** DRAFT — design spec for maintainer review; the ADR itself is authored from this spec after ratification
