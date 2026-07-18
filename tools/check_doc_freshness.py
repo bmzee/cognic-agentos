@@ -14,6 +14,11 @@ from urllib.parse import urlsplit
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _INDEX_PATH = Path("docs/INDEX.md")
 _OWNER_LINE = "<!-- OWNER: cognic-agentos maintainers -->"
+# Fenced directories per the standing guard-path rule: tracked or not, never touched.
+_EXCLUDED_DOC_PREFIXES: tuple[Path, ...] = (
+    Path("docs/handoffs"),
+    Path("docs/reviews"),
+)
 _STATUS_RE = re.compile(r"<!-- STATUS: (CURRENT|HISTORICAL) -->")
 _SUPERSEDED_RE = re.compile(r"<!-- STATUS: SUPERSEDED-BY: ([^<>]+) -->")
 _VERIFIED_RE = re.compile(r"<!-- LAST-VERIFIED: (\d{4}-\d{2}-\d{2}) -->")
@@ -28,6 +33,11 @@ class DocHeader(NamedTuple):
     superseded_by: str | None = None
 
 
+def is_document_fenced(path: Path) -> bool:
+    """Return whether the standing guard-path rule excludes ``path``."""
+    return any(path == prefix or prefix in path.parents for prefix in _EXCLUDED_DOC_PREFIXES)
+
+
 def tracked_markdown_docs(repo_root: Path = _REPO_ROOT) -> tuple[Path, ...]:
     """Return only git-tracked Markdown under ``docs/`` plus the new index."""
     result = subprocess.run(
@@ -37,7 +47,9 @@ def tracked_markdown_docs(repo_root: Path = _REPO_ROOT) -> tuple[Path, ...]:
         text=True,
     )
     paths = {
-        Path(raw) for raw in result.stdout.split("\0") if raw and Path(raw).suffix.lower() == ".md"
+        Path(raw)
+        for raw in result.stdout.split("\0")
+        if raw and Path(raw).suffix.lower() == ".md" and not is_document_fenced(Path(raw))
     }
     if (repo_root / _INDEX_PATH).is_file():
         paths.add(_INDEX_PATH)
@@ -176,7 +188,10 @@ def check_repository(
     tracked_docs: Sequence[Path] | None = None,
 ) -> list[str]:
     """Return every freshness-policy violation, or an empty list on success."""
-    docs = tuple(tracked_docs) if tracked_docs is not None else tracked_markdown_docs(repo_root)
+    discovered = (
+        tuple(tracked_docs) if tracked_docs is not None else tracked_markdown_docs(repo_root)
+    )
+    docs = tuple(path for path in discovered if not is_document_fenced(path))
     tracked = set(docs)
     errors: list[str] = []
     headers: dict[Path, DocHeader] = {}

@@ -37,6 +37,12 @@ def stamper() -> ModuleType:
         ),
         ("docs/superpowers/specs/closed-design.md", "HISTORICAL", None),
         ("docs/ROADMAP.md", "SUPERSEDED-BY", "AS_BUILT_CAPABILITY_MAP.md"),
+        ("docs/SPRINT_WORKING_SUMMARY.md", "SUPERSEDED-BY", "./PROJECT_STATUS.md"),
+        (
+            "docs/superpowers/plans/2026-07-09-adr-028-conversational-vertical-slice.md",
+            "HISTORICAL",
+            None,
+        ),
     ],
 )
 def test_classification_rules(
@@ -76,6 +82,11 @@ def test_stamp_places_header_at_top_without_h1(stamper: ModuleType) -> None:
         "<!-- LAST-VERIFIED: 2026-07-18 -->\n"
     )
     assert stamped.endswith("\nPlain opening.\n")
+
+
+@pytest.mark.parametrize("path", ["docs/handoffs/tracked.md", "docs/reviews/report.md"])
+def test_guard_path_prefixes_are_fenced(stamper: ModuleType, path: str) -> None:
+    assert stamper.is_document_fenced(Path(path)) is True
 
 
 def test_index_is_grouped_and_lists_every_document_once(stamper: ModuleType) -> None:

@@ -101,6 +101,17 @@ def test_green_repository_passes(checker: ModuleType, tmp_path: Path) -> None:
     assert checker.check_repository(tmp_path, tracked_docs=tracked) == []
 
 
+@pytest.mark.parametrize("excluded", ["docs/handoffs/note.md", "docs/reviews/audit.md"])
+def test_fenced_document_needs_no_header_or_index_entry(
+    checker: ModuleType, tmp_path: Path, excluded: str
+) -> None:
+    tracked = (*_green_tree(tmp_path), Path(excluded))
+    _write(tmp_path / excluded, "# Deliberately outside freshness ownership\n")
+
+    assert checker.check_repository(tmp_path, tracked_docs=tracked) == []
+    assert excluded not in (tmp_path / "docs" / "INDEX.md").read_text(encoding="utf-8")
+
+
 def test_missing_header_fails(checker: ModuleType, tmp_path: Path) -> None:
     tracked = _green_tree(tmp_path)
     _write(tmp_path / "docs" / "current.md", "# Current document\n\nNo header.\n")

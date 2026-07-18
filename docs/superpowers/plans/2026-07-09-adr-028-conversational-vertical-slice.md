@@ -1,5 +1,5 @@
 # ADR-028 Conversational Sessions — Vertical Slice Implementation Plan
-<!-- STATUS: CURRENT -->
+<!-- STATUS: HISTORICAL -->
 <!-- OWNER: cognic-agentos maintainers -->
 <!-- LAST-VERIFIED: 2026-07-18 -->
 

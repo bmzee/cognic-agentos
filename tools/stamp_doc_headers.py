@@ -15,24 +15,25 @@ _INDEX_PATH = Path("docs/INDEX.md")
 _VERIFIED_DATE = "2026-07-18"
 _OWNER_LINE = "<!-- OWNER: cognic-agentos maintainers -->"
 
+# Fenced directories per the standing guard-path rule: tracked or not, never touched.
+_EXCLUDED_DOC_PREFIXES: tuple[Path, ...] = (
+    Path("docs/handoffs"),
+    Path("docs/reviews"),
+)
+
 _OPEN_SUPERPOWER_DOCS: frozenset[Path] = frozenset(
     {
-        Path("docs/superpowers/plans/2026-07-09-adr-028-conversational-vertical-slice.md"),
         Path("docs/superpowers/specs/2026-07-08-adr-028-conversational-sessions-design.md"),
         Path("docs/superpowers/specs/2026-07-14-m85d-bank-demo-design.md"),
         Path("docs/superpowers/specs/2026-07-14-skill-engineering-and-accuracy-design.md"),
     }
 )
 
-# These are conservatively CURRENT under the ruling's "when in doubt" arm.
-# The report must surface them for a maintainer's later reclassification call.
-FLAGGED_CURRENT_SUSPECTS: tuple[Path, ...] = (
-    Path("docs/SPRINT_WORKING_SUMMARY.md"),
-    Path("docs/superpowers/plans/2026-07-09-adr-028-conversational-vertical-slice.md"),
-)
+FLAGGED_CURRENT_SUSPECTS: tuple[Path, ...] = ()
 
 _SUPERSEDED_DOCS: dict[Path, str] = {
     Path("docs/ROADMAP.md"): "AS_BUILT_CAPABILITY_MAP.md",
+    Path("docs/SPRINT_WORKING_SUMMARY.md"): "./PROJECT_STATUS.md",
 }
 _HISTORICAL_DIRECTORIES: frozenset[str] = frozenset({"closeouts", "evidence", "handoffs"})
 _SUPERPOWER_HISTORY_DIRECTORIES: frozenset[str] = frozenset({"plans", "recon", "specs", "spikes"})
@@ -62,6 +63,11 @@ def classify_document(path: Path) -> Classification:
     return Classification("CURRENT")
 
 
+def is_document_fenced(path: Path) -> bool:
+    """Return whether the standing guard-path rule excludes ``path``."""
+    return any(path == prefix or prefix in path.parents for prefix in _EXCLUDED_DOC_PREFIXES)
+
+
 def _tracked_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
     result = subprocess.run(
         ["git", "-C", str(repo_root), "ls-files", "-z", "--", "docs"],
@@ -70,7 +76,9 @@ def _tracked_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
         text=True,
     )
     paths = {
-        Path(raw) for raw in result.stdout.split("\0") if raw and Path(raw).suffix.lower() == ".md"
+        Path(raw)
+        for raw in result.stdout.split("\0")
+        if raw and Path(raw).suffix.lower() == ".md" and not is_document_fenced(Path(raw))
     }
     paths.add(_INDEX_PATH)
     return tuple(sorted(paths, key=lambda item: item.as_posix()))

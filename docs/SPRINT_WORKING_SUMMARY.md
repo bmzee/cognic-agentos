@@ -1,5 +1,5 @@
 # Cognic AgentOS Sprint Working Summary
-<!-- STATUS: CURRENT -->
+<!-- STATUS: SUPERSEDED-BY: ./PROJECT_STATUS.md -->
 <!-- OWNER: cognic-agentos maintainers -->
 <!-- LAST-VERIFIED: 2026-07-18 -->
 
