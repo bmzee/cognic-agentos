@@ -355,3 +355,25 @@ The budget moves because the **kernel's responsibility changed**: RS256/JWS cryp
 
 ### Posture
 CI-config + docs only (**no kernel code change, no CC-gate implication, no migration**). Budget changes are threshold changes — an AGENTS.md human-only decision; this bump was maintainer-ratified on PR #118 (2026-07-08).
+
+## Create-mode migration hook ordering amendment (2026-07-18)
+
+The credential-free nightly Ready-smoke exposed the create-mode form of the
+three-resource ordering gap recorded above: the pre-install migration Job needs
+its ServiceAccount, non-secret ConfigMap, and bootstrap Secret before Helm creates
+normal resources. In `secrets.create=true` mode the chart-created Secret is now a
+persistent `pre-install,pre-upgrade` hook at weight `-10`, ahead of the migration
+Job at weight `-5`. Its delete policy is only `before-hook-creation`, so Helm
+recreates it before each install or upgrade and does not delete it after the hook
+succeeds. Dedicated migration-only ServiceAccount and parity ConfigMap hooks run
+at the same earlier weight and use `hook-succeeded`, while the Deployment's normal
+ServiceAccount and ConfigMap remain ordinary Helm-managed resources. The parity
+ConfigMap is rendered from the same template helper as the normal ConfigMap, so
+the Gap-6 strict-profile contract cannot drift. The `secrets.existingSecret` mode
+remains operator-precreated and its render is unchanged.
+
+ESO materialization is deliberately not converted into a Helm hook. ESO
+deployments set `migrations.enabled=false`, wait for the controller-managed
+Secret, and run a post-gate non-hook migration Job, matching the live-proven AKS
+smoke pattern. This is packaging and documentation only: no kernel code, schema
+migration, or critical-controls count changes.

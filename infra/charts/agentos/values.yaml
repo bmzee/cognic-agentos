@@ -61,9 +61,14 @@ sandbox:
 
 migrations:
   enabled: true                                  # pre-install/pre-upgrade hook Job runs `alembic upgrade head`
+  # ESO deployments use migrations-off here: set enabled=false, gate on the
+  # ESO-materialized Secret, then run a post-gate non-hook migration Job.
 
 secrets:
-  create: false                                  # true ONLY for smoke/dev — DO NOT use in production
+  # create=true renders a persistent pre-install/pre-upgrade hook Secret plus
+  # temporary migration SA/config hooks at weight -10, before the Job at -5.
+  # The temporary hooks are removed after migration; create mode is smoke/dev only.
+  create: false                                  # true ONLY for smoke/dev - DO NOT use in production
   existingSecret: ""                             # production: name of an operator/ESO-managed Secret carrying COGNIC_DATABASE_URL (+ COGNIC_VAULT_TOKEN)
   databaseUrl: ""                                # used only when create=true
   vaultToken: ""                                 # used only when create=true

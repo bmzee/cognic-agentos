@@ -5350,6 +5350,10 @@ def test_sign_bundle_refuses_malformed_public_attestation_json(
     [
         ("/home/reviewer/file", True),
         ("file:///Users/reviewer/file", True),
+        ("file://server/share/file", True),
+        ("file:/Users/reviewer/file", True),
+        ("arbitrary local files via file:// (SSRF on local filesystem)", False),
+        ("schemes file://, ftp://, data:", False),
         (r"C:\\Users\\reviewer\\file", True),
         ("attestations/sbom.cdx.json", False),
         ("https://example.com/artifact", False),
@@ -5359,6 +5363,98 @@ def test_public_attestation_host_path_classifier(value: str, expected: bool) -> 
     from cognic_agentos.cli.sign import _is_absolute_host_path
 
     assert _is_absolute_host_path(value) is expected
+
+
+def test_public_attestation_gate_allows_file_scheme_advisory_prose(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    report = tmp_path / "vuln.json"
+    report.write_text(
+        json.dumps(
+            {
+                "description": (
+                    "Arbitrary local files via file:// (SSRF on local filesystem); "
+                    "affected schemes include file://, ftp://, and data:."
+                )
+            }
+        )
+    )
+    assert _public_attestation_json_finding(report) is None
+
+
+def test_vuln_scan_allows_paths_only_in_third_party_advisory_descriptions(
+    tmp_path: Path,
+) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    advisory_path = r"\\attacker.com\share"
+    report = tmp_path / "vuln-scan.json"
+    report.write_text(
+        json.dumps(
+            {
+                "matches": [
+                    {
+                        "vulnerability": {"description": advisory_path},
+                        "relatedVulnerabilities": [
+                            {"description": advisory_path},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    assert _public_attestation_json_finding(report) is None
+
+
+def test_vuln_scan_still_refuses_identical_path_outside_advisory_descriptions(
+    tmp_path: Path,
+) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    advisory_path = r"\\attacker.com\share"
+    report = tmp_path / "vuln-scan.json"
+    report.write_text(
+        json.dumps(
+            {
+                "matches": [
+                    {
+                        "vulnerability": {
+                            "description": "public advisory prose",
+                        },
+                        "artifact": {"location": advisory_path},
+                    }
+                ]
+            }
+        )
+    )
+    finding = _public_attestation_json_finding(report)
+    assert finding is not None
+    assert finding.payload["json_location"] == "matches.0.artifact.location"
+    assert finding.payload["failure_mode"] == "public_attestation_host_path"
+
+
+def test_advisory_description_exemption_is_vuln_scan_artifact_scoped(
+    tmp_path: Path,
+) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    report = tmp_path / "sbom.cdx.json"
+    report.write_text(
+        json.dumps(
+            {
+                "matches": [
+                    {
+                        "vulnerability": {
+                            "description": r"\\attacker.com\share",
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    finding = _public_attestation_json_finding(report)
+    assert finding is not None
+    assert finding.payload["json_location"] == "matches.0.vulnerability.description"
 
 
 def test_grype_sanitizer_accepts_safe_non_object_json(tmp_path: Path) -> None:

@@ -2450,8 +2450,9 @@ def _pack_relative_public_path(pack_path: Path, target_path: Path) -> str:
 
 
 _EMBEDDED_POSIX_PATH_RE: Final[re.Pattern[str]] = re.compile(r"(?:^|[\s\"'=:,(\[])/(?!/)[^\s\"']+")
+# Bare ``file://`` tokens occur in vulnerability prose; require a path segment.
 _EMBEDDED_FILE_URI_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:^|[\s\"'=,(\[])file:/",
+    r"(?:^|[\s\"'=,(\[])file:/{1,3}+(?=[^/\s\"'(),;:\]\}?#])",
     re.IGNORECASE,
 )
 _EMBEDDED_WINDOWS_PATH_RE: Final[re.Pattern[str]] = re.compile(
@@ -2476,23 +2477,55 @@ def _is_absolute_host_path(value: str) -> bool:
     )
 
 
+def _is_grype_advisory_description_location(location: tuple[str, ...]) -> bool:
+    if len(location) == 4:
+        root, match_index, owner, field = location
+        return (
+            root == "matches"
+            and match_index.isdecimal()
+            and owner == "vulnerability"
+            and field == "description"
+        )
+    if len(location) == 5:
+        root, match_index, owner, related_index, field = location
+        return (
+            root == "matches"
+            and match_index.isdecimal()
+            and owner == "relatedVulnerabilities"
+            and related_index.isdecimal()
+            and field == "description"
+        )
+    return False
+
+
 def _find_absolute_host_path(
     value: object,
     *,
     location: tuple[str, ...] = (),
+    exempt_grype_advisory_descriptions: bool = False,
 ) -> tuple[str, ...] | None:
     if isinstance(value, str):
+        if exempt_grype_advisory_descriptions and _is_grype_advisory_description_location(location):
+            return None
         return location if _is_absolute_host_path(value) else None
     if isinstance(value, dict):
         for key, nested in value.items():
             if isinstance(key, str) and _is_absolute_host_path(key):
                 return (*location, "<object-key>")
-            found = _find_absolute_host_path(nested, location=(*location, str(key)))
+            found = _find_absolute_host_path(
+                nested,
+                location=(*location, str(key)),
+                exempt_grype_advisory_descriptions=exempt_grype_advisory_descriptions,
+            )
             if found is not None:
                 return found
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            found = _find_absolute_host_path(nested, location=(*location, str(index)))
+            found = _find_absolute_host_path(
+                nested,
+                location=(*location, str(index)),
+                exempt_grype_advisory_descriptions=exempt_grype_advisory_descriptions,
+            )
             if found is not None:
                 return found
     return None
@@ -2576,7 +2609,10 @@ def _public_attestation_json_finding(path: Path) -> SignFinding | None:
                 "failure_mode": "public_attestation_json_invalid",
             },
         )
-    location = _find_absolute_host_path(payload)
+    location = _find_absolute_host_path(
+        payload,
+        exempt_grype_advisory_descriptions=path.name == "vuln-scan.json",
+    )
     if location is None:
         return None
     return SignFinding(

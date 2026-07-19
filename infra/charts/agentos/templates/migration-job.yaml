@@ -18,7 +18,7 @@ spec:
         {{- include "agentos.selectorLabels" . | nindent 8 }}
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "agentos.fullname" . }}
+      serviceAccountName: {{ include "agentos.fullname" . }}{{ if .Values.secrets.create }}-migrate{{ end }}
       securityContext:
         runAsNonRoot: true
         {{- with .Values.podSecurityContext }}
@@ -48,7 +48,7 @@ spec:
           # COGNIC_* config as the Deployment (else strict-profile guards refuse get_settings()).
           envFrom:
             - configMapRef:
-                name: {{ include "agentos.fullname" . }}-config
+                name: {{ include "agentos.fullname" . }}{{ if .Values.secrets.create }}-migrate{{ end }}-config
           env:
             - name: COGNIC_DATABASE_URL
               valueFrom:
