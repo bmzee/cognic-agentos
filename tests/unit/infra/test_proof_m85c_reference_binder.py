@@ -617,8 +617,9 @@ def test_kernel_seed_keys_entitlements_by_placeholder_not_username() -> None:
     # The MUTABLE usernames are no longer SQL string literals anywhere.
     assert "'analyst.amir'" not in sql
     assert "'analyst.sara'" not in sql
-    # Two entitlement rows per analyst ride the placeholders.
-    assert sql.count("'__SUBJECT_ANALYST_AMIR__'") == 2
+    # M8.5-E widens Amir from the original two scopes to five; Sara remains
+    # byte-stable at two so the two-human negative keeps its original posture.
+    assert sql.count("'__SUBJECT_ANALYST_AMIR__'") == 5
     assert sql.count("'__SUBJECT_ANALYST_SARA__'") == 2
 
 

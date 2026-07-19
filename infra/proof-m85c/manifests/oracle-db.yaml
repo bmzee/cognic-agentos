@@ -1,6 +1,7 @@
 # infra/proof-m85c/manifests/oracle-db.yaml - in-cluster Oracle Free.
-# The oracle-db-seed ConfigMap is created by run-proof-m85c.sh from
-# oracle-seed/seed_schema.sql (single source of truth; no embedded copy).
+# The oracle-db-seed ConfigMap is created by run-proof-m85c.sh from the
+# digest-pinned Oracle v23.3 SQL bundle, three ordered install wrappers, and
+# oracle-seed/seed_schema.sql as the governed-view/grant source of truth.
 #
 # Image provenance (resolved 2026-07-18 from gvenzl/oracle-free:23-slim):
 # manifest-list sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
@@ -8,8 +9,8 @@
 # Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free
 #
 # gvenzl runs every *.sql in /container-entrypoint-initdb.d once on first boot
-# as an administrator in the root container. The seed switches into FREEPDB1,
-# creates the analytics schemas/views, and provisions the proxy identities.
+# as an administrator in the root container. The ordered scripts switch into
+# FREEPDB1, install HR/CO/SH, create the governed views, and provision proxies.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: oracle-db, labels: { app: oracle-db } }
