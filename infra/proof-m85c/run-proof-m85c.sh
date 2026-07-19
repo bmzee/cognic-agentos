@@ -201,6 +201,9 @@ ESO_LOCAL_REPOSITORY="cognic-proof-eso"
 ESO_LOCAL_TAG="v2.7.0-pinned"
 ESO_LOCAL_IMAGE="$ESO_LOCAL_REPOSITORY:$ESO_LOCAL_TAG"
 ORACLE_APP_PASSWORD=""
+ORACLE_SAMPLES_TMP=""
+ORACLE_SAMPLES_URL="https://github.com/oracle-samples/db-sample-schemas/archive/refs/tags/v23.3.tar.gz"
+ORACLE_SAMPLES_SHA256="94d47c97fb71227f88bfc01100b07de4622d7db592dec74f2d581f4fb9cbe509"
 
 # ---- The approval-probe pack's trust pins (Bar D drives the probe) ----------------
 # THE PIN IS A MAINTAINER COMMIT, NOT AN OPERATOR EXPORT (review 2026-07-12, F4).
@@ -2537,6 +2540,7 @@ cleanup() {
   # Browser interactions must never resolve packages mid-bar. The driver gets one
   # private runtime before cluster work; remove it with the rest of the run state.
   [ -n "${DRIVER_VENV_TMP:-}" ] && rm -rf "$DRIVER_VENV_TMP" 2>/dev/null || true
+  [ -n "${ORACLE_SAMPLES_TMP:-}" ] && rm -rf "$ORACLE_SAMPLES_TMP" 2>/dev/null || true
   unset ORACLE_APP_PASSWORD ESO_VAULT_TOKEN 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -2562,6 +2566,119 @@ try:
 finally:
     s.close()
 PY
+
+# Oracle's v23.3 sample-schema release is a public, immutable proof input. Fetch
+# it once before cluster work, verify the committed digest, then retain ONLY the
+# seven SQL sources used by HR/CO/SH. CO's populate script alone exceeds the
+# Kubernetes ConfigMap limit uncompressed, so the verified sources ride one
+# small tar.gz data key; the three ordered initdb wrappers unpack and execute
+# them without SQL*Loader. The generated wrappers create NO AUTHENTICATION
+# schema owners rather than introducing dormant sample-owner passwords.
+echo "==> [1/11] stage Oracle sample schemas v23.3 (digest-verified; SQL-only)"
+ORACLE_SAMPLES_TMP="$(mktemp -d)"
+chmod 700 "$ORACLE_SAMPLES_TMP"
+ORACLE_SAMPLES_ARCHIVE="$ORACLE_SAMPLES_TMP/db-sample-schemas-23.3.tar.gz"
+curl -fL --retry 4 --retry-all-errors --connect-timeout 10 --max-time 180 \
+  "$ORACLE_SAMPLES_URL" -o "$ORACLE_SAMPLES_ARCHIVE"
+ORACLE_SAMPLES_ACTUAL_SHA256="$(python3 - "$ORACLE_SAMPLES_ARCHIVE" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+[ "$ORACLE_SAMPLES_ACTUAL_SHA256" = "$ORACLE_SAMPLES_SHA256" ] \
+  || die "Oracle sample-schema v23.3 digest mismatch (expected $ORACLE_SAMPLES_SHA256, got $ORACLE_SAMPLES_ACTUAL_SHA256)"
+tar -xzf "$ORACLE_SAMPLES_ARCHIVE" -C "$ORACLE_SAMPLES_TMP"
+ORACLE_SAMPLES_SOURCE="$ORACLE_SAMPLES_TMP/db-sample-schemas-23.3"
+ORACLE_SAMPLE_SQL_SOURCES=(
+  human_resources/hr_create.sql
+  human_resources/hr_populate.sql
+  human_resources/hr_code.sql
+  customer_orders/co_create.sql
+  customer_orders/co_populate.sql
+  sales_history/sh_create.sql
+  sales_history/sh_populate.sql
+)
+for _sample_source in "${ORACLE_SAMPLE_SQL_SOURCES[@]}"; do
+  [ -s "$ORACLE_SAMPLES_SOURCE/$_sample_source" ] \
+    || die "verified Oracle v23.3 archive is missing $_sample_source"
+done
+ORACLE_SAMPLES_SQL_BUNDLE="$ORACLE_SAMPLES_TMP/oracle-samples-23.3-sql.tar.gz"
+tar -czf "$ORACLE_SAMPLES_SQL_BUNDLE" \
+  -C "$ORACLE_SAMPLES_SOURCE" "${ORACLE_SAMPLE_SQL_SOURCES[@]}"
+[ -s "$ORACLE_SAMPLES_SQL_BUNDLE" ] || die "Oracle sample SQL bundle is empty"
+
+cat > "$ORACLE_SAMPLES_TMP/01_oracle_samples_hr.sql" <<'SQL'
+-- Oracle db-sample-schemas v23.3: Human Resources (proof adaptation).
+SET DEFINE OFF
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = FREEPDB1;
+HOST rm -rf /tmp/cognic-oracle-samples-23.3
+HOST mkdir -p /tmp/cognic-oracle-samples-23.3
+HOST tar -xzf /container-entrypoint-initdb.d/oracle-samples-23.3-sql.tar.gz -C /tmp/cognic-oracle-samples-23.3
+DECLARE
+  v_user_exists NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_user_exists FROM all_users WHERE username = 'HR';
+  IF v_user_exists = 1 THEN EXECUTE IMMEDIATE 'DROP USER hr CASCADE'; END IF;
+END;
+/
+CREATE USER hr NO AUTHENTICATION DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
+GRANT CREATE MATERIALIZED VIEW, CREATE PROCEDURE, CREATE SEQUENCE,
+      CREATE SESSION, CREATE SYNONYM, CREATE TABLE, CREATE TRIGGER,
+      CREATE TYPE, CREATE VIEW TO hr;
+ALTER SESSION SET CURRENT_SCHEMA = HR;
+@/tmp/cognic-oracle-samples-23.3/human_resources/hr_create.sql
+@/tmp/cognic-oracle-samples-23.3/human_resources/hr_populate.sql
+@/tmp/cognic-oracle-samples-23.3/human_resources/hr_code.sql
+COMMIT;
+SQL
+
+cat > "$ORACLE_SAMPLES_TMP/02_oracle_samples_co.sql" <<'SQL'
+-- Oracle db-sample-schemas v23.3: Customer Orders (proof adaptation).
+SET DEFINE OFF
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = FREEPDB1;
+DECLARE
+  v_user_exists NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_user_exists FROM all_users WHERE username = 'CO';
+  IF v_user_exists = 1 THEN EXECUTE IMMEDIATE 'DROP USER co CASCADE'; END IF;
+END;
+/
+CREATE USER co NO AUTHENTICATION DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
+GRANT CREATE MATERIALIZED VIEW, CREATE PROCEDURE, CREATE SEQUENCE,
+      CREATE SESSION, CREATE SYNONYM, CREATE TABLE, CREATE TRIGGER,
+      CREATE TYPE, CREATE VIEW TO co;
+ALTER SESSION SET CURRENT_SCHEMA = CO;
+@/tmp/cognic-oracle-samples-23.3/customer_orders/co_create.sql
+@/tmp/cognic-oracle-samples-23.3/customer_orders/co_populate.sql
+COMMIT;
+SQL
+
+cat > "$ORACLE_SAMPLES_TMP/03_oracle_samples_sh.sql" <<'SQL'
+-- Oracle db-sample-schemas v23.3: Sales History (proof adaptation).
+SET DEFINE OFF
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = FREEPDB1;
+DECLARE
+  v_user_exists NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_user_exists FROM all_users WHERE username = 'SH';
+  IF v_user_exists = 1 THEN EXECUTE IMMEDIATE 'DROP USER sh CASCADE'; END IF;
+END;
+/
+CREATE USER sh NO AUTHENTICATION DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
+GRANT CREATE MATERIALIZED VIEW, CREATE DIMENSION, CREATE PROCEDURE,
+      CREATE SEQUENCE, CREATE SESSION, CREATE SYNONYM, CREATE TABLE,
+      CREATE TRIGGER, CREATE TYPE, CREATE VIEW TO sh;
+ALTER SESSION SET CURRENT_SCHEMA = SH;
+@/tmp/cognic-oracle-samples-23.3/sales_history/sh_create.sql
+@/tmp/cognic-oracle-samples-23.3/sales_history/sh_populate.sql
+COMMIT;
+SQL
 
 # Persistent registry TLS CA — mint ONCE if absent (no sudo; reused across
 # runs so the one-time certs.d trust below keeps matching byte-for-byte).
@@ -3086,8 +3203,27 @@ kubectl -n "$NS" wait --for=condition=Ready secretstore/proof-vault --timeout=12
 kubectl -n "$NS" wait --for=condition=Ready externalsecret/oracle-app-credential --timeout=120s
 kubectl -n "$NS" get secret oracle-app-credential -o json | python3 -c 'import json,sys; d=json.load(sys.stdin).get("data",{}).get("password"); assert isinstance(d,str) and d; print("oracle app Secret OK: materialized")'
 
+AMIR_BOUND_SUBJECT="$(grep '^KC_SUB_ANALYST_AMIR=' "$KC_CRED_TMP/realm-subjects.env" | cut -d= -f2-)"
+[ -n "$AMIR_BOUND_SUBJECT" ] \
+  || die "realm-subjects.env carries no bound subject for analyst.amir"
+AMIR_SUBJECT_REFERENCE="$(printf '%s' "$AMIR_BOUND_SUBJECT" \
+  | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[[ "$AMIR_SUBJECT_REFERENCE" =~ ^[0-9a-f]{64}$ ]] \
+  || die "could not derive analyst.amir's 64-hex Oracle subject reference"
+ORACLE_SEED_SQL="$(< "$PROOF_DIR/oracle-seed/seed_schema.sql")"
+ORACLE_SEED_SQL="${ORACLE_SEED_SQL//__SUBJECT_ANALYST_AMIR_SHA256__/$AMIR_SUBJECT_REFERENCE}"
+if grep -q '__SUBJECT_[A-Za-z0-9_]*__' <<<"$ORACLE_SEED_SQL"; then
+  die "unsubstituted subject placeholder remains in the Oracle seed"
+fi
+printf '%s\n' "$ORACLE_SEED_SQL" > "$ORACLE_SAMPLES_TMP/10_seed_schema.sql"
+unset AMIR_BOUND_SUBJECT AMIR_SUBJECT_REFERENCE ORACLE_SEED_SQL
+
 kubectl -n "$NS" create configmap oracle-db-seed \
-  --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
+  --from-file=oracle-samples-23.3-sql.tar.gz="$ORACLE_SAMPLES_SQL_BUNDLE" \
+  --from-file=01_oracle_samples_hr.sql="$ORACLE_SAMPLES_TMP/01_oracle_samples_hr.sql" \
+  --from-file=02_oracle_samples_co.sql="$ORACLE_SAMPLES_TMP/02_oracle_samples_co.sql" \
+  --from-file=03_oracle_samples_sh.sql="$ORACLE_SAMPLES_TMP/03_oracle_samples_sh.sql" \
+  --from-file=10_seed_schema.sql="$ORACLE_SAMPLES_TMP/10_seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-db.yaml"
 # Oracle Free's pinned manifest list supplies native amd64 and arm64 images.

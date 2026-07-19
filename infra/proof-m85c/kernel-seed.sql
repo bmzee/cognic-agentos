@@ -30,11 +30,14 @@
 --
 -- The maintainer-locked matrix this file encodes:
 --   scopes        retail_analytics + financials + cards_analytics + atm_recon
---   entitlements  analyst.amir -> retail_analytics + financials
+--                 + hr + orders + warehouse
+--   entitlements  analyst.amir -> retail_analytics + financials + hr + orders
+--                                   + warehouse
 --                 analyst.sara -> cards_analytics + retail_analytics
 --                 (atm_recon is seeded as a scope but entitled to NOBODY)
 --   assignments   agent bank-analyst = EXACTLY the requested set:
---                 skills customer-data + financial-data + cards-data,
+--                 skills customer-data + financial-data + cards-data +
+--                        hr-data + orders-data + warehouse-data,
 --                 tool cognic-tool-oracle-schema/run_readonly_query
 --                 (the atm-recon skill is NEVER assigned — the BAR-2 negative)
 --
@@ -76,7 +79,16 @@ VALUES
    'AN_SARA', now()),
   ('proof-m85c', 'atm_recon', 'CARDS',
    '["CARDS.V_ATM_SETTLEMENTS", "CARDS.V_ATM_DISPUTES"]'::json,
-   'AN_ATM_RECON', now())
+   'AN_ATM_RECON', now()),
+  ('proof-m85c', 'hr', 'HR',
+   '["HR.V_EMPLOYEES", "HR.V_DEPARTMENT_HEADCOUNT", "HR.V_JOB_HISTORY"]'::json,
+   'AN_HR', now()),
+  ('proof-m85c', 'orders', 'CO',
+   '["CO.V_ORDERS_FLAT", "CO.V_ORDER_ITEMS", "CO.V_PRODUCT_REVIEWS_FLAT"]'::json,
+   'AN_ORDERS', now()),
+  ('proof-m85c', 'warehouse', 'SH',
+   '["SH.V_SALES_BY_CHANNEL", "SH.V_SALES_STAR", "SH.V_PROMOTIONS", "SH.V_CALENDAR"]'::json,
+   'AN_WAREHOUSE', now())
 ON CONFLICT (tenant_id, scope_id) DO NOTHING;
 
 -- === entitlements ===
@@ -92,6 +104,9 @@ INSERT INTO entitlements (id, tenant_id, subject, scope_id, created_at)
 VALUES
   (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__', 'retail_analytics', now()),
   (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__', 'financials', now()),
+  (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__', 'hr', now()),
+  (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__', 'orders', now()),
+  (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__', 'warehouse', now()),
   (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_SARA__', 'cards_analytics', now()),
   (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_SARA__', 'retail_analytics', now())
 ON CONFLICT ON CONSTRAINT uq_entitlements_tenant_subject_scope DO NOTHING;
@@ -109,6 +124,9 @@ VALUES
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'customer-data', now()),
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'financial-data', now()),
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'cards-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'hr-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'orders-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'warehouse-data', now()),
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'tool', 'cognic-tool-oracle-schema/run_readonly_query', now())
 ON CONFLICT ON CONSTRAINT uq_agent_assignments_tenant_agent_kind_ref DO NOTHING;
 
