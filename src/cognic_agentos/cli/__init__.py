@@ -1095,6 +1095,53 @@ def eval_bulk(
     typer.echo(render(body, json_output=json_output))
 
 
+@app.command(name="skill-eval")
+def skill_eval(
+    pack: Path = typer.Option(..., "--pack", help="Skill-pack checkout containing golden/."),  # noqa: B008
+    target: str = typer.Option(..., "--target", help="AgentOS portal base URL."),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="COGNIC_SKILL_EVAL_TOKEN",
+        help="Bearer token (prefer COGNIC_SKILL_EVAL_TOKEN).",
+    ),
+    agent_id: str = typer.Option(
+        "bank-analyst",
+        "--agent-id",
+        envvar="COGNIC_SKILL_EVAL_AGENT_ID",
+        help="Agent with the skill assigned.",
+    ),
+    ablation_agent_id: str | None = typer.Option(
+        None,
+        "--ablation-agent-id",
+        envvar="COGNIC_SKILL_EVAL_ABLATION_AGENT_ID",
+        help="Otherwise-identical agent without the evaluated skill.",
+    ),
+    reference_results: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--reference-results",
+        help="Provenance-bound JSON envelope of live reference-query results.",
+    ),
+) -> None:
+    """Run a signed skill corpus through fresh governed conversations."""
+    if not token:
+        typer.echo("skill-eval: COGNIC_SKILL_EVAL_TOKEN (or --token) is required", err=True)
+        raise typer.Exit(code=2)
+    from cognic_agentos.cli.skill_eval import run_skill_eval_cli
+
+    code, output = run_skill_eval_cli(
+        pack=pack,
+        target=target,
+        token=token,
+        agent_id=agent_id,
+        ablation_agent_id=ablation_agent_id,
+        reference_results=reference_results,
+    )
+    typer.echo(output, err=code == 2)
+    if code:
+        raise typer.Exit(code=code)
+
+
 @app.command(name="eval-replay")
 def eval_replay(
     corpus: Path = typer.Option(  # noqa: B008

@@ -34,8 +34,8 @@ def test_eval_dir_has_expected_sources() -> None:
     """Non-vacuous guard — pin the exact source set so a vanished glob cannot make
     the fences pass trivially."""
     names = {p.name for p in _eval_sources()}
-    # The expected set grows as Sprint-12 modules land (types/corpus/target/scorers/runner/storage)
-    # and Sprint-13a adds the live-replay module (replay.py).
+    # The expected set grows only through reviewed evaluation slices: Sprint 12's
+    # generic runner, Sprint 13a replay, and M8.5-E's A-007 skill corpus/evaluator.
     assert names == {
         "__init__.py",
         "judge.py",
@@ -43,6 +43,8 @@ def test_eval_dir_has_expected_sources() -> None:
         "corpus.py",
         "target.py",
         "scorers.py",
+        "skill_corpus.py",
+        "skill_eval.py",
         "runner.py",
         "storage.py",
         "replay.py",

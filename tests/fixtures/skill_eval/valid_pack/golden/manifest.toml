@@ -1,0 +1,34 @@
+schema_version = 1
+skill_id = "fixture-data"
+n_reps = 3
+
+[judge]
+model_alias = "cognic-tier1-proof-m85e"
+rubric_ref = "a007-result-v1"
+calibration_set_id = "human-labelled-v1"
+measured_kappa = 0.75
+
+[ablation]
+enabled = true
+minimum_uplift = 0.05
+
+[gates]
+hard_failure_kinds = ["refusal", "adversarial"]
+zero_observed_failures = true
+wrong_answer_rate_target = 0.02
+rate_gate_min_observations = 100
+minimum_trigger_accuracy = 1.0
+minimum_trigger_positive = 3
+minimum_trigger_negative = 3
+minimum_judge_kappa = 0.7
+
+[holdouts]
+case_ids = ["fx-001"]
+
+[performance_conformance]
+non_gating_case_ids = ["fx-002"]
+
+[reference]
+server_id = "cognic-tool-oracle-schema"
+tool_name = "run_readonly_query"
+scope_id = "fixture"
