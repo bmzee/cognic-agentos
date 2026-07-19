@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shutil
 import uuid
@@ -18,6 +19,7 @@ from cognic_agentos.evaluation.skill_eval import (
     SkillEvalRunRefusalReason,
     SkillEvalRunRefused,
     _expected_value,
+    _routes_to_judge,
     build_eval_runner_corpus,
     compute_skill_gate,
     find_skill_contamination,
@@ -99,8 +101,16 @@ def test_all_green_fixture_passes_a007_gate() -> None:
     assert report.hard_zero_observed is True
     assert report.trigger_accuracy == 1.0
     assert report.ablation_uplift == 1.0
-    assert report.rate_gate_applied is False
+    assert report.golden_accuracy == 1.0
+    assert report.golden_all_correct is True
+    assert report.golden_failure_case_ids == ()
     assert report.failure_case_ids == ()
+    payload = skill_gate_report_payload(report)
+    assert payload["golden_accuracy"] == 1.0
+    assert payload["golden_all_correct"] is True
+    assert payload["golden_failure_case_ids"] == []
+    assert "rate_gate_applied" not in payload
+    assert "rate_gate_passed" not in payload
     assert {metric.kind: metric.total for metric in report.class_metrics} == {
         "golden": 3,
         "adversarial": 3,
@@ -138,18 +148,19 @@ def test_one_hard_class_failure_turns_gate_red() -> None:
     assert adversarial.case_clusters_passed == 0
 
 
-def test_wrong_answer_target_becomes_load_bearing_at_the_declared_sample_size() -> None:
+def test_wrong_golden_answer_fails_verdict_at_any_n() -> None:
     corpus = load_skill_corpus(_FIXTURE)
-    gates = corpus.manifest.gates.model_copy(update={"rate_gate_min_observations": 1})
-    manifest = corpus.manifest.model_copy(update={"gates": gates})
-    strict_corpus = corpus.model_copy(update={"manifest": manifest})
     verdicts = _replace_verdict(_verdicts(), case_id="fx-001", repetition=1, passed=False)
 
-    report = compute_skill_gate(strict_corpus, verdicts)
+    report = compute_skill_gate(corpus, verdicts)
 
-    assert report.rate_gate_applied is True
-    assert report.rate_gate_passed is False
+    assert report.golden_all_correct is False
+    assert report.golden_failure_case_ids == ("fx-001",)
     assert report.passed is False
+    assert report.golden_accuracy < 1.0
+    payload = skill_gate_report_payload(report)
+    assert payload["golden_all_correct"] is False
+    assert payload["golden_failure_case_ids"] == ["fx-001"]
 
 
 def test_shape_failure_is_reported_but_cannot_flip_a007_gate() -> None:
@@ -559,6 +570,62 @@ async def test_judge_case_without_calibration_refuses_before_network() -> None:
             )
 
     assert exc_info.value.reason == "skill_eval_judge_calibration_missing"
+
+
+@pytest.mark.asyncio
+async def test_mode_routed_judge_case_without_calibration_refuses() -> None:
+    source = load_skill_corpus(_UNCALIBRATED_FIXTURE)
+    corpus = source.model_copy(
+        update={
+            "cases": tuple(
+                case.model_copy(update={"scoring": "deterministic"}) for case in source.cases
+            )
+        }
+    )
+    assert not any(case.scoring == "judge" for case in corpus.cases)
+    mode_routed_case = corpus.case_by_id["fx-003"]
+    assert mode_routed_case.expected.mode == "refusal"
+    assert _routes_to_judge(mode_routed_case) is True
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"network must not run: {request.method} {request.url}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(unexpected_request),
+        base_url="https://agentos.test",
+    ) as client:
+        with pytest.raises(SkillEvalRunRefused) as exc_info:
+            await run_skill_evaluation(
+                corpus,
+                target_url="https://agentos.test",
+                token="TOKEN-CANARY",
+                agent_id="bank-analyst",
+                ablation_agent_id="bank-analyst-no-fixture",
+                reference_values={"fx-001": 42, "fx-002": 42},
+                http_client=client,
+            )
+
+    assert exc_info.value.reason == "skill_eval_judge_calibration_missing"
+
+
+def test_routes_to_judge_is_sole_routing_authority() -> None:
+    """Drift guard (hardening spec §2 F1): the scorer and the calibration
+    preflight must BOTH delegate to ``_routes_to_judge``. An inline copy of
+    the predicate at either site re-opens the D1 one-sided drift: the scorer
+    narrowing to ``scoring == "judge"`` would send deterministic-scored
+    refusal/assumption/clarify cases to exact-match instead of the judge,
+    with every behavioral test still green."""
+    import cognic_agentos.evaluation.skill_eval as skill_eval_module
+
+    module_source = inspect.getsource(skill_eval_module)
+    assert module_source.count('scoring == "judge"') == 1, (
+        "the judge-routing predicate must exist exactly once, inside _routes_to_judge"
+    )
+    assert 'scoring == "judge"' in inspect.getsource(_routes_to_judge)
+    scorer_source = inspect.getsource(skill_eval_module._SkillExpectationScorer.score)
+    assert "_routes_to_judge(" in scorer_source
+    runner_source = inspect.getsource(skill_eval_module.run_skill_evaluation)
+    assert "_routes_to_judge(" in runner_source
 
 
 @pytest.mark.asyncio

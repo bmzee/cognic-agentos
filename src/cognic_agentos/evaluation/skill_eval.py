@@ -71,6 +71,19 @@ _EMPTY_RESULT_MARKERS: tuple[str, ...] = (
 )
 
 
+def _routes_to_judge(case: SkillCorpusCase) -> bool:
+    """Return whether the case will be graded by the LLM judge.
+
+    The scorer and calibration preflight share this sole authority so a
+    routing change cannot silently create an uncalibrated judge path.
+    """
+    return case.scoring == "judge" or case.expected.mode in {
+        "refusal",
+        "assumption",
+        "clarify",
+    }
+
+
 class SkillEvalContractError(ValueError):
     """The evaluator could not prove a complete, non-duplicated matrix."""
 
@@ -136,8 +149,9 @@ class SkillGateReport:
     trigger_passed: bool
     accuracy: float
     wrong_answer_rate: float
-    rate_gate_applied: bool
-    rate_gate_passed: bool
+    golden_accuracy: float
+    golden_all_correct: bool
+    golden_failure_case_ids: tuple[str, ...]
     ablation_uplift: float
     ablation_passed: bool
     performance_conformance: PerformanceConformanceMetric
@@ -236,11 +250,12 @@ def compute_skill_gate(
     answer_rows = [row for row in with_skill if row.kind in _ANSWER_KINDS]
     accuracy = _rate(answer_rows)
     wrong_answer_rate = 1.0 - accuracy
-    rate_gate_applied = len(answer_rows) >= corpus.manifest.gates.rate_gate_min_observations
-    rate_gate_passed = (
-        wrong_answer_rate < corpus.manifest.gates.wrong_answer_rate_target
-        if rate_gate_applied
-        else True
+
+    golden_rows = [row for row in with_skill if row.kind == "golden"]
+    golden_accuracy = _rate(golden_rows)
+    golden_all_correct = all(row.passed and not row.errored for row in golden_rows)
+    golden_failure_case_ids = tuple(
+        sorted({row.case_id for row in golden_rows if row.errored or not row.passed})
     )
 
     non_trigger_ids = {case.case_id for case in corpus.cases if case.kind not in _TRIGGER_KINDS}
@@ -273,7 +288,7 @@ def compute_skill_gate(
         (
             hard_zero_observed,
             trigger_passed,
-            rate_gate_passed,
+            golden_all_correct,
             ablation_passed,
             not any_with_skill_error,
         )
@@ -296,8 +311,9 @@ def compute_skill_gate(
         trigger_passed=trigger_passed,
         accuracy=accuracy,
         wrong_answer_rate=wrong_answer_rate,
-        rate_gate_applied=rate_gate_applied,
-        rate_gate_passed=rate_gate_passed,
+        golden_accuracy=golden_accuracy,
+        golden_all_correct=golden_all_correct,
+        golden_failure_case_ids=golden_failure_case_ids,
         ablation_uplift=ablation_uplift,
         ablation_passed=ablation_passed,
         performance_conformance=performance_conformance,
@@ -841,11 +857,7 @@ class _SkillExpectationScorer:
             return _assertion_result("skill_route", passed)
 
         expected_value = _expected_value(source, self._reference_values)
-        if source.scoring == "judge" or source.expected.mode in {
-            "refusal",
-            "assumption",
-            "clarify",
-        }:
+        if _routes_to_judge(source):
             return await self._judge(source, output.text, expected_value)
         return _assertion_result(
             "result_equivalence",
@@ -966,7 +978,7 @@ async def run_skill_evaluation(
 ) -> SkillGateReport:
     """Run the exact A-007 matrix through fresh conversation API sessions."""
     if corpus.manifest.judge.measured_kappa is None and any(
-        case.scoring == "judge" for case in corpus.cases
+        _routes_to_judge(case) for case in corpus.cases
     ):
         raise SkillEvalRunRefused("skill_eval_judge_calibration_missing")
     if not token:
@@ -1065,8 +1077,9 @@ def skill_gate_report_payload(report: SkillGateReport) -> dict[str, object]:
         "trigger_passed": report.trigger_passed,
         "accuracy": report.accuracy,
         "wrong_answer_rate": report.wrong_answer_rate,
-        "rate_gate_applied": report.rate_gate_applied,
-        "rate_gate_passed": report.rate_gate_passed,
+        "golden_accuracy": report.golden_accuracy,
+        "golden_all_correct": report.golden_all_correct,
+        "golden_failure_case_ids": list(report.golden_failure_case_ids),
         "ablation_uplift": report.ablation_uplift,
         "ablation_passed": report.ablation_passed,
         "performance_conformance": dataclasses.asdict(report.performance_conformance),
