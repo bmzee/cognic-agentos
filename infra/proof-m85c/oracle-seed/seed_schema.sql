@@ -4,7 +4,7 @@
 -- gvenzl runs every *.sql in /container-entrypoint-initdb.d once, on the first
 -- boot of a fresh volume, AFTER the database and the APP_USER (cognic) are set
 -- up. These init scripts run as an admin in the root container — NOT as the
--- APP_USER — so we ALTER SESSION INTO XEPDB1 and create everything explicitly
+-- APP_USER — so we ALTER SESSION INTO FREEPDB1 and create everything explicitly
 -- (the proof-m6 pattern).
 --
 -- What this seed builds (spec §6 / plan Task C1):
@@ -53,7 +53,7 @@
 SET DEFINE OFF
 WHENEVER SQLERROR EXIT SQL.SQLCODE
 
-ALTER SESSION SET CONTAINER = XEPDB1;
+ALTER SESSION SET CONTAINER = FREEPDB1;
 
 -- ---------------------------------------------------------------------------
 -- 1. Schema owners (NO AUTHENTICATION = schema-only; not directly connectable)
@@ -431,5 +431,17 @@ GRANT SELECT ON retail_analytics.v_customer_profile TO an_sara;
 -- identity, and NO grant on ANY *_raw base table to anyone: a cross-scope or
 -- raw-table statement that somehow survived the kernel + tool gates dies at
 -- the engine with ORA-00942 (table or view does not exist) — BAR 4b.
+
+-- ---------------------------------------------------------------------------
+-- 7. Unified-audit policy for the exact governed views BAR H exercises
+-- ---------------------------------------------------------------------------
+-- The policy is object-scoped: the successful retail query proves per-human
+-- attribution, while the cross-scope FIN query proves the engine denial. The
+-- runner flushes and reads UNIFIED_AUDIT_TRAIL independently; the pack never
+-- reads or reports its own audit row.
+CREATE AUDIT POLICY D3_GOVERNED_SELECTS
+    ACTIONS SELECT ON retail_analytics.v_customer_profile,
+            SELECT ON fin.v_gl_balances;
+AUDIT POLICY D3_GOVERNED_SELECTS;
 
 EXIT

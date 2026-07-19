@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# CURRENT EXTENSION (M8.5-D D2 A-minus, 2026-07-17): the historical M8.5-C
-# Bars A-F remain byte-locked below; BAR G appends deployed N-way assignment,
-# single-use direct-MCP consumption, and maker-checker evidence. The aggregate
-# success marker is now BARS A-G. Conversation-correlated auto-execution remains
-# deferred to D5's externally released action-agent/write-pack proof.
+# CURRENT EXTENSION (M8.5-D D3, 2026-07-18): the historical M8.5-C Bars A-F
+# remain byte-locked below; BAR G appends deployed N-way assignment, single-use
+# direct-MCP consumption, and maker-checker evidence; BAR H appends ESO-injected
+# file custody, DB-native attribution, live rotation, and the engine backstop.
+# Conversation-correlated auto-execution remains deferred to D5's externally
+# released action-agent/write-pack proof.
 # Proof M8.5 SLICE (conversational substrate — BARs 1-3) — the vertical-slice
 # gate for ADR-028: the kernel-owned CONVERSATION primitive (`/api/v1/
 # conversations`) wrapping the PROVEN M8 governed agent loop, live on kind.
 # The deployment is the proof-m8 bring-up VERBATIM (same SEVEN released,
 # signed packs, same M4 governed operator install for the oracle tool, same
-# in-cluster Oracle XE + RS256/JWKS AS + litellm cloud tier); the ONLY new
+# in-cluster Oracle Free + RS256/JWKS AS + litellm cloud tier); the ONLY new
 # surface under test is the conversation API and its evidence:
 #   * conversation.created / conversation.turn_completed chain rows are
 #     DIGEST-ONLY (question_sha256/answer_sha256 + byte counts); plaintext
@@ -73,7 +74,7 @@
 #
 # Operator-run + env-gated (COGNIC_RUN_PROOF_M85C=1); NO default-on CI job
 # (needs an image build + kind + live Vault/Postgres/Redis + in-cluster
-# Oracle XE + a local TLS registry + the host docker socket + the operator's
+# Oracle Free + a local TLS registry + the host docker socket + the operator's
 # CLOUD provider key). The provider key env (COGNIC_PROOF_M85C_TIER1_API_KEY)
 # is REQUIRED at the gate — operator env at run time, never committed, never
 # image-baked.
@@ -82,7 +83,7 @@
 # conversation.% / agent.run.% / dispatch / audit evidence to
 # docs/VALIDATION-RESULTS.md and exits non-zero — the proof is NEVER
 # redefined downward. On all-pass it prints
-# "PROOF M8.5-C (BARS A-G) PASS" and exits 0.
+# "PROOF M8.5-C (BARS A-H) PASS" and exits 0.
 set -euo pipefail
 
 if [[ "${COGNIC_RUN_PROOF_M85C:-}" != "1" ]]; then
@@ -189,8 +190,17 @@ AGENT_PACK_ID="cognic-agent-bank-analyst"
 AGENT_ID="bank-analyst"                             # the AGENT.md frontmatter name (the ask path segment)
 SKILL_IDS=("customer-data" "financial-data" "cards-data" "atm-recon")
 SKILL_PACK_IDS=("cognic-skill-customer-data" "cognic-skill-financial-data" "cognic-skill-cards-data" "cognic-skill-atm-recon")
-PACK_VERSION="0.4.0"
-PACK_WHEEL="cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
+PACK_VERSION="0.5.1"
+PACK_WHEEL="cognic_tool_oracle_schema-0.5.1-py3-none-any.whl"
+
+# External Secrets is chart- and image-pinned independently. All three chart
+# workloads use this one multi-platform image digest.
+ESO_CHART_VERSION="2.7.0"
+ESO_IMAGE="ghcr.io/external-secrets/external-secrets:v2.7.0@sha256:6615aaea8ff44924d9d7dbc99982a130c82913f7583e212fa3aeebc6dc21fbf9"
+ESO_LOCAL_REPOSITORY="cognic-proof-eso"
+ESO_LOCAL_TAG="v2.7.0-pinned"
+ESO_LOCAL_IMAGE="$ESO_LOCAL_REPOSITORY:$ESO_LOCAL_TAG"
+ORACLE_APP_PASSWORD=""
 
 # ---- The approval-probe pack's trust pins (Bar D drives the probe) ----------------
 # THE PIN IS A MAINTAINER COMMIT, NOT AN OPERATOR EXPORT (review 2026-07-12, F4).
@@ -439,12 +449,15 @@ _backend_images() {
 
 # Extra (non-backend) images the proof references with imagePullPolicy: IfNotPresent —
 # pre-pulled + kind-loaded so the kind node never reaches the internet for them:
-# oracle-xe + busybox (the oracle-pack wait-for-xe + the topology-perms init) +
+# Oracle Free + busybox (oracle-pack wait-for-db + topology-perms init) +
 # redis (the scheduler control plane) + registry:2 (the local TLS registry) +
 # the OTLP collector (inherited diagnostics — ruling R6: NO M8.5 bar depends
-# on spans; manifests/otel-collector.yaml).
+# on spans; manifests/otel-collector.yaml). ESO is handled separately: kind's
+# manifest-list import needs a digest-verified local alias (see step 4).
 _extra_images() {
-  printf '%s\n' "gvenzl/oracle-xe:21-slim" "busybox:1.36" "redis:7.4-alpine" "registry:2" \
+  printf '%s\n' \
+    "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8" \
+    "busybox:1.36" "redis:7.4-alpine" "registry:2" \
     "otel/opentelemetry-collector:0.111.0"
 }
 
@@ -1931,6 +1944,103 @@ bound_subject() {
   printf '%s' "$val"
 }
 
+# governed_rotation_query <ROLE> — run one fresh governed NL->SQL conversation
+# turn and return "<agent_run_id>\t<credential_rotation_ref>". The ref is read
+# from the caller-visible TurnResponse answer: the prompt requires the model to
+# copy the pack's exact result field onto one unadorned line. BAR H compares that
+# wire observation to the independently persisted agent.run.dispatch chain row.
+governed_rotation_query() {
+  local role="$1" created cid turn parsed rc
+  created="$(conv_create "$role")"
+  load_http_code
+  [ "$HTTP_CODE" = "201" ] \
+    || bar_fail "BAR H governed rotation query could not create its fresh conversation (HTTP $HTTP_CODE)"
+  set +e
+  cid="$(printf '%s' "$created" | python3 -c '
+import json, sys, uuid
+doc = json.load(sys.stdin)
+value = doc.get("conversation_id") if isinstance(doc, dict) else None
+assert isinstance(value, str), "conversation_id_missing"
+assert str(uuid.UUID(value)) == value, "conversation_id_not_canonical"
+print(value)
+')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] && [ -n "$cid" ] \
+    || bar_fail "BAR H governed rotation query received no canonical conversation id"
+
+  turn="$(conv_turn "$role" "$cid" "Call run_readonly_query exactly once with scope_id=retail_analytics, max_rows=1, and sql exactly: SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE WHERE STATUS = 'ACTIVE'. Do not use any placeholder or any other scope_id. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
+  load_http_code
+  [ "$HTTP_CODE" = "200" ] \
+    || bar_fail "BAR H governed rotation query did not complete on the conversation wire (HTTP $HTTP_CODE)"
+  set +e
+  parsed="$(printf '%s' "$turn" | python3 -c '
+from datetime import datetime
+import json, re, sys
+
+doc = json.load(sys.stdin)
+assert isinstance(doc, dict), "turn_not_object"
+assert doc.get("terminal_state") == "completed", "turn_not_completed"
+assert doc.get("refusal_reason") is None, "turn_refused"
+run_id = doc.get("agent_run_id")
+answer = doc.get("answer")
+assert isinstance(run_id, str) and run_id, "run_id_missing"
+assert isinstance(answer, str), "answer_missing"
+refs = re.findall(r"(?m)^[ \t]*CREDENTIAL_ROTATION_REF=([!-~]{1,64})[ \t]*$", answer)
+assert len(refs) == 1, "rotation_ref_marker_not_exactly_once"
+try:
+    parsed_ref = datetime.fromisoformat(refs[0])
+except (OverflowError, TypeError, ValueError):
+    raise AssertionError("rotation_ref_not_iso8601") from None
+assert parsed_ref.tzinfo is not None, "rotation_ref_not_timezone_aware"
+print(f"{run_id}\t{refs[0]}")
+')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] && [ -n "$parsed" ] \
+    || bar_fail "BAR H governed rotation query did not return one valid wire rotation reference"
+  printf '%s\n' "$parsed"
+}
+
+# oracle_admin_sql <SQL> — execute load-bearing proof administration through
+# OS authentication in the database pod. SQL rides stdin, never kubectl argv;
+# this matters for BAR H.3, whose ALTER USER statement contains the new app
+# credential. Callers decide whether diagnostics are safe to surface.
+oracle_admin_sql() {
+  local sql="$1"
+  {
+    printf '%s\n' \
+      'SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 VERIFY OFF TERMOUT ON' \
+      'WHENEVER OSERROR EXIT 9' \
+      'WHENEVER SQLERROR EXIT SQL.SQLCODE' \
+      'ALTER SESSION SET CONTAINER = FREEPDB1;'
+    printf '%s\n' "$sql"
+    printf '%s\n' 'EXIT'
+  } | kubectl_capture -n "$NS" exec -i deploy/oracle-db -- \
+    bash -c 'exec sqlplus -s "/ as sysdba"'
+}
+
+# oracle_proxy_sql <PROXY_IDENTITY> <SQL> <PASSWORD> — exercise the DB grant
+# backstop directly. The credential rides kubectl stdin and then SQL*Plus stdin;
+# it is never an operator-host or pod process argument.
+oracle_proxy_sql() {
+  local proxy_identity="$1" sql="$2" password="$3"
+  printf '%s\n' "$password" | kubectl_capture -n "$NS" exec -i deploy/oracle-db -- \
+    bash -c '
+IFS= read -r password
+proxy_identity="$1"
+sql="$2"
+{
+  printf "%s\n" \
+    "SET ECHO OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 VERIFY OFF TERMOUT ON" \
+    "WHENEVER OSERROR EXIT 9" \
+    "WHENEVER SQLERROR EXIT SQL.SQLCODE"
+  printf "CONNECT cognic[%s]/\"%s\"@FREEPDB1\n" "$proxy_identity" "$password"
+  printf "%s\n" "$sql" "EXIT"
+} | sqlplus -L -s /nolog
+' _ "$proxy_identity" "$sql"
+}
+
 # The BAR-3 entitlement axis (kernel-side rows the dispatch gate 2 reads live).
 entitlement_count() {
   local subject="$1" scope="$2"
@@ -2134,7 +2244,7 @@ PY
 }
 
 # ---- Hook-pack registry-admission preflight (M5/M6-inherited) ---------------------
-# The oracle v0.4.0 manifest binds dlp_pre hooks; the hook pack must be admitted
+# The oracle v0.5.1 manifest binds dlp_pre hooks; the hook pack must be admitted
 # at boot or every governed tool call (incl. the agent's run_readonly_query)
 # fail-closes at the DLP gate.
 assert_hook_pack_registered() {
@@ -2288,22 +2398,22 @@ bff_fail() {
   bar_fail "$where"
 }
 
-# Step-5 XE-readiness failure path (mirrors proof-m6 xe_fail).
-xe_fail() {
+# Step-5 Oracle-readiness failure path.
+oracle_db_fail() {
   local where="$1"
-  echo "FAIL: oracle-xe ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  echo "FAIL: oracle-db ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local pods desc logs
   pods="$(kubectl -n "$NS" get pods 2>&1 || true)"
-  desc="$(kubectl -n "$NS" describe pod -l app=oracle-xe 2>&1 | tail -90 || true)"
-  logs="$(kubectl -n "$NS" logs -l app=oracle-xe --tail=120 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe pod -l app=oracle-db 2>&1 | tail -90 || true)"
+  logs="$(kubectl -n "$NS" logs -l app=oracle-db --tail=120 2>&1 || true)"
   {
     echo ""
-    echo "## Proof M8.5 slice — Oracle XE readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo "## Proof M8.5 slice — Oracle Free readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
     echo ""
     echo "- Failed step: \`$where\`"
     echo "- pods:"; echo '```'; echo "$pods"; echo '```'
-    echo "- oracle-xe describe (tail 90):"; echo '```'; echo "$desc"; echo '```'
-    echo "- oracle-xe logs (tail 120):"; echo '```'; echo "$logs"; echo '```'
+    echo "- oracle-db describe (tail 90):"; echo '```'; echo "$desc"; echo '```'
+    echo "- oracle-db logs (tail 120):"; echo '```'; echo "$logs"; echo '```'
   } >> docs/VALIDATION-RESULTS.md
   exit 1
 }
@@ -2314,13 +2424,13 @@ backends_fail() {
   echo "FAIL: backends ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local wide ddeploy dpods notready_logs p
   wide="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
-  ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-xe)' 2>&1 | tail -120 || true)"
-  dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-xe)' 2>&1 | tail -150 || true)"
+  ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-db)' 2>&1 | tail -120 || true)"
+  dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-db)' 2>&1 | tail -150 || true)"
   # Every not-ready backend pod gets its OWN logs + previous-instance logs +
   # describe (the M6 run-4/5 + run-18 capture findings: the fault pod must
   # survive the all-pods tail truncation). Comment kept OUTSIDE the command
   # substitution: macOS bash 3.2 mis-parses parens inside comments inside "$( ... )".
-  notready_logs="$(for p in $(kubectl -n "$NS" get pods -l 'app notin (oracle-xe)' \
+  notready_logs="$(for p in $(kubectl -n "$NS" get pods -l 'app notin (oracle-db)' \
       -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
     echo "----- logs: $p (tail 80) -----"
     kubectl -n "$NS" logs "$p" --tail=80 2>&1 || true
@@ -2427,6 +2537,7 @@ cleanup() {
   # Browser interactions must never resolve packages mid-bar. The driver gets one
   # private runtime before cluster work; remove it with the rest of the run state.
   [ -n "${DRIVER_VENV_TMP:-}" ] && rm -rf "$DRIVER_VENV_TMP" 2>/dev/null || true
+  unset ORACLE_APP_PASSWORD ESO_VAULT_TOKEN 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -2435,6 +2546,10 @@ echo "==> [1/11] tool preflight"
 for tool in docker kind kubectl helm uv cosign syft grype curl python3 gh openssl; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not on PATH"
 done
+# Mint once per run. This variable is never exported globally; only seed-vault
+# receives it, and BAR H retains it transiently to prove the old credential dies.
+ORACLE_APP_PASSWORD="$(openssl rand -hex 24)"
+[ -n "$ORACLE_APP_PASSWORD" ] || die "openssl returned an empty Oracle app credential"
 # Registry host-port preflight — fail LOUD with an actionable message here,
 # not mid-run at `docker run -p` (macOS ControlCenter/AirPlay owns *:5000 by
 # default, which is why the default moved to $REGISTRY_PORT).
@@ -2774,6 +2889,20 @@ while IFS= read -r _img; do
   docker_pull_with_retry "$_img"
 done < <(_backend_images; _extra_images)
 
+# Docker Desktop 28 + kind/containerd cannot reliably run a manifest-list
+# digest imported by `kind load`: it may retain a transient `import-<date>`
+# checkpoint reference and every pod then dies CreateContainerError. Preserve
+# the immutable source pin, create one proof-local alias of those exact bytes,
+# and later force the chart to that preloaded alias with pullPolicy=Never.
+echo "  docker pull $ESO_IMAGE"
+docker_pull_with_retry "$ESO_IMAGE"
+docker tag "$ESO_IMAGE" "$ESO_LOCAL_IMAGE"
+ESO_SOURCE_ID="$(docker image inspect --format '{{.Id}}' "$ESO_IMAGE")"
+ESO_ALIAS_ID="$(docker image inspect --format '{{.Id}}' "$ESO_LOCAL_IMAGE")"
+[ -n "$ESO_SOURCE_ID" ] && [ "$ESO_SOURCE_ID" = "$ESO_ALIAS_ID" ] \
+  || die "ESO digest-to-local-alias byte identity check failed"
+echo "  ESO digest-pinned source and proof-local alias share image id $ESO_SOURCE_ID"
+
 echo "==> [4/11] create the kind cluster with the sandbox topology (docker sock + broker share)"
 kind create cluster --name "$CLUSTER" --config "$PROOF_DIR/kind-config.yaml"
 
@@ -2790,6 +2919,9 @@ while IFS= read -r _img; do
   echo "  kind load $_img"
   kind load docker-image "$_img" --name "$CLUSTER"
 done < <(_backend_images; _extra_images)
+
+echo "==> [4/11] kind load the digest-verified ESO proof-local alias"
+kind load docker-image "$ESO_LOCAL_IMAGE" --name "$CLUSTER"
 
 # --- 4b. local TLS registry + canonical re-home (pull->push->sign->digest-pin) -----
 # The M6 executable-skill posture deploys UNCHANGED, so the canonical trust
@@ -2841,8 +2973,8 @@ cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
   --yes "$EGRESS_PROXY_REF"
 echo "  canonical refs (digest-pinned, proof-signed): runtime=$RUNTIME_PYTHON_REF proxy=$EGRESS_PROXY_REF"
 
-# --- 5. namespace + the six real backends + Redis + OTLP collector, then Oracle XE --
-echo "==> [5/11] bring up the six backends + Redis + otel-collector, then the seeded Oracle XE"
+# --- 5. namespace + real backends + Redis + OTLP, then ESO + Oracle Free ----------
+echo "==> [5/11] bring up the backends + Redis + otel-collector, then ESO + Oracle Free"
 kubectl create namespace "$NS"
 kubectl -n "$NS" apply -f "$CHART/ci/smoke/backends.yaml"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/redis.yaml"
@@ -2888,7 +3020,7 @@ kubectl -n "$NS" patch deploy/langfuse --type=strategic \
 # each backend its own budget and name the ACTUAL laggards in the failure message.
 BACKEND_WAIT_FAILURES="$STAGING_DST/.backend-wait-failures"
 rm -f "$BACKEND_WAIT_FAILURES"
-for _d in $(kubectl -n "$NS" get deploy -l 'app notin (oracle-xe)' -o name); do
+for _d in $(kubectl -n "$NS" get deploy -l 'app notin (oracle-db)' -o name); do
   (
     kubectl -n "$NS" wait --for=condition=available --timeout=600s "$_d" >/dev/null 2>&1 \
       || echo "$_d" >> "$BACKEND_WAIT_FAILURES"
@@ -2905,49 +3037,89 @@ echo "  all backend deployments Available"
 kubectl -n "$NS" wait --for=condition=available --timeout=600s deploy/cognic-proof-keycloak \
   || backends_fail "cognic-proof-keycloak not Available within 600s"
 echo "  Keycloak Available"
-kubectl -n "$NS" create configmap oracle-xe-seed \
+
+# --- 6. Vault seed + ESO materialization -------------------------------------------
+echo "==> [6/11] seed Vault, then materialize the Oracle app credential through ESO"
+ORACLE_APP_PASSWORD="$ORACLE_APP_PASSWORD" NS="$NS" bash "$PROOF_DIR/seed-vault.sh"
+
+# The chart version is pinned. Every ESO workload uses the proof-local alias
+# whose bytes were checked against the manifest-list digest before cluster
+# creation; pullPolicy=Never makes the node's preloaded bytes the only source.
+# The dev-root token is proof posture only: read it from the deployed Vault
+# workload, write it with a shell builtin into the existing private per-run
+# directory, and let kubectl read the file so no token value enters argv.
+helm repo add external-secrets https://charts.external-secrets.io --force-update >/dev/null
+set +e
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace "$NS" \
+  --version "$ESO_CHART_VERSION" \
+  --set installCRDs=true \
+  --set-string image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string image.tag="$ESO_LOCAL_TAG" \
+  --set image.pullPolicy=Never \
+  --set-string webhook.image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string webhook.image.tag="$ESO_LOCAL_TAG" \
+  --set webhook.image.pullPolicy=Never \
+  --set-string certController.image.repository="$ESO_LOCAL_REPOSITORY" \
+  --set-string certController.image.tag="$ESO_LOCAL_TAG" \
+  --set certController.image.pullPolicy=Never \
+  --wait --timeout=300s
+ESO_HELM_RC=$?
+set -e
+if [ "$ESO_HELM_RC" -ne 0 ]; then
+  kubectl -n "$NS" get pods -l app.kubernetes.io/instance=external-secrets \
+    -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,WAITING:.status.containerStatuses[0].state.waiting.reason \
+    >&2 || true
+  die "External Secrets chart did not become Ready (helm rc=$ESO_HELM_RC)"
+fi
+ESO_VAULT_TOKEN="$(kubectl -n "$NS" get deploy/vault \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="VAULT_DEV_ROOT_TOKEN_ID")].value}')"
+[ -n "$ESO_VAULT_TOKEN" ] || die "deployed Vault carries no dev-token value for the proof SecretStore"
+( umask 077; printf '%s' "$ESO_VAULT_TOKEN" > "$KC_CRED_TMP/eso-vault-token" )
+unset ESO_VAULT_TOKEN
+kubectl -n "$NS" create secret generic proof-vault-token \
+  --from-file=token="$KC_CRED_TMP/eso-vault-token"
+kubectl -n "$NS" apply \
+  -f "$PROOF_DIR/manifests/eso-secretstore.yaml" \
+  -f "$PROOF_DIR/manifests/eso-externalsecret.yaml"
+kubectl -n "$NS" wait --for=condition=Ready secretstore/proof-vault --timeout=120s
+kubectl -n "$NS" wait --for=condition=Ready externalsecret/oracle-app-credential --timeout=120s
+kubectl -n "$NS" get secret oracle-app-credential -o json | python3 -c 'import json,sys; d=json.load(sys.stdin).get("data",{}).get("password"); assert isinstance(d,str) and d; print("oracle app Secret OK: materialized")'
+
+kubectl -n "$NS" create configmap oracle-db-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
-kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
-# 2400s: the qemu-emulated (amd64-on-arm64) XE first boot creates the whole
-# database inside the readiness window; run-5 live finding — 1200s expired
-# mid-creation with the listener already up (the image itself is preloaded
-# into the node, so none of this window is pull time).
+kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-db.yaml"
+# Oracle Free's pinned manifest list supplies native amd64 and arm64 images.
+# Keep the proven label-polling posture so a replaced pod is observed instead
+# of waiting forever on a deleted object.
 # Poll loop, NOT one long `kubectl wait` (run-7 live findings, both pinned):
 #   * `kubectl wait -l ...` resolves the selector ONCE at invocation and then
 #     waits on those pod OBJECTS — if the pod is recreated mid-wait, the wait
 #     sits on a deleted object until timeout even when the replacement goes
 #     Ready.
-#   * The qemu-emulated XE occasionally dies within seconds of its FIRST
-#     start (environmental; ORA-01081 on every restart after — stale
-#     instance state in the pod-scoped sandbox never self-heals). The ONLY
-#     recovery is recreating the POD (fresh sandbox). Auto-recreate on a
-#     detected crash loop, at most $_XE_MAX_RECREATES times, and keep
-#     polling the LABEL so the replacement is picked up.
-_XE_DEADLINE=$(( $(date +%s) + 2400 ))
-_XE_MAX_RECREATES=3
-_xe_recreates=0
-until kubectl -n "$NS" get pods -l app=oracle-xe 2>/dev/null | grep -qE "1/1\s+Running"; do
-  if [ "$(date +%s)" -ge "$_XE_DEADLINE" ]; then
-    xe_fail "oracle-xe pod not Ready within 2400s (qemu-emulated XE first boot under kind)"
+# A crash-looping first boot cannot establish evidence, so bounded pod
+# recreation remains a proof-local recovery before failing loud.
+_ORACLE_DB_DEADLINE=$(( $(date +%s) + 2400 ))
+_ORACLE_DB_MAX_RECREATES=3
+_oracle_db_recreates=0
+until kubectl -n "$NS" get pods -l app=oracle-db 2>/dev/null | grep -qE "1/1\s+Running"; do
+  if [ "$(date +%s)" -ge "$_ORACLE_DB_DEADLINE" ]; then
+    oracle_db_fail "oracle-db pod not Ready within 2400s"
   fi
-  _xe_restarts="$(kubectl -n "$NS" get pods -l app=oracle-xe \
+  _oracle_db_restarts="$(kubectl -n "$NS" get pods -l app=oracle-db \
     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
-  if [ "${_xe_restarts:-0}" -ge 2 ]; then
-    if [ "$_xe_recreates" -ge "$_XE_MAX_RECREATES" ]; then
-      xe_fail "oracle-xe crash-looping after $_xe_recreates pod recreations (qemu emulation unstable — restart Docker Desktop / prune the VM and re-run)"
+  if [ "${_oracle_db_restarts:-0}" -ge 2 ]; then
+    if [ "$_oracle_db_recreates" -ge "$_ORACLE_DB_MAX_RECREATES" ]; then
+      oracle_db_fail "oracle-db crash-looping after $_oracle_db_recreates pod recreations"
     fi
-    _xe_recreates=$(( _xe_recreates + 1 ))
-    echo "  oracle-xe crash-looping (restarts=$_xe_restarts) — recreating the pod for a fresh sandbox ($_xe_recreates/$_XE_MAX_RECREATES)"
-    kubectl -n "$NS" delete pod -l app=oracle-xe --wait=false >/dev/null 2>&1 || true
+    _oracle_db_recreates=$(( _oracle_db_recreates + 1 ))
+    echo "  oracle-db crash-looping (restarts=$_oracle_db_restarts) — recreating the pod for a fresh sandbox ($_oracle_db_recreates/$_ORACLE_DB_MAX_RECREATES)"
+    kubectl -n "$NS" delete pod -l app=oracle-db --wait=false >/dev/null 2>&1 || true
     sleep 20
   fi
   sleep 15
 done
-
-# --- 6. Vault init/seed (KV v1 + OAuth + AS-allowlist) ------------------------------
-echo "==> [6/11] seed Vault (KV v1 conversion + OAuth + AS allow-list — by reference, D5)"
-NS="$NS" bash "$PROOF_DIR/seed-vault.sh"
 
 # --- 7. helm install (prod profile; migrations OFF; digest-pinned canonical images) -
 echo "==> [7/11] install the AgentOS chart under the proof-m85c overlay + the proof canonical refs"
@@ -2986,8 +3158,8 @@ echo "    schema readback OK: alembic head 0021; 0016/0017 foundations + D2 shap
 pack_fail() {
   # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left
   # NO diagnostics — the cluster was torn down before anything was captured).
-  # Mirrors the xe_fail/backends_fail shape; includes INIT-container logs
-  # (wait-for-xe) + previous-instance logs so a crash loop or a stuck init
+  # Mirrors the oracle_db_fail/backends_fail shape; includes init-container logs
+  # (wait-for-oracle-db) + previous-instance logs so a crash loop or stuck init
   # is diagnosable post-teardown.
   local where="$1"
   echo "FAIL: oracle-pack/AS ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
@@ -2995,7 +3167,7 @@ pack_fail() {
   pods="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
   desc="$(kubectl -n "$NS" describe pod -l app=proof-oracle-pack 2>&1 | tail -100 || true)"
   logs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --all-containers --tail=100 2>&1 || true)"
-  initlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack -c wait-for-xe --tail=40 2>&1 || true)"
+  initlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack -c wait-for-oracle-db --tail=40 2>&1 || true)"
   prevlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --previous --tail=60 2>&1 || true)"
   aslogs="$(kubectl -n "$NS" logs -l app=proof-as --tail=60 2>&1 || true)"
   {
@@ -3006,7 +3178,7 @@ pack_fail() {
     echo "- deploys/pods:"; echo '\`\`\`'; echo "$pods"; echo '\`\`\`'
     echo "- oracle-pack describe (tail):"; echo '\`\`\`'; echo "$desc"; echo '\`\`\`'
     echo "- oracle-pack logs (all containers, tail):"; echo '\`\`\`'; echo "$logs"; echo '\`\`\`'
-    echo "- wait-for-xe init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
+    echo "- wait-for-oracle-db init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
     echo "- oracle-pack previous-instance logs (tail):"; echo '\`\`\`'; echo "$prevlogs"; echo '\`\`\`'
     echo "- proof-as logs (tail):"; echo '\`\`\`'; echo "$aslogs"; echo '\`\`\`'
   } >> docs/VALIDATION-RESULTS.md
@@ -3276,7 +3448,7 @@ kubectl -n "$NS" exec "$_BFF_POD0" -- sh -c 'test -r /etc/harness-tls/tls.key' \
 echo "  BFF custody OK: runs as uid 10001 and can read its own TLS private key (fsGroup honoured)"
 
 # ============================ SETUP (M4 governed install) ==========================
-# Operator-install the DLP-governed ORACLE tool v0.4.0 through the lifecycle
+# Operator-install the DLP-governed ORACLE tool v0.5.1 through the lifecycle
 # M4/M5/M6: the full governed lifecycle via the REAL API. Identity is now REAL
 # OIDC — the author/reviewer/operator steps each ride that user's Keycloak access
 # token (api() mints it via the scripted PKCE flow), verified by the reference
@@ -5591,4 +5763,179 @@ assert_http_reason "BAR G.5 index one" "$G_ORIGINATOR1" four_eyes_approver_not_d
   || bar_fail "BAR G.5 maker-checker refusals moved the ledger"
 echo "  Bar G.5 OK: scope-holding originator refused at index 0 (originator_cannot_approve) and index 1 (four_eyes_approver_not_distinct); normal scopes restored"
 echo "PROOF M8.5-C (BAR G) PASS"
-echo "PROOF M8.5-C (BARS A-G) PASS"
+
+# ============================ BAR H — credential brokerage ========================
+# D3: the Oracle app credential exists only in Vault -> ESO -> a read-only mounted
+# file; a governed query reports the file's non-secret rotation reference, the
+# kernel chains that same reference, and Oracle's own unified trail carries a
+# deterministic reference to the exact Keycloak subject the kernel authorized.
+# Rotation is live: the new credential succeeds, the reference changes, and the
+# old credential dies. The independent approval-probe ledger must not move.
+echo "==> BAR H — ESO file credential, DB-native attribution, and live rotation"
+H_LEDGER0="$(probe_ledger_count)"
+
+# H.0 — inspect the deployed object, not its source YAML. There is no plaintext
+# env channel; only the file path + read-only Secret projection may remain. ESO's
+# own Ready condition and the target Secret's existence prove materialization.
+set +e
+H_DEPLOY_JSON="$(kubectl_capture -n "$NS" get deploy/proof-oracle-pack -o json)"
+H_DEPLOY_RC=$?
+set -e
+[ "$H_DEPLOY_RC" -eq 0 ] \
+  || bar_fail "BAR H.0 could not read the deployed oracle-pack shape"
+set +e
+printf '%s' "$H_DEPLOY_JSON" | python3 -c '
+import json, sys
+
+doc = json.load(sys.stdin)
+containers = doc["spec"]["template"]["spec"]["containers"]
+assert len(containers) == 1, "container_count_mismatch"
+container = containers[0]
+env = {entry["name"]: entry for entry in container.get("env", [])}
+password_env_name = "COGNIC_ORACLE_" + "PASSWORD"
+assert password_env_name not in env, "plaintext_password_env_present"
+assert env.get("COGNIC_ORACLE_PASSWORD_FILE") == {
+    "name": "COGNIC_ORACLE_PASSWORD_FILE",
+    "value": "/var/run/cognic/oracle/password",
+}, "password_file_env_mismatch"
+mounts = {entry["name"]: entry for entry in container.get("volumeMounts", [])}
+assert mounts.get("oracle-credential") == {
+    "name": "oracle-credential",
+    "mountPath": "/var/run/cognic/oracle",
+    "readOnly": True,
+}, "credential_mount_mismatch"
+volumes = {
+    entry["name"]: entry for entry in doc["spec"]["template"]["spec"].get("volumes", [])
+}
+secret = volumes.get("oracle-credential", {}).get("secret", {})
+assert secret.get("secretName") == "oracle-app-credential", "credential_secret_mismatch"
+' >/dev/null
+H_DEPLOY_SHAPE_RC=$?
+set -e
+[ "$H_DEPLOY_SHAPE_RC" -eq 0 ] \
+  || bar_fail "BAR H.0 deployed oracle-pack custody shape did not match the file-only contract"
+kubectl -n "$NS" wait --for=condition=Ready externalsecret/oracle-app-credential --timeout=120s \
+  >/dev/null || bar_fail "BAR H.0 ExternalSecret was not Ready"
+kubectl -n "$NS" get secret oracle-app-credential >/dev/null \
+  || bar_fail "BAR H.0 ESO target Secret does not exist"
+echo "  Bar H.0 OK: deployed pack has file-only custody; ESO Ready; target Secret materialized"
+
+# H.1 — one fresh governed NL->SQL turn. The caller-visible wire reference must
+# equal the newest successful run_readonly_query dispatch row for that exact run.
+H_QUERY1="$(governed_rotation_query amir)"
+IFS=$'\t' read -r H_RUN1 H_WIRE_REF1 <<<"$H_QUERY1"
+[ -n "$H_RUN1" ] && [ -n "$H_WIRE_REF1" ] \
+  || bar_fail "BAR H.1 governed query returned no run/reference pair"
+H_CHAIN_REF1="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN1' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'scope_id'='retail_analytics' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
+[ -n "$H_CHAIN_REF1" ] \
+  || bar_fail "BAR H.1 the governed run carried no credential rotation reference in chain evidence"
+[ "$H_WIRE_REF1" = "$H_CHAIN_REF1" ] \
+  || bar_fail "BAR H.1 wire and chain credential rotation references differ"
+echo "  Bar H.1 OK: governed query succeeded and its wire rotation reference equals the chain row"
+
+# H.2 — recompute the audit reference from the IdP-owned subject source. The
+# value is never read from an app response or the audit row itself. Poll the
+# unified trail for the exact proxy/user/client triple for the view H.1 queried;
+# the pinned Free image exposes no DBMS_AUDIT_MGMT flush procedure. DBUSERNAME
+# is the proxy identity; DBPROXY_USERNAME is the app user.
+H_BOUND_SUBJECT="$(bound_subject analyst.amir)"
+H_SUBJECT_REF="$(printf '%s' "$H_BOUND_SUBJECT" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode("utf-8")).hexdigest())')"
+[[ "$H_SUBJECT_REF" =~ ^[0-9a-f]{64}$ ]] \
+  || bar_fail "BAR H.2 runner subject-reference recomputation was not 64 lowercase hex"
+H_AUDIT_DEADLINE=$(( $(date +%s) + 60 ))
+H_AUDIT_ROW=""
+while [ -z "$H_AUDIT_ROW" ]; do
+  set +e
+  H_AUDIT_ROW="$(oracle_admin_sql "SELECT DBUSERNAME || '|' || NVL(DBPROXY_USERNAME, '') || '|' || CLIENT_IDENTIFIER
+  FROM UNIFIED_AUDIT_TRAIL
+ WHERE UNIFIED_AUDIT_POLICIES LIKE '%D3_GOVERNED_SELECTS%'
+   AND ACTION_NAME = 'SELECT'
+   AND OBJECT_SCHEMA = 'RETAIL_ANALYTICS'
+   AND OBJECT_NAME = 'V_CUSTOMER_PROFILE'
+   AND CLIENT_IDENTIFIER = '$H_SUBJECT_REF'
+ ORDER BY EVENT_TIMESTAMP_UTC DESC
+ FETCH FIRST 1 ROW ONLY;")"
+  H_AUDIT_RC=$?
+  set -e
+  [ "$H_AUDIT_RC" -eq 0 ] \
+    || bar_fail "BAR H.2 unified-audit readback failed"
+  H_AUDIT_ROW="$(printf '%s\n' "$H_AUDIT_ROW" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tail -n 1)"
+  [ -n "$H_AUDIT_ROW" ] && break
+  [ "$(date +%s)" -lt "$H_AUDIT_DEADLINE" ] \
+    || bar_fail "BAR H.2 unified-audit row was not observable within 60s"
+  sleep 2
+done
+[ "$H_AUDIT_ROW" = "AN_AMIR|COGNIC|$H_SUBJECT_REF" ] \
+  || bar_fail "BAR H.2 unified audit did not carry the exact proxy/user/subject-reference triple"
+echo "  Bar H.2 OK: Oracle unified audit correlates AN_AMIR through COGNIC to sha256(bound_subject)"
+
+# H.3 — rotate in the authenticator first, then Vault. The new credential rides
+# SQL*Plus/Vault stdin only. Wait for ESO to update the target Secret and for the
+# kubelet projection window before the next governed query reads the file. That
+# query's reference must change; the original credential must then fail ORA-01017.
+H_SECRET_RV1="$(kubectl -n "$NS" get secret oracle-app-credential -o jsonpath='{.metadata.resourceVersion}')"
+[ -n "$H_SECRET_RV1" ] || bar_fail "BAR H.3 target Secret has no resourceVersion baseline"
+H_PASSWORD2="$(openssl rand -hex 24)"
+[ -n "$H_PASSWORD2" ] && [ "$H_PASSWORD2" != "$ORACLE_APP_PASSWORD" ] \
+  || bar_fail "BAR H.3 could not mint a distinct replacement credential"
+set +e
+oracle_admin_sql "ALTER USER cognic IDENTIFIED BY \"$H_PASSWORD2\";" >/dev/null
+H_ALTER_RC=$?
+set -e
+[ "$H_ALTER_RC" -eq 0 ] \
+  || bar_fail "BAR H.3 Oracle rejected the credential rotation"
+set +e
+printf '%s' "$H_PASSWORD2" | kubectl_capture -n "$NS" exec -i deploy/vault -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=smoke-root-token \
+  vault kv put "secret/cognic/$TENANT/oracle-app" password=- >/dev/null
+H_VAULT_ROTATE_RC=$?
+set -e
+[ "$H_VAULT_ROTATE_RC" -eq 0 ] \
+  || bar_fail "BAR H.3 Vault rejected the replacement credential"
+kubectl -n "$NS" annotate externalsecret/oracle-app-credential \
+  force-sync="$(date +%s)" --overwrite >/dev/null \
+  || bar_fail "BAR H.3 could not force an ESO reconciliation"
+H_SECRET_DEADLINE=$(( $(date +%s) + 120 ))
+H_SECRET_RV2="$H_SECRET_RV1"
+while [ "$H_SECRET_RV2" = "$H_SECRET_RV1" ]; do
+  [ "$(date +%s)" -lt "$H_SECRET_DEADLINE" ] \
+    || bar_fail "BAR H.3 ESO did not update the target Secret within 120s"
+  sleep 3
+  H_SECRET_RV2="$(kubectl -n "$NS" get secret oracle-app-credential -o jsonpath='{.metadata.resourceVersion}')"
+done
+# Kubernetes projected Secret volumes update asynchronously after the Secret
+# object. Wait one bounded sync window; the next observation is still the pack's
+# own fresh read, never an exec into its mount.
+sleep 75
+H_QUERY2="$(governed_rotation_query amir)"
+IFS=$'\t' read -r H_RUN2 H_WIRE_REF2 <<<"$H_QUERY2"
+[ -n "$H_RUN2" ] && [ -n "$H_WIRE_REF2" ] \
+  || bar_fail "BAR H.3 post-rotation query returned no run/reference pair"
+H_CHAIN_REF2="$(PSQL "SELECT payload->>'credential_rotation_ref' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.dispatch' AND payload->>'run_id'='$H_RUN2' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'scope_id'='retail_analytics' AND payload->>'credential_rotation_ref' IS NOT NULL ORDER BY sequence DESC LIMIT 1;")"
+[ "$H_WIRE_REF2" = "$H_CHAIN_REF2" ] \
+  || bar_fail "BAR H.3 post-rotation wire and chain references differ"
+[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ] \
+  || bar_fail "BAR H.3 the governed query did not observe a changed credential rotation reference"
+set +e
+H_OLD_PASSWORD_OUT="$(oracle_proxy_sql AN_AMIR 'SELECT 1 FROM dual;' "$ORACLE_APP_PASSWORD")"
+H_OLD_PASSWORD_RC=$?
+set -e
+[ "$H_OLD_PASSWORD_RC" -ne 0 ] && grep -q "ORA-01017" <<<"$H_OLD_PASSWORD_OUT" \
+  || bar_fail "BAR H.3 the original credential did not fail with ORA-01017"
+echo "  Bar H.3 OK: rotated query succeeded with a changed reference; original credential is dead"
+
+# H.4 — the new substrate retains the database grant boundary. AN_SARA owns
+# cards/retail views, not FIN; a direct proxy-session SELECT against FIN must die
+# at Oracle with ORA-00942. None of H may touch the independent approval probe.
+set +e
+H_SCOPE_OUT="$(oracle_proxy_sql AN_SARA 'SELECT COUNT(*) FROM fin.v_gl_balances;' "$H_PASSWORD2")"
+H_SCOPE_RC=$?
+set -e
+[ "$H_SCOPE_RC" -ne 0 ] && grep -q "ORA-00942" <<<"$H_SCOPE_OUT" \
+  || bar_fail "BAR H.4 AN_SARA cross-scope reach did not fail with ORA-00942"
+[ "$(probe_ledger_count)" = "$H_LEDGER0" ] \
+  || bar_fail "BAR H.4 credential/attribution work moved the independent approval-probe ledger"
+unset H_PASSWORD2 ORACLE_APP_PASSWORD H_OLD_PASSWORD_OUT H_SCOPE_OUT
+echo "  Bar H.4 OK: Oracle retained the cross-scope ORA-00942 backstop; probe ledger unchanged"
+echo "PROOF M8.5-C (BAR H) PASS"
+echo "PROOF M8.5-C (BARS A-H) PASS"

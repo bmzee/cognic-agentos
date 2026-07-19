@@ -22,6 +22,7 @@ import ast
 import dataclasses
 import hashlib
 import json
+import logging
 import pathlib
 import re
 import time
@@ -1179,6 +1180,88 @@ class TestDispatchFailure:
 
 
 class TestDispatchEvidence:
+    async def test_valid_credential_rotation_ref_is_lifted_verbatim(self) -> None:
+        rotation_ref = "2026-07-18T00:00:00+00:00"
+        h = _harness(
+            proxy_result={
+                "rows": [],
+                "credential_rotation_ref": rotation_ref,
+            }
+        )
+
+        await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        payload = _only_row(h).payload
+        assert payload["credential_rotation_ref"] == rotation_ref
+        assert set(payload) == set(_EXPECTED_PAYLOAD_KEYS) | {"credential_rotation_ref"}
+
+    async def test_absent_credential_rotation_ref_is_omitted(self) -> None:
+        h = _harness(proxy_result={"rows": []})
+
+        await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert "credential_rotation_ref" not in _only_row(h).payload
+
+    @pytest.mark.parametrize(
+        "rotation_ref",
+        [
+            pytest.param(7, id="non-string"),
+            pytest.param("x" * 65, id="over-bound"),
+            pytest.param("2026-07-18\nrotated", id="non-printable"),
+        ],
+    )
+    async def test_malformed_credential_rotation_ref_is_omitted_and_logged_once(
+        self,
+        rotation_ref: object,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        h = _harness(
+            proxy_result={
+                "rows": [],
+                "credential_rotation_ref": rotation_ref,
+            }
+        )
+
+        with caplog.at_level(logging.INFO, logger=dispatch_module.__name__):
+            await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert "credential_rotation_ref" not in _only_row(h).payload
+        ignored = [
+            record
+            for record in caplog.records
+            if record.getMessage() == "agent.dispatch_rotation_ref_ignored"
+        ]
+        assert len(ignored) == 1
+        assert rotation_ref not in tuple(vars(ignored[0]).values())
+
+    async def test_refusal_and_pending_rows_never_carry_credential_rotation_ref(self) -> None:
+        refused = _harness(proxy_exc=RuntimeError("dispatch failed"))
+        await refused.dispatcher.dispatch(
+            call=_call("other_tool"),
+            step_index=0,
+            run=_run(),
+        )
+
+        pending_id = str(uuid.uuid4())
+        pending = _harness(
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_entitled=True,
+            proxy_exc=dispatch_module.AgentToolApprovalPending(
+                approval_request_id=pending_id,
+                flow="require_assigned",
+            ),
+        )
+        await pending.dispatcher.dispatch(
+            call=_call("other_tool"),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert _only_row(refused).payload["outcome"] == "refused"
+        assert "credential_rotation_ref" not in _only_row(refused).payload
+        assert _only_row(pending).payload["outcome"] == "pending_approval"
+        assert "credential_rotation_ref" not in _only_row(pending).payload
+
     async def test_ok_row_exact_key_set_digest_only(self) -> None:
         args_canary = "CANARY-ARGS-VALUE"
         result_canary = "CANARY-RESULT-VALUE"

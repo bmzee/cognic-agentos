@@ -23,6 +23,19 @@
 > bank-owned 3-of-3 assignment, direct-MCP consume-once, and maker-checker
 > exclusion. The historical run-20 record above remains unchanged.
 
+> **D3 credential-brokerage extension (2026-07-18): PASSED LIVE.** Attempt 7
+> completed on `kind` with exit 0 and printed `PROOF M8.5-C (BARS A-H) PASS`.
+> The clean AgentOS anchor/proof revision was
+> `88e5cabd56ba3d5488cee5a14f94e0dd3cf5ad2b`; the separately built, signed,
+> and verified Cognic Harness revision remained
+> `4dc64cccb5c3a591f1a4e40885e2f58ad37f075c`. The operator-held 969-line log
+> has SHA-256
+> `4c99b9ff291fd9bfde8195c83faf8743ce81f599b417ddf99a7c6cfb75419135`
+> and is deliberately not committed. Bars A-G re-passed. Bar H proved
+> file-only Oracle credential custody through ESO, wire-to-chain rotation
+> reference equality, DB-native human attribution, live rotation with the old
+> credential dead, and the retained `ORA-00942` scope boundary.
+
 ## What the passing run proved
 
 M8.5-C stands up the **Cognic Harness v1** — a same-origin BFF (`cognic-harness`
@@ -130,16 +143,28 @@ of a deployed AgentOS kernel, and proves the **harness boundary** and the
   `originator_cannot_approve` and at index 1 with the byte-stable
   `four_eyes_approver_not_distinct`, after which the normal scope set is
   restored.
+- **Bar H — injected credential, attribution, and rotation.** The deployed
+  Oracle pack receives only `COGNIC_ORACLE_PASSWORD_FILE`, backed by an
+  ESO-materialized Secret; no plaintext password environment variable or
+  repository fallback exists. A governed query's `credential_rotation_ref`
+  is identical on the wire and its `agent.run.dispatch` chain row. Oracle
+  unified audit records `AN_AMIR` through proxy user `COGNIC` with
+  `CLIENT_IDENTIFIER` equal to the runner's independent SHA-256 recomputation
+  of Amir's issuer-qualified Keycloak subject. A live credential rotation
+  changes the reference, the new credential succeeds, and the original dies
+  with `ORA-01017`. Sara's cross-scope query remains blocked by `ORA-00942`,
+  and the independent approval-probe ledger is unchanged throughout.
 
 ## Topology (spec §5.1)
 
-The proven M8/M8.5 conversational stack (kernel proof app, oracle pack + XE + AS,
-LiteLLM→cloud, Postgres) **plus**: Keycloak (pinned `26.2` digest, per-run realm
-import, ten generated identities — nothing committed), a dedicated TLS session
-Redis (BFF-only ACL, persistence off), **two** harness BFF replicas behind one
-Service, and the approval-probe MCP Service. AgentOS terminates TLS itself; the
-whole human-identity path runs HTTPS under one per-run proof CA with no
-`verify=False`/`-k` anywhere.
+The proven M8/M8.5 conversational stack (kernel proof app, Oracle pack + Oracle
+Free 23ai + AS, LiteLLM→cloud, Postgres) **plus**: Keycloak (pinned `26.2`
+digest, per-run realm import, ten generated identities — nothing committed), a
+dedicated TLS session Redis (BFF-only ACL, persistence off), **two** harness BFF
+replicas behind one Service, the approval-probe MCP Service, and a pinned
+External Secrets Operator deployment that materializes the proof Oracle
+credential from Vault. AgentOS terminates TLS itself; the whole human-identity
+path runs HTTPS under one per-run proof CA with no `verify=False`/`-k` anywhere.
 
 ## The TLS matrix — and the one disclosed exception
 
@@ -159,12 +184,13 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
    cluster work and fails with the installed version.
 2. `COGNIC_RUN_PROOF_M85C=1` + the operator's cloud provider key
    (`COGNIC_PROOF_M85C_TIER1_API_KEY`).
-3. **The D-S1 pack releases and rotated trust roots are COMMITTED pins.**
-   `cognic-tool-oracle-schema@v0.4.0` and
+3. **The current pack releases and trust roots are COMMITTED pins.**
+   `cognic-tool-oracle-schema@v0.5.1` and
    `cognic-tool-approval-probe@v0.2.0` carry the per-tool capability
-   declarations required by the fail-closed dispatcher. Their wheel and
-   `cosign.pub` digests are MAINTAINER-committed literals in `stage-packs.sh`;
-   both public-key pins changed with these releases.
+   declarations required by the fail-closed dispatcher; Oracle `v0.5.1` also
+   carries the file-credential and deterministic audit-subject-reference
+   contract. Their wheel and `cosign.pub` digests are MAINTAINER-committed
+   literals in `stage-packs.sh`.
 
    This is deliberately **not** an operator-exported environment variable. *A pin
    the person running the proof supplies at run time is not a pin*: they could swap
@@ -184,23 +210,32 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
    recall to refuse `tool_approval_consumed` without moving the independent
    ledger. The historical Bar-D run predates this D2 change and remains a record
    of the then-current replayable contract.
-2. The harness-PR-CI **kernel fake never counts as milestone evidence** — the
+2. **Compounding D3 honesty boundary.** Per-scope identity + no-VPD together
+   mean user-level authorization has NO database backstop within a scope — the
+   kernel entitlement gate is the only line there; scope boundaries retain the
+   `ORA-00942` engine backstop; the upgrade path (per-user proxy identities; VPD
+   on an EE estate) is an overlay decision.
+3. **Bar H does not prove a per-query credential lease.** The ruled D3 profile
+   uses a rotated file credential, not a query-bound Vault/PAM lease.
+4. **Bar H's store authentication is proof posture.** The in-cluster
+   SecretStore uses Vault's dev token; bank deployment requires its own
+   workload-identity and store-authentication hardening.
+5. **Conversation-correlated auto-execution is not live-proven here.** D2's
+   executor/system-turn path is unit/e2e-proven, but Bars G/H do not replace
+   D5's external action agent and released write pack.
+6. The harness-PR-CI **kernel fake never counts as milestone evidence** — the
    real-kernel `kind` proof is the authority.
-3. **HP-2 remains open per bank** (issuer, claim mapping, assurance level,
+7. **HP-2 remains open per bank** (issuer, claim mapping, assurance level,
    accepted FAPI profile). The reference binder is a worked example, not a
    shipped bank overlay.
-4. **Conversation-correlated auto-execution is not live-proven here.** D2's
-   executor/system-turn path is unit/e2e-proven, but BAR G uses the direct-MCP
-   probe. The live write + system-turn bar needs D5's external action agent and
-   released write pack.
-5. Any plaintext proof-internal MCP transport is disclosed explicitly (above).
-6. The M8.5-C baseline is **RFC 9700**; full **FAPI 2.0** is the bank-deployment
+8. Any plaintext proof-internal MCP transport is disclosed explicitly (above).
+9. The M8.5-C baseline is **RFC 9700**; full **FAPI 2.0** is the bank-deployment
    target — nothing here is called FAPI conformant. The realm pins the RFC 9068
    `at+jwt` **header type** only, not the full RFC 9068 claim profile.
-7. **NOT PILOT-READY.** M8.5-C proves the harness boundary and the approvals
-   surface only. Still outstanding before any pilot: HP-5, erasure,
-   content-safety/escalation hooks, data-access brokerage (M8.5-D/E), full FAPI
-   2.0 or a formally accepted equivalent, and D5's live write proof.
+10. **NOT PILOT-READY.** This proof does not close M8.5-D. D4's AKS deployment,
+    D5's write pack and live auto-execution/system-turn proof, erasure,
+    content-safety/escalation hooks, and the bank's FAPI/equivalent and
+    credential-store posture remain forward gates.
 
 ### M8.5-C-specific proof-staging disclosures
 
@@ -481,17 +516,20 @@ COGNIC_PROOF_M85C_TIER1_API_KEY=<operator key> \
 (The probe's two trust digests are **not** environment variables — they are
 maintainer-committed literals in `stage-packs.sh`; see prerequisite 2.)
 
-On all-pass it prints `PROOF M8.5-C (BARS A-G) PASS` and exits 0; on any bar
+On all-pass it prints `PROOF M8.5-C (BARS A-H) PASS` and exits 0; on any bar
 failure it captures diagnostics to `docs/VALIDATION-RESULTS.md` and exits
 non-zero — the proof is never redefined downward.
 
-## What carries forward from proof-m8/m85 (byte-for-byte)
+## What carries forward from proof-m8/m85
 
-The kernel + agent bring-up is the proven M8/M8.5 deployment verbatim: the same
-seven released, signed packs (oracle tool operator-installed via the M4
-lifecycle; the four instruction skills; the bank-analyst agent pack with its dual
-trust root; the M5 hook pack the oracle manifest requires), the same
-seven-signer trust-root staging, the same in-cluster Oracle XE + RS256/JWKS AS +
+The kernel + agent bring-up retains the proven M8/M8.5 deployment shape, with
+D3 deliberately replacing Oracle XE with digest-pinned Oracle Free 23ai and
+adding ESO file injection: the same seven released, signed packs (oracle tool
+operator-installed via the M4 lifecycle; the four instruction skills; the
+bank-analyst agent pack with its dual trust root; the M5 hook pack the oracle
+manifest requires), the same
+seven-signer trust-root staging, the same in-cluster RS256/JWKS AS +
 LiteLLM cloud tier, the same seed matrix, and the conversation substrate the
-chat screen drives. M8.5-C adds only the identity/TLS/approvals surface above —
-`protocol/mcp_authz.py` stays byte-identical to `main`.
+chat screen drives. M8.5-C adds the identity/TLS/approvals surface above; D3 adds
+the Oracle Free/ESO credential surface. `protocol/mcp_authz.py` stays
+byte-identical to `main`.

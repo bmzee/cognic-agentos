@@ -1,0 +1,52 @@
+# infra/proof-m85c/manifests/oracle-db.yaml - in-cluster Oracle Free.
+# The oracle-db-seed ConfigMap is created by run-proof-m85c.sh from
+# oracle-seed/seed_schema.sql (single source of truth; no embedded copy).
+#
+# Image provenance (resolved 2026-07-18 from gvenzl/oracle-free:23-slim):
+# manifest-list sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
+# spans linux/amd64 + linux/arm64. The live product banner was:
+# Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free
+#
+# gvenzl runs every *.sql in /container-entrypoint-initdb.d once on first boot
+# as an administrator in the root container. The seed switches into FREEPDB1,
+# creates the analytics schemas/views, and provisions the proxy identities.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: oracle-db, labels: { app: oracle-db } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: oracle-db } }
+  template:
+    metadata: { labels: { app: oracle-db } }
+    spec:
+      containers:
+      - name: oracle-db
+        image: gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 1521 }]
+        env:
+        - { name: ORACLE_PASSWORD, value: "proof_admin_only" }
+        # NO ORACLE_DATABASE: FREEPDB1 is the image's built-in PDB. Setting
+        # ORACLE_DATABASE would request another PDB instead of selecting it.
+        - { name: APP_USER, value: "cognic" }
+        - name: APP_USER_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: oracle-app-credential, key: password }
+        volumeMounts:
+        - { name: seed, mountPath: /container-entrypoint-initdb.d }
+        readinessProbe:
+          exec: { command: ["/bin/sh", "-c", "healthcheck.sh"] }
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 40
+      volumes:
+      - name: seed
+        configMap: { name: oracle-db-seed }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: oracle-db }
+spec:
+  selector: { app: oracle-db }
+  ports: [{ port: 1521, targetPort: 1521 }]

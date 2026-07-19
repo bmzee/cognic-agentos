@@ -124,6 +124,28 @@ _AGENT_DISPATCH_ISO_CONTROLS: tuple[str, ...] = ()
 _AGENT_TOOL_REQUEST_ID_PREFIX: Final[str] = "agent-tool-"
 _AGENT_DISPATCH_REQUEST_ID_PREFIX: Final[str] = "agent-dispatch-"
 
+#: Maximum accepted length for the pack-authored, non-secret rotation marker.
+_ROTATION_REF_MAX: Final[int] = 64
+
+
+def _extract_rotation_ref(result: dict[str, Any] | None) -> str | None:
+    """Lift a bounded, printable pack-reported credential rotation marker.
+
+    The result envelope is untrusted pack-authored data. Invalid values are
+    omitted from evidence instead of changing the dispatch outcome.
+    """
+    if not isinstance(result, dict):
+        return None
+    value = result.get("credential_rotation_ref")
+    if not isinstance(value, str) or not value or len(value) > _ROTATION_REF_MAX:
+        if value is not None:
+            logger.info("agent.dispatch_rotation_ref_ignored")
+        return None
+    if not all(32 <= ord(character) < 127 for character in value):
+        logger.info("agent.dispatch_rotation_ref_ignored")
+        return None
+    return value
+
 
 # --- Dispatch contract types (they ARE the contract — the AgentPolicyInput
 # --- precedent at core/agent/policy.py) ---------------------------------------
@@ -630,6 +652,7 @@ class AgentDispatcher:
             )
 
         # --- 7. Evidence + ok.
+        rotation_ref = _extract_rotation_ref(result)
         await self._emit_dispatch(
             run=run,
             step_index=step_index,
@@ -640,6 +663,7 @@ class AgentDispatcher:
             capability_ref=resolved.ref,
             scope_id=scope_id,
             result=result,
+            credential_rotation_ref=rotation_ref,
         )
         return DispatchOutcome(refused=False, reason=None, message=None, result=result)
 
@@ -711,6 +735,7 @@ class AgentDispatcher:
         scope_id: str | None,
         result: dict[str, Any] | None,
         approval_request_id: str | None = None,
+        credential_rotation_ref: str | None = None,
     ) -> None:
         """The ONE ``agent.run.dispatch`` evidence row per dispatch, on EVERY
         arm. Digest-only per ADR-027 §f: sha256 digests + canonical byte
@@ -743,6 +768,8 @@ class AgentDispatcher:
         }
         if approval_request_id is not None:
             payload["approval_request_id"] = approval_request_id
+        if credential_rotation_ref is not None:
+            payload["credential_rotation_ref"] = credential_rotation_ref
         await self._decision_history.append(
             DecisionRecord(
                 decision_type="agent.run.dispatch",

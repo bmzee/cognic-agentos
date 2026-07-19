@@ -74,6 +74,9 @@ _PKCE = _PROOF / "keycloak" / "pkce_login.py"
 _ASSERT_CLAIM = _PROOF / "keycloak" / "assert_claim_contract.py"
 _MINT_PKI = _PROOF / "mint-pki.sh"
 _KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
+_ORACLE_DB_YAML = _PROOF / "manifests" / "oracle-db.yaml"
+_ORACLE_PACK_YAML = _PROOF / "manifests" / "oracle-pack.yaml"
+_ORACLE_SEED = _PROOF / "oracle-seed" / "seed_schema.sql"
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -111,6 +114,53 @@ def test_identity_scripts_are_executable() -> None:
 
     for path in (_RUNNER, _MINT_PKI, _GEN_REALM, _PKCE, _ASSERT_CLAIM):
         assert os.access(path, os.X_OK), f"{path.name} is not executable"
+
+
+# --- Oracle Free substrate (D3 Task 8) -------------------------------------------
+
+
+def test_oracle_free_substrate_is_multi_arch_digest_pinned() -> None:
+    text = _ORACLE_DB_YAML.read_text()
+    image = re.search(r"image:\s*(gvenzl/oracle-free@sha256:[0-9a-f]{64})", text)
+
+    assert image is not None, "Oracle Free must use an immutable manifest-list digest"
+    assert (
+        image.group(1) == "gvenzl/oracle-free@sha256:"
+        "fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8"
+    )
+    assert "Oracle AI Database 26ai Free Release 23.26.2.0.0" in text
+    assert re.search(r"name:\s*ORACLE_DATABASE\b", text) is None
+    assert "FREEPDB1" in text
+
+
+def test_oracle_free_names_and_dsn_replace_xe_everywhere_live() -> None:
+    assert not (_PROOF / "manifests" / "oracle-xe.yaml").exists()
+    assert _ORACLE_DB_YAML.is_file()
+
+    live_text = "\n".join(
+        [
+            _RUNNER.read_text(),
+            *(path.read_text() for path in sorted((_PROOF / "manifests").glob("*.yaml"))),
+        ]
+    )
+    assert "oracle-xe" not in live_text
+    assert "wait-for-xe" not in live_text
+    assert "XEPDB1" not in live_text
+    assert "oracle-db:1521/FREEPDB1" in _ORACLE_PACK_YAML.read_text()
+    assert "nc -z oracle-db 1521" in _ORACLE_PACK_YAML.read_text()
+    assert "ALTER SESSION SET CONTAINER = FREEPDB1;" in _ORACLE_SEED.read_text()
+
+
+def test_runner_prepulls_and_applies_the_pinned_oracle_free_substrate() -> None:
+    text = _RUNNER.read_text()
+    pinned = (
+        "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8"
+    )
+
+    assert pinned in text
+    assert "create configmap oracle-db-seed" in text
+    assert "manifests/oracle-db.yaml" in text
+    assert "app=oracle-db" in text
 
 
 # --- no fallback (spec §4) ---------------------------------------------------------
