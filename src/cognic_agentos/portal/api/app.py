@@ -1804,10 +1804,14 @@ def create_app(
     # Eval judge surface (ADR-010 — first gateway consumer). Unconditional:
     # the gateway is always built by build_runtime; the route's DI fails closed
     # 503 until app.state.llm_gateway is populated. Lazy import.
+    from cognic_agentos.llm.gateway import resolve_tier_alias
     from cognic_agentos.portal.api.evaluation.routes import build_eval_routes
 
     app.include_router(
-        build_eval_routes(eval_judge_tier=settings.eval_judge_tier),
+        build_eval_routes(
+            eval_judge_tier=settings.eval_judge_tier,
+            eval_judge_model_alias=resolve_tier_alias(settings.eval_judge_tier, settings),
+        ),
         prefix="/api/v1/eval",
         tags=["eval"],
     )

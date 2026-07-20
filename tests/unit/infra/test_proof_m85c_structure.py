@@ -77,6 +77,10 @@ _KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
 _ORACLE_DB_YAML = _PROOF / "manifests" / "oracle-db.yaml"
 _ORACLE_PACK_YAML = _PROOF / "manifests" / "oracle-pack.yaml"
 _ORACLE_SEED = _PROOF / "oracle-seed" / "seed_schema.sql"
+_ORACLE_SAMPLE_ADAPTER = _PROOF / "oracle-seed" / "adapt_sh_populate.py"
+_ORACLE_SAMPLE_LOADER = _PROOF / "oracle-seed" / "load_sh_csv.sh"
+_GOLDEN_SEED_VERIFIER = _PROOF / "oracle-seed" / "verify_golden_seed.py"
+_GOLDEN_FACTS = _PROOF / "oracle-seed" / "golden_fact_checks.json"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
 
 
@@ -321,7 +325,7 @@ def _new_kernel_scope_rows() -> dict[str, tuple[set[str], str]]:
     return rows
 
 
-def test_runner_pins_and_stages_official_v233_sample_scripts_in_init_order() -> None:
+def test_runner_pins_and_stages_official_v233_sample_assets_in_two_phases() -> None:
     text = _RUNNER.read_text()
     assert _SAMPLE_SCHEMA_URL in text
     assert _SAMPLE_SCHEMA_SHA256 in text
@@ -337,10 +341,67 @@ def test_runner_pins_and_stages_official_v233_sample_scripts_in_init_order() -> 
         "sales_history/sh_populate.sql",
     ):
         assert source in text, f"official sample source not staged: {source}"
+    for source in (
+        "sales_history/costs.csv",
+        "sales_history/customers.csv",
+        "sales_history/promotions.csv",
+        "sales_history/sales.csv",
+        "sales_history/times.csv",
+        "sales_history/supplementary_demographics.csv",
+    ):
+        assert source in text, f"official sample CSV not staged: {source}"
     positions = [text.index(f"--from-file={name}=") for name in _SAMPLE_INIT_FILES]
     assert positions == sorted(positions), "initdb scripts must be staged lexicographically"
     executable = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-    assert "sqlldr" not in executable.lower(), "sample install must not invoke SQL*Loader"
+    assert str(_ORACLE_SAMPLE_ADAPTER.relative_to(_PROOF)) in executable
+    assert "oracle-samples-23.3-sh-csv.tar.gz" in executable
+    assert str(_ORACLE_SAMPLE_LOADER.relative_to(_PROOF)) in executable
+    assert "kubectl cp" in executable
+    assert executable.count("tar --no-xattrs -czf") == 2
+
+
+def test_sh_csv_loader_is_pdb_explicit_fail_loud_and_row_count_pinned() -> None:
+    text = _ORACLE_SAMPLE_LOADER.read_text()
+
+    assert "/opt/oracle/product/26ai/dbhomeFree/bin/sqlldr" in text
+    assert "@//localhost:1521/FREEPDB1 AS SYSDBA" in text
+    assert "USERID='sys/${ORACLE_PASSWORD}" in text
+    assert "/dev/shm/cognic-sh-sqlldr.XXXXXX.par" in text
+    assert '"$SQLLDR" parfile="$CREDENTIAL_PARFILE"' in text
+    assert '"$SQLLDR" "$PDB_CONNECT"' not in text
+    assert "trap cleanup_credential_parfile EXIT" in text
+    assert 'local table="$1" mode="$2"\n  local bad="$WORK_DIR/$table.bad"' in text
+    assert "all_tab_columns" in text.lower()
+    assert 'DATE "YYYY-MM-DD"' in text
+    assert "CHAR(4000)" in text
+    assert "DIRECT=TRUE" in text
+    assert "ROWS=5000" in text
+    for conventional in ("customers", "costs", "sales"):
+        assert conventional in text
+    assert 'bad="$WORK_DIR/$table.bad"' in text
+    assert '[ ! -e "$bad" ]' in text
+    for table, count in {
+        "sales": 918843,
+        "customers": 55500,
+        "times": 1826,
+        "costs": 82112,
+        "promotions": 503,
+        "supplementary_demographics": 4500,
+    }.items():
+        assert f"{table}:{count}" in text
+
+
+def test_live_golden_seed_verifier_and_fact_contract_are_staged() -> None:
+    assert _GOLDEN_SEED_VERIFIER.is_file()
+    facts = json.loads(_GOLDEN_FACTS.read_text())
+    assert facts["schema_version"] == 1
+    assert {row["kind"] for row in facts["checks"]} == {
+        "golden",
+        "adversarial",
+        "refusal",
+        "trigger_pos",
+        "trigger_neg",
+    }
 
 
 def test_new_governed_views_match_the_corpus_pinned_column_contracts() -> None:

@@ -275,7 +275,7 @@ async def run_calibration_judge(
                 verdict = JudgeVerdictResponse.model_validate(response.json())
             except (ValueError, ValidationError):
                 raise SkillCalibrationContractError("judge response shape invalid") from None
-            if verdict.model != sheet.model_alias:
+            if verdict.model_alias != sheet.model_alias:
                 raise SkillCalibrationContractError("judge model alias drift")
             names = {row["name"] for row in criteria}
             if (

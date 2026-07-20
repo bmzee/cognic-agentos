@@ -2568,13 +2568,15 @@ finally:
 PY
 
 # Oracle's v23.3 sample-schema release is a public, immutable proof input. Fetch
-# it once before cluster work, verify the committed digest, then retain ONLY the
-# seven SQL sources used by HR/CO/SH. CO's populate script alone exceeds the
-# Kubernetes ConfigMap limit uncompressed, so the verified sources ride one
-# small tar.gz data key; the three ordered initdb wrappers unpack and execute
-# them without SQL*Loader. The generated wrappers create NO AUTHENTICATION
-# schema owners rather than introducing dormant sample-owner passwords.
-echo "==> [1/11] stage Oracle sample schemas v23.3 (digest-verified; SQL-only)"
+# it once before cluster work and verify the committed digest. Seven SQL sources
+# ride the initdb ConfigMap as one small tar.gz. SH's six CSVs are too large for a
+# ConfigMap, so they ride a separate host-staged archive that is copied into the
+# Ready Oracle pod and loaded once through the image's SQL*Loader. The exact
+# adapter removes only the SQLcl-only LOAD directives and the Oracle Text index
+# unavailable in the pinned slim image; archive drift refuses before cluster work.
+# The generated wrappers create NO AUTHENTICATION schema owners rather than
+# introducing dormant sample-owner passwords.
+echo "==> [1/11] stage Oracle sample schemas v23.3 (digest-verified SQL + CSV)"
 ORACLE_SAMPLES_TMP="$(mktemp -d)"
 chmod 700 "$ORACLE_SAMPLES_TMP"
 ORACLE_SAMPLES_ARCHIVE="$ORACLE_SAMPLES_TMP/db-sample-schemas-23.3.tar.gz"
@@ -2601,14 +2603,38 @@ ORACLE_SAMPLE_SQL_SOURCES=(
   sales_history/sh_create.sql
   sales_history/sh_populate.sql
 )
+ORACLE_SAMPLE_CSV_SOURCES=(
+  sales_history/costs.csv
+  sales_history/customers.csv
+  sales_history/promotions.csv
+  sales_history/sales.csv
+  sales_history/times.csv
+  sales_history/supplementary_demographics.csv
+)
 for _sample_source in "${ORACLE_SAMPLE_SQL_SOURCES[@]}"; do
   [ -s "$ORACLE_SAMPLES_SOURCE/$_sample_source" ] \
     || die "verified Oracle v23.3 archive is missing $_sample_source"
 done
+for _sample_source in "${ORACLE_SAMPLE_CSV_SOURCES[@]}"; do
+  [ -s "$ORACLE_SAMPLES_SOURCE/$_sample_source" ] \
+    || die "verified Oracle v23.3 archive is missing $_sample_source"
+done
+ORACLE_SAMPLES_STAGED="$ORACLE_SAMPLES_TMP/staged-sql"
+for _sample_source in "${ORACLE_SAMPLE_SQL_SOURCES[@]}"; do
+  mkdir -p "$ORACLE_SAMPLES_STAGED/$(dirname "$_sample_source")"
+  cp "$ORACLE_SAMPLES_SOURCE/$_sample_source" "$ORACLE_SAMPLES_STAGED/$_sample_source"
+done
+python3 "$PROOF_DIR/oracle-seed/adapt_sh_populate.py" \
+  "$ORACLE_SAMPLES_STAGED/sales_history/sh_populate.sql" \
+  || die "Oracle v23.3 SH populate adaptation refused"
 ORACLE_SAMPLES_SQL_BUNDLE="$ORACLE_SAMPLES_TMP/oracle-samples-23.3-sql.tar.gz"
-tar -czf "$ORACLE_SAMPLES_SQL_BUNDLE" \
-  -C "$ORACLE_SAMPLES_SOURCE" "${ORACLE_SAMPLE_SQL_SOURCES[@]}"
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$ORACLE_SAMPLES_SQL_BUNDLE" \
+  -C "$ORACLE_SAMPLES_STAGED" "${ORACLE_SAMPLE_SQL_SOURCES[@]}"
 [ -s "$ORACLE_SAMPLES_SQL_BUNDLE" ] || die "Oracle sample SQL bundle is empty"
+ORACLE_SAMPLES_CSV_BUNDLE="$ORACLE_SAMPLES_TMP/oracle-samples-23.3-sh-csv.tar.gz"
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$ORACLE_SAMPLES_CSV_BUNDLE" \
+  -C "$ORACLE_SAMPLES_SOURCE" "${ORACLE_SAMPLE_CSV_SOURCES[@]}"
+[ -s "$ORACLE_SAMPLES_CSV_BUNDLE" ] || die "Oracle sample CSV bundle is empty"
 
 cat > "$ORACLE_SAMPLES_TMP/01_oracle_samples_hr.sql" <<'SQL'
 -- Oracle db-sample-schemas v23.3: Human Resources (proof adaptation).
@@ -3256,6 +3282,40 @@ until kubectl -n "$NS" get pods -l app=oracle-db 2>/dev/null | grep -qE "1/1\s+R
   fi
   sleep 15
 done
+
+# sqlplus cannot execute SQLcl's LOAD command, so SH's six CSV-backed tables
+# were intentionally empty through initdb. Populate them only after the pod is
+# Ready, using the in-image SQL*Loader against the PDB service explicitly.
+_ORACLE_DB_POD="$(kubectl -n "$NS" get pods -l app=oracle-db -o json | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+pods = [
+    item["metadata"]["name"]
+    for item in data.get("items", [])
+    if item.get("metadata", {}).get("deletionTimestamp") is None
+    and item.get("status", {}).get("phase") == "Running"
+    and any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in item.get("status", {}).get("conditions", [])
+    )
+]
+if len(pods) != 1:
+    raise SystemExit(1)
+print(pods[0])
+')" || oracle_db_fail "could not resolve exactly one live Ready oracle-db pod"
+[ -n "$_ORACLE_DB_POD" ] \
+  || oracle_db_fail "oracle-db Ready-pod resolver returned an empty name"
+kubectl cp "$ORACLE_SAMPLES_CSV_BUNDLE" \
+  "$NS/$_ORACLE_DB_POD:/tmp/oracle-samples-23.3-sh-csv.tar.gz" \
+  || oracle_db_fail "could not copy the verified SH CSV bundle into oracle-db"
+kubectl cp "$PROOF_DIR/oracle-seed/load_sh_csv.sh" \
+  "$NS/$_ORACLE_DB_POD:/tmp/load_sh_csv.sh" \
+  || oracle_db_fail "could not copy the SH SQL*Loader driver into oracle-db"
+kubectl -n "$NS" exec "$_ORACLE_DB_POD" -- \
+  bash /tmp/load_sh_csv.sh \
+    /tmp/cognic-oracle-sh-23.3 /tmp/oracle-samples-23.3-sh-csv.tar.gz \
+  || oracle_db_fail "SH CSV population or exact row-count gate failed"
+unset _ORACLE_DB_POD
 
 # --- 7. helm install (prod profile; migrations OFF; digest-pinned canonical images) -
 echo "==> [7/11] install the AgentOS chart under the proof-m85c overlay + the proof canonical refs"

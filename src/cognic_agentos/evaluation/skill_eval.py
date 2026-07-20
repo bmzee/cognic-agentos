@@ -910,7 +910,7 @@ class _SkillExpectationScorer:
             verdict = JudgeVerdictResponse.model_validate(response.json())
         except (ValueError, ValidationError) as exc:
             raise SkillEvalContractError("judge response shape invalid") from exc
-        if verdict.model != self._corpus.manifest.judge.model_alias:
+        if verdict.model_alias != self._corpus.manifest.judge.model_alias:
             raise SkillEvalContractError("judge model alias drift")
         by_name = {item.name: item for item in verdict.criteria_results}
         if set(by_name) != {item["name"] for item in criteria}:

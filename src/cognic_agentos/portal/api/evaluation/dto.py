@@ -47,7 +47,7 @@ class JudgeCriterionResult(BaseModel):
 
 
 class JudgeVerdictResponse(BaseModel):
-    """200 response — the parsed verdict + honesty fields from GatewayResponse."""
+    """Parsed verdict plus truthful upstream identity and configured alias."""
 
     model_config = ConfigDict(extra="forbid")
     verdict: Literal["pass", "fail", "inconclusive"]
@@ -55,6 +55,7 @@ class JudgeVerdictResponse(BaseModel):
     rationale: str
     criteria_results: list[JudgeCriterionResult]
     model: str
+    model_alias: str
     tier: str
     latency_ms: int
 
