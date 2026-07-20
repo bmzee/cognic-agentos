@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # infra/proof-m85c/stage-packs.sh — stage the released, signed packs for the
-# M8.5 SLICE proof (seven inherited releases plus the M8.5-C approval probe).
+# M8.5 SLICE proof (the inherited releases plus the M8.5-C approval probe and
+# the M8.5-E six-scope/write releases plus the identity-separated ablation
+# agent used by the A-007 with-vs-without baseline).
 # RELEASED ASSETS ONLY (never a source rebuild):
 #
 #   THE SIX PART-B RELEASES (maintainer-locked digest pins):
@@ -18,12 +20,16 @@
 #     atm_recon (CARDS.V_ATM_SETTLEMENTS + V_ATM_DISPUTES). Released + hosted
 #     but NEVER granted to the agent and NEVER entitled to any analyst — the
 #     standing BAR-2 negative.
-#   * cognic-agent-bank-analyst@v0.1.0    — the declarative agent pack (persona
+#   * cognic-agent-bank-analyst@v0.2.0    — the declarative agent pack (persona
 #     AGENT.md + inert marker; NO agent code). Trust-registered at boot against
 #     its per-pack DUAL root: cosign.pub (wheel signature) + agent-card.pub
 #     (the AgentCard-JWS trust root — the JWS is NEVER verified against
 #     cosign.pub per the M8 finding-#4 custody split). agent-card.jws +
 #     agent-card.json are staged for standalone verification.
+#   * cognic-agent-bank-analyst-ablation@v0.2.0 — the dedicated A-007 baseline
+#     identity. Its persona body + requested-capability ceiling are byte-locked
+#     to bank-analyst v0.2.0; only its tenant assignment is narrower. It has an
+#     independent cosign root and independent AgentCard root.
 #
 #   PLUS ONE REUSED M5 RELEASE (dependency, byte-identical M5/M6 pins):
 #   * cognic-hook-schema-guard@v0.1.0     — the M5 signed hook pack. REQUIRED
@@ -35,8 +41,8 @@
 #     rationale + same pins as infra/proof-m6/stage-packs.sh.
 #
 # All instruction skills ride the B2-pre manifest-walk discovery arm (content
-# packs — no entry point); the agent pack rides the cognic.agents entry-point
-# arm (inert marker only). All SEVEN wheels are pip-installed into the kernel
+# packs -- no entry point); both agent packs ride the cognic.agents entry-point
+# arm (inert marker only). All released wheels are pip-installed into the kernel
 # venv; the oracle wheel additionally feeds Dockerfile.oracle-pack.
 #
 # Mirrors infra/proof-m6/stage-packs.sh (download via `gh release download`
@@ -45,9 +51,9 @@
 # at its stage step:  bash infra/proof-m85c/stage-packs.sh <staging-dst>
 #
 # Staging tree produced (all paths relative to <staging-dst>):
-#   wheel/<all seven wheels>                              -> pip install into the kernel venv
+#   wheel/<all released wheels>                           -> pip install into the kernel venv
 #                                                            (oracle wheel also feeds Dockerfile.oracle-pack)
-#   pack-attestations/<pack_id>/<version>/                -> wheel + the 7 attestations, all seven packs
+#   pack-attestations/<pack_id>/<version>/                -> wheel + the 7 attestations, every pack
 #   trust-roots/_default/cosign.pub                       -> the ORACLE pack key (the kernel's LOCKED
 #                                                            boot convention <prefix>/_default/cosign.pub
 #                                                            for tools-kind packs, registry_boot.py, AND
@@ -71,7 +77,7 @@
 #                                                            asset's sha256 as staged (incl.
 #                                                            agent-card.json, which has no locked pin
 #                                                            — computed + recorded here at stage time)
-#   policies/plugin_allowlist.json                        -> ALL SEVEN pack ids under "_default"
+#   policies/plugin_allowlist.json                        -> every staged pack id under "_default"
 #   alembic.ini                                           -> the deployed migration config
 #
 # NOTE: the query-context keypair + the proof CANONICAL-IMAGE trust material
@@ -126,19 +132,57 @@ ATMRECON_WHEEL="cognic_skill_atm_recon-0.1.0-py3-none-any.whl"
 ATMRECON_WHEEL_SHA256="f53e290ad61b614ec4ba55f9c7d7e86f0e7e7b6870595492d5251092dd35c7ad"
 ATMRECON_PUB_SHA256="e1b0c58aa95a355bb418a5ef7b847dc7702145babd280e6db521137f46fe0c59"
 
+# M8.5-E instruction skills. The three wheels carry the sharpened corpora and
+# calibrated A-007 manifests (measured kappa=1.0) that BAR I evaluates against
+# the deployed stack. Every byte comes from the public v0.1.0 release; no source
+# checkout or locally-built wheel is admitted to the proof.
+HR_REPO="bmzee/cognic-skill-hr-data"
+HR_TAG="v0.1.0"
+HR_VERSION="0.1.0"
+HR_PACK_ID="cognic-skill-hr-data"
+HR_WHEEL="cognic_skill_hr_data-0.1.0-py3-none-any.whl"
+HR_WHEEL_SHA256="1876347b6dc0f576f8ce8d1e976a03e8228de26614f34abd00e2130f39a39eb6"
+HR_PUB_SHA256="2e01f8c3988e16198a6b80e6a1f141ab48ce56b2844ffb49a61938aa25c625b0"
+
+ORDERS_REPO="bmzee/cognic-skill-orders-data"
+ORDERS_TAG="v0.1.0"
+ORDERS_VERSION="0.1.0"
+ORDERS_PACK_ID="cognic-skill-orders-data"
+ORDERS_WHEEL="cognic_skill_orders_data-0.1.0-py3-none-any.whl"
+ORDERS_WHEEL_SHA256="b2a9d3306a1d4c46236e665870b5177deae752630822e60e338545600739d5b7"
+ORDERS_PUB_SHA256="8ec1c715e5e23c50b8fc2820150535bd45ca07efceb398d3897b8f779f8a9f2e"
+
+WAREHOUSE_REPO="bmzee/cognic-skill-warehouse-data"
+WAREHOUSE_TAG="v0.1.0"
+WAREHOUSE_VERSION="0.1.0"
+WAREHOUSE_PACK_ID="cognic-skill-warehouse-data"
+WAREHOUSE_WHEEL="cognic_skill_warehouse_data-0.1.0-py3-none-any.whl"
+WAREHOUSE_WHEEL_SHA256="583e1747f130534caac4101af68ac81939dd2f8fbfce3e87f6bb99dbc0e7df73"
+WAREHOUSE_PUB_SHA256="b01435af0ee9604669a3cb3e91cd7cdb24565a7a8890f5258b8087ad80cad0bc"
+
 AGENT_REPO="bmzee/cognic-agent-bank-analyst"
-AGENT_TAG="v0.1.0"
-AGENT_VERSION="0.1.0"
+AGENT_TAG="v0.2.0"
+AGENT_VERSION="0.2.0"
 AGENT_PACK_ID="cognic-agent-bank-analyst"
-AGENT_WHEEL="cognic_agent_bank_analyst-0.1.0-py3-none-any.whl"
-AGENT_WHEEL_SHA256="77be5140a11e25970b28e13be9df9d33d4cf7f16ee267d27061e09fa96bcdec9"
-AGENT_PUB_SHA256="532fe8e2181008be86a06c19c3552aedd901a74fd9da3f405ab8e119e783929e"
+AGENT_WHEEL="cognic_agent_bank_analyst-0.2.0-py3-none-any.whl"
+AGENT_WHEEL_SHA256="FILL_AT_RELEASE"
+AGENT_PUB_SHA256="FILL_AT_RELEASE"
 # The dual-root + card assets (M8 finding-#4 custody split: agent-card.pub is
 # the JWS trust root, a SEPARATE cryptographic identity from cosign.pub).
-AGENT_CARD_PUB_SHA256="c691d31693459a52226d7190b07dd07e1fdb21a1abdf0324a9225c7c2558d214"
-AGENT_CARD_JWS_SHA256="71207eaf5956d08a0b9bc1381bce75113478295c5b968c18b600dc16efb0e13a"
+AGENT_CARD_PUB_SHA256="FILL_AT_RELEASE"
+AGENT_CARD_JWS_SHA256="FILL_AT_RELEASE"
 # agent-card.json carries NO locked pin — its digest is computed + recorded at
 # stage time into staged-digests.sha256 (the proof-m6 stage-time pattern).
+
+ABLATION_AGENT_REPO="bmzee/cognic-agent-bank-analyst-ablation"
+ABLATION_AGENT_TAG="v0.2.0"
+ABLATION_AGENT_VERSION="0.2.0"
+ABLATION_AGENT_PACK_ID="cognic-agent-bank-analyst-ablation"
+ABLATION_AGENT_WHEEL="cognic_agent_bank_analyst_ablation-0.2.0-py3-none-any.whl"
+ABLATION_AGENT_WHEEL_SHA256="FILL_AT_RELEASE"
+ABLATION_AGENT_PUB_SHA256="FILL_AT_RELEASE"
+ABLATION_AGENT_CARD_PUB_SHA256="FILL_AT_RELEASE"
+ABLATION_AGENT_CARD_JWS_SHA256="FILL_AT_RELEASE"
 
 HOOK_REPO="bmzee/cognic-hook-schema-guard"
 HOOK_TAG="v0.1.0"
@@ -169,6 +213,18 @@ PROBE_PACK_ID="cognic-tool-approval-probe"
 PROBE_WHEEL="cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
 PROBE_WHEEL_SHA256="a0f1ad4350f5e88a8ff193b125411a58c6e89a208e9f9f3483db0c67fad52865"
 PROBE_PUB_SHA256="786fad6702860ffbe411a5745ac7b4121729f59ce8457f2b441b506e99f2d7ac"
+
+# M8.5-E governed-write pack. It is a tools-kind pack, so the runner first
+# authenticates its public release signature under this release-specific key,
+# then re-signs the exact wheel under the proof tenant's single tools trust root
+# alongside oracle + probe. The action-context private key is NOT staged here.
+HR_LEAVE_REPO="bmzee/cognic-tool-hr-leave"
+HR_LEAVE_TAG="v0.1.0"
+HR_LEAVE_VERSION="0.1.0"
+HR_LEAVE_PACK_ID="cognic-tool-hr-leave"
+HR_LEAVE_WHEEL="cognic_tool_hr_leave-0.1.0-py3-none-any.whl"
+HR_LEAVE_WHEEL_SHA256="cd440eae85661ace38018ed8e2d09ea1f691a0b3e86d2400cf9f94fe3ed01a81"
+HR_LEAVE_PUB_SHA256="40ccd791277456243137c415ac686d454a9377c1292c06e8b9d6353bec57fe6a"
 
 # The 7-attestation released-bundle contract (identical to the M3..M6 shape).
 ATTESTATIONS=(
@@ -263,21 +319,42 @@ _record_staged_digest() {
   echo "  staged digest recorded: $label $got"
 }
 
-echo "==> stage-packs: download the seven released packs (released assets only, never built here)"
+# The agent releases do not exist at authoring time. Refuse their deliberate
+# sentinels BEFORE any network call: a pre-release structural run must stop in
+# milliseconds rather than download unrelated assets and fail later.
+for _pin in \
+  AGENT_WHEEL_SHA256 AGENT_PUB_SHA256 AGENT_CARD_PUB_SHA256 AGENT_CARD_JWS_SHA256 \
+  ABLATION_AGENT_WHEEL_SHA256 ABLATION_AGENT_PUB_SHA256 \
+  ABLATION_AGENT_CARD_PUB_SHA256 ABLATION_AGENT_CARD_JWS_SHA256; do
+  [ "${!_pin}" != "FILL_AT_RELEASE" ] \
+    || die "$_pin is still FILL_AT_RELEASE; publish and independently verify both v0.2.0 agent releases, then commit the literal digest before running BAR I"
+done
+
+echo "==> stage-packs: download the released proof packs (released assets only, never built here)"
 ORACLE_SRC="$TMP/oracle"
 CUSTOMER_SRC="$TMP/customer"
 FINANCIAL_SRC="$TMP/financial"
 CARDS_SRC="$TMP/cards"
 ATMRECON_SRC="$TMP/atmrecon"
+HR_SRC="$TMP/hr"
+ORDERS_SRC="$TMP/orders"
+WAREHOUSE_SRC="$TMP/warehouse"
 AGENT_SRC="$TMP/agent"
+ABLATION_AGENT_SRC="$TMP/agent-ablation"
 HOOK_SRC="$TMP/hook"
+HR_LEAVE_SRC="$TMP/hr-leave"
 _download_release "$ORACLE_REPO" "$ORACLE_TAG" "$ORACLE_SRC"
 _download_release "$CUSTOMER_REPO" "$CUSTOMER_TAG" "$CUSTOMER_SRC"
 _download_release "$FINANCIAL_REPO" "$FINANCIAL_TAG" "$FINANCIAL_SRC"
 _download_release "$CARDS_REPO" "$CARDS_TAG" "$CARDS_SRC"
 _download_release "$ATMRECON_REPO" "$ATMRECON_TAG" "$ATMRECON_SRC"
+_download_release "$HR_REPO" "$HR_TAG" "$HR_SRC"
+_download_release "$ORDERS_REPO" "$ORDERS_TAG" "$ORDERS_SRC"
+_download_release "$WAREHOUSE_REPO" "$WAREHOUSE_TAG" "$WAREHOUSE_SRC"
 _download_release "$AGENT_REPO" "$AGENT_TAG" "$AGENT_SRC"
+_download_release "$ABLATION_AGENT_REPO" "$ABLATION_AGENT_TAG" "$ABLATION_AGENT_SRC"
 _download_release "$HOOK_REPO" "$HOOK_TAG" "$HOOK_SRC"
+_download_release "$HR_LEAVE_REPO" "$HR_LEAVE_TAG" "$HR_LEAVE_SRC"
 
 echo "==> stage-packs: sha256-verify every pinned release digest (fail-closed)"
 _verify_digest "$ORACLE_SRC/$ORACLE_WHEEL" "$ORACLE_WHEEL_SHA256" "$ORACLE_PACK_ID wheel"
@@ -290,25 +367,42 @@ _verify_digest "$CARDS_SRC/$CARDS_WHEEL" "$CARDS_WHEEL_SHA256" "$CARDS_PACK_ID w
 _verify_digest "$CARDS_SRC/cosign.pub" "$CARDS_PUB_SHA256" "$CARDS_PACK_ID cosign.pub"
 _verify_digest "$ATMRECON_SRC/$ATMRECON_WHEEL" "$ATMRECON_WHEEL_SHA256" "$ATMRECON_PACK_ID wheel"
 _verify_digest "$ATMRECON_SRC/cosign.pub" "$ATMRECON_PUB_SHA256" "$ATMRECON_PACK_ID cosign.pub"
+_verify_digest "$HR_SRC/$HR_WHEEL" "$HR_WHEEL_SHA256" "$HR_PACK_ID wheel"
+_verify_digest "$HR_SRC/cosign.pub" "$HR_PUB_SHA256" "$HR_PACK_ID cosign.pub"
+_verify_digest "$ORDERS_SRC/$ORDERS_WHEEL" "$ORDERS_WHEEL_SHA256" "$ORDERS_PACK_ID wheel"
+_verify_digest "$ORDERS_SRC/cosign.pub" "$ORDERS_PUB_SHA256" "$ORDERS_PACK_ID cosign.pub"
+_verify_digest "$WAREHOUSE_SRC/$WAREHOUSE_WHEEL" "$WAREHOUSE_WHEEL_SHA256" "$WAREHOUSE_PACK_ID wheel"
+_verify_digest "$WAREHOUSE_SRC/cosign.pub" "$WAREHOUSE_PUB_SHA256" "$WAREHOUSE_PACK_ID cosign.pub"
 _verify_digest "$AGENT_SRC/$AGENT_WHEEL" "$AGENT_WHEEL_SHA256" "$AGENT_PACK_ID wheel"
 _verify_digest "$AGENT_SRC/cosign.pub" "$AGENT_PUB_SHA256" "$AGENT_PACK_ID cosign.pub"
 _verify_digest "$AGENT_SRC/agent-card.pub" "$AGENT_CARD_PUB_SHA256" "$AGENT_PACK_ID agent-card.pub"
 _verify_digest "$AGENT_SRC/agent-card.jws" "$AGENT_CARD_JWS_SHA256" "$AGENT_PACK_ID agent-card.jws"
+_verify_digest "$ABLATION_AGENT_SRC/$ABLATION_AGENT_WHEEL" "$ABLATION_AGENT_WHEEL_SHA256" "$ABLATION_AGENT_PACK_ID wheel"
+_verify_digest "$ABLATION_AGENT_SRC/cosign.pub" "$ABLATION_AGENT_PUB_SHA256" "$ABLATION_AGENT_PACK_ID cosign.pub"
+_verify_digest "$ABLATION_AGENT_SRC/agent-card.pub" "$ABLATION_AGENT_CARD_PUB_SHA256" "$ABLATION_AGENT_PACK_ID agent-card.pub"
+_verify_digest "$ABLATION_AGENT_SRC/agent-card.jws" "$ABLATION_AGENT_CARD_JWS_SHA256" "$ABLATION_AGENT_PACK_ID agent-card.jws"
 _verify_digest "$HOOK_SRC/$HOOK_WHEEL" "$HOOK_WHEEL_SHA256" "$HOOK_PACK_ID wheel"
 _verify_digest "$HOOK_SRC/cosign.pub" "$HOOK_PUB_SHA256" "$HOOK_PACK_ID cosign.pub"
+_verify_digest "$HR_LEAVE_SRC/$HR_LEAVE_WHEEL" "$HR_LEAVE_WHEEL_SHA256" "$HR_LEAVE_PACK_ID wheel"
+_verify_digest "$HR_LEAVE_SRC/cosign.pub" "$HR_LEAVE_PUB_SHA256" "$HR_LEAVE_PACK_ID cosign.pub"
 _verify_attestations_present "$ORACLE_SRC" "$ORACLE_PACK_ID"
 _verify_attestations_present "$CUSTOMER_SRC" "$CUSTOMER_PACK_ID"
 _verify_attestations_present "$FINANCIAL_SRC" "$FINANCIAL_PACK_ID"
 _verify_attestations_present "$CARDS_SRC" "$CARDS_PACK_ID"
 _verify_attestations_present "$ATMRECON_SRC" "$ATMRECON_PACK_ID"
+_verify_attestations_present "$HR_SRC" "$HR_PACK_ID"
+_verify_attestations_present "$ORDERS_SRC" "$ORDERS_PACK_ID"
+_verify_attestations_present "$WAREHOUSE_SRC" "$WAREHOUSE_PACK_ID"
 _verify_attestations_present "$AGENT_SRC" "$AGENT_PACK_ID"
+_verify_attestations_present "$ABLATION_AGENT_SRC" "$ABLATION_AGENT_PACK_ID"
 _verify_attestations_present "$HOOK_SRC" "$HOOK_PACK_ID"
+_verify_attestations_present "$HR_LEAVE_SRC" "$HR_LEAVE_PACK_ID"
 
 echo "==> stage-packs: arrange the staging tree at $STAGING_DST"
 rm -rf "$STAGING_DST"
 mkdir -p "$STAGING_DST/wheel"
 : > "$STAGING_DST/staged-digests.sha256"
-# ALL SEVEN wheels: Dockerfile.agentos-proof pip-installs wheel/*.whl into the
+# ALL released wheels: Dockerfile.agentos-proof pip-installs wheel/*.whl into the
 # kernel venv (the oracle pack's cognic.tools entry point + the hook pack's
 # cognic.hooks entry points + the agent pack's cognic.agents inert marker
 # become boot-discoverable; the four INSTRUCTION skill packs carry NO entry
@@ -320,19 +414,29 @@ cp "$CUSTOMER_SRC/$CUSTOMER_WHEEL" "$STAGING_DST/wheel/$CUSTOMER_WHEEL"
 cp "$FINANCIAL_SRC/$FINANCIAL_WHEEL" "$STAGING_DST/wheel/$FINANCIAL_WHEEL"
 cp "$CARDS_SRC/$CARDS_WHEEL" "$STAGING_DST/wheel/$CARDS_WHEEL"
 cp "$ATMRECON_SRC/$ATMRECON_WHEEL" "$STAGING_DST/wheel/$ATMRECON_WHEEL"
+cp "$HR_SRC/$HR_WHEEL" "$STAGING_DST/wheel/$HR_WHEEL"
+cp "$ORDERS_SRC/$ORDERS_WHEEL" "$STAGING_DST/wheel/$ORDERS_WHEEL"
+cp "$WAREHOUSE_SRC/$WAREHOUSE_WHEEL" "$STAGING_DST/wheel/$WAREHOUSE_WHEEL"
 cp "$AGENT_SRC/$AGENT_WHEEL" "$STAGING_DST/wheel/$AGENT_WHEEL"
+cp "$ABLATION_AGENT_SRC/$ABLATION_AGENT_WHEEL" "$STAGING_DST/wheel/$ABLATION_AGENT_WHEEL"
 cp "$HOOK_SRC/$HOOK_WHEEL" "$STAGING_DST/wheel/$HOOK_WHEEL"
+cp "$HR_LEAVE_SRC/$HR_LEAVE_WHEEL" "$STAGING_DST/wheel/$HR_LEAVE_WHEEL"
 
 _stage_pack_attestations "$ORACLE_SRC" "$ORACLE_PACK_ID" "$ORACLE_VERSION" "$ORACLE_WHEEL"
 _stage_pack_attestations "$CUSTOMER_SRC" "$CUSTOMER_PACK_ID" "$CUSTOMER_VERSION" "$CUSTOMER_WHEEL"
 _stage_pack_attestations "$FINANCIAL_SRC" "$FINANCIAL_PACK_ID" "$FINANCIAL_VERSION" "$FINANCIAL_WHEEL"
 _stage_pack_attestations "$CARDS_SRC" "$CARDS_PACK_ID" "$CARDS_VERSION" "$CARDS_WHEEL"
 _stage_pack_attestations "$ATMRECON_SRC" "$ATMRECON_PACK_ID" "$ATMRECON_VERSION" "$ATMRECON_WHEEL"
+_stage_pack_attestations "$HR_SRC" "$HR_PACK_ID" "$HR_VERSION" "$HR_WHEEL"
+_stage_pack_attestations "$ORDERS_SRC" "$ORDERS_PACK_ID" "$ORDERS_VERSION" "$ORDERS_WHEEL"
+_stage_pack_attestations "$WAREHOUSE_SRC" "$WAREHOUSE_PACK_ID" "$WAREHOUSE_VERSION" "$WAREHOUSE_WHEEL"
 _stage_pack_attestations "$AGENT_SRC" "$AGENT_PACK_ID" "$AGENT_VERSION" "$AGENT_WHEEL"
+_stage_pack_attestations "$ABLATION_AGENT_SRC" "$ABLATION_AGENT_PACK_ID" "$ABLATION_AGENT_VERSION" "$ABLATION_AGENT_WHEEL"
 _stage_pack_attestations "$HOOK_SRC" "$HOOK_PACK_ID" "$HOOK_VERSION" "$HOOK_WHEEL"
+_stage_pack_attestations "$HR_LEAVE_SRC" "$HR_LEAVE_PACK_ID" "$HR_LEAVE_VERSION" "$HR_LEAVE_WHEEL"
 
 # The M8.5-C probe pack — gated on the release (COGNIC_PROOF_M85C_PROBE_RELEASED=1)
-# so the seven-pack path still stages cleanly pre-release. The live M8.5-C run
+# so the historical proof path still stages cleanly pre-release. The live M8.5-C run
 # (Bar D) REQUIRES it. Downloaded + digest-verified fail-closed like every other
 # pack; its wheel rides BOTH wheel/ (kernel venv, matching the oracle so it is
 # boot-discoverable + operator-installable) AND pack-attestations/ (the approve
@@ -358,7 +462,7 @@ if [ "${COGNIC_PROOF_M85C_PROBE_RELEASED:-0}" = "1" ]; then
   echo "  staged the M8.5-C approval probe ($PROBE_PACK_ID $PROBE_VERSION)"
 fi
 
-# Trust roots — SEVEN DISTINCT SIGNERS under one COGNIC_TRUST_ROOT_PREFIX
+# Trust roots — ELEVEN DISTINCT RUNTIME ROOTS under one COGNIC_TRUST_ROOT_PREFIX
 # (trust_gate.py path containment):
 #   * the LOCKED _default convention carries the ORACLE key (tools-kind packs
 #     verify against <prefix>/_default/cosign.pub; also the approve 5-gate's
@@ -366,19 +470,20 @@ fi
 #   * the HOOK key is per-pack under hook-packs/ (M5 layout);
 #   * each SKILL key is per-pack under skill-packs/ (registry_boot
 #     _SKILL_PACK_TRUST_ROOT_SUBDIR);
-#   * the AGENT key is per-pack under agent-packs/ (M8 A9 layout,
+#   * both AGENT keys are per-pack under agent-packs/ (M8 A9 layout,
 #     _AGENT_PACK_TRUST_ROOT_SUBDIR) — PLUS the dual-root agent-card.pub
 #     (the AgentCard-JWS trust root; Settings.agent_card_jws_trust_root_path)
 #     staged NEXT TO the cosign key so both canonicalise under the prefix.
 mkdir -p "$STAGING_DST/trust-roots/_default"
 cp "$ORACLE_SRC/cosign.pub" "$STAGING_DST/trust-roots/_default/cosign.pub"
-# Durable copies of the RELEASED cosign public keys for the two tools-kind packs,
+# Durable copies of the RELEASED cosign public keys for the tools-kind packs,
 # kept out of the _default trust root (which the runner overwrites with the proof
 # approve key before re-signing). The runner verifies each pack's ORIGINAL
 # cosign.sig under its release pub BEFORE overwriting it, so a wheel whose release
 # signature is invalid/absent is never re-signed under the proof key.
 mkdir -p "$STAGING_DST/release-pubs"
 cp "$ORACLE_SRC/cosign.pub" "$STAGING_DST/release-pubs/$ORACLE_PACK_ID.pub"
+cp "$HR_LEAVE_SRC/cosign.pub" "$STAGING_DST/release-pubs/$HR_LEAVE_PACK_ID.pub"
 mkdir -p "$STAGING_DST/trust-roots/hook-packs/$HOOK_PACK_ID"
 cp "$HOOK_SRC/cosign.pub" "$STAGING_DST/trust-roots/hook-packs/$HOOK_PACK_ID/cosign.pub"
 mkdir -p "$STAGING_DST/trust-roots/skill-packs/$CUSTOMER_PACK_ID"
@@ -389,9 +494,18 @@ mkdir -p "$STAGING_DST/trust-roots/skill-packs/$CARDS_PACK_ID"
 cp "$CARDS_SRC/cosign.pub" "$STAGING_DST/trust-roots/skill-packs/$CARDS_PACK_ID/cosign.pub"
 mkdir -p "$STAGING_DST/trust-roots/skill-packs/$ATMRECON_PACK_ID"
 cp "$ATMRECON_SRC/cosign.pub" "$STAGING_DST/trust-roots/skill-packs/$ATMRECON_PACK_ID/cosign.pub"
+mkdir -p "$STAGING_DST/trust-roots/skill-packs/$HR_PACK_ID"
+cp "$HR_SRC/cosign.pub" "$STAGING_DST/trust-roots/skill-packs/$HR_PACK_ID/cosign.pub"
+mkdir -p "$STAGING_DST/trust-roots/skill-packs/$ORDERS_PACK_ID"
+cp "$ORDERS_SRC/cosign.pub" "$STAGING_DST/trust-roots/skill-packs/$ORDERS_PACK_ID/cosign.pub"
+mkdir -p "$STAGING_DST/trust-roots/skill-packs/$WAREHOUSE_PACK_ID"
+cp "$WAREHOUSE_SRC/cosign.pub" "$STAGING_DST/trust-roots/skill-packs/$WAREHOUSE_PACK_ID/cosign.pub"
 mkdir -p "$STAGING_DST/trust-roots/agent-packs/$AGENT_PACK_ID"
 cp "$AGENT_SRC/cosign.pub" "$STAGING_DST/trust-roots/agent-packs/$AGENT_PACK_ID/cosign.pub"
 cp "$AGENT_SRC/agent-card.pub" "$STAGING_DST/trust-roots/agent-packs/$AGENT_PACK_ID/agent-card.pub"
+mkdir -p "$STAGING_DST/trust-roots/agent-packs/$ABLATION_AGENT_PACK_ID"
+cp "$ABLATION_AGENT_SRC/cosign.pub" "$STAGING_DST/trust-roots/agent-packs/$ABLATION_AGENT_PACK_ID/cosign.pub"
+cp "$ABLATION_AGENT_SRC/agent-card.pub" "$STAGING_DST/trust-roots/agent-packs/$ABLATION_AGENT_PACK_ID/agent-card.pub"
 
 # The released AgentCard (JWS + JSON) — staged where the proof needs
 # standalone verification (verify the JWS against agent-card.pub, never
@@ -401,6 +515,11 @@ mkdir -p "$STAGING_DST/agent-cards/$AGENT_PACK_ID"
 cp "$AGENT_SRC/agent-card.jws" "$STAGING_DST/agent-cards/$AGENT_PACK_ID/agent-card.jws"
 [ -s "$AGENT_SRC/agent-card.json" ] || die "$AGENT_PACK_ID agent-card.json missing from the release assets"
 cp "$AGENT_SRC/agent-card.json" "$STAGING_DST/agent-cards/$AGENT_PACK_ID/agent-card.json"
+mkdir -p "$STAGING_DST/agent-cards/$ABLATION_AGENT_PACK_ID"
+cp "$ABLATION_AGENT_SRC/agent-card.jws" "$STAGING_DST/agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.jws"
+[ -s "$ABLATION_AGENT_SRC/agent-card.json" ] \
+  || die "$ABLATION_AGENT_PACK_ID agent-card.json missing from the release assets"
+cp "$ABLATION_AGENT_SRC/agent-card.json" "$STAGING_DST/agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.json"
 
 # Stage-time digest record — every staged asset, one line each (the assets
 # with locked pins were already fail-closed-verified above; recording them
@@ -410,26 +529,37 @@ _record_staged_digest "$STAGING_DST/wheel/$CUSTOMER_WHEEL" "wheel/$CUSTOMER_WHEE
 _record_staged_digest "$STAGING_DST/wheel/$FINANCIAL_WHEEL" "wheel/$FINANCIAL_WHEEL"
 _record_staged_digest "$STAGING_DST/wheel/$CARDS_WHEEL" "wheel/$CARDS_WHEEL"
 _record_staged_digest "$STAGING_DST/wheel/$ATMRECON_WHEEL" "wheel/$ATMRECON_WHEEL"
+_record_staged_digest "$STAGING_DST/wheel/$HR_WHEEL" "wheel/$HR_WHEEL"
+_record_staged_digest "$STAGING_DST/wheel/$ORDERS_WHEEL" "wheel/$ORDERS_WHEEL"
+_record_staged_digest "$STAGING_DST/wheel/$WAREHOUSE_WHEEL" "wheel/$WAREHOUSE_WHEEL"
 _record_staged_digest "$STAGING_DST/wheel/$AGENT_WHEEL" "wheel/$AGENT_WHEEL"
+_record_staged_digest "$STAGING_DST/wheel/$ABLATION_AGENT_WHEEL" "wheel/$ABLATION_AGENT_WHEEL"
 _record_staged_digest "$STAGING_DST/wheel/$HOOK_WHEEL" "wheel/$HOOK_WHEEL"
+_record_staged_digest "$STAGING_DST/wheel/$HR_LEAVE_WHEEL" "wheel/$HR_LEAVE_WHEEL"
 _record_staged_digest "$STAGING_DST/trust-roots/agent-packs/$AGENT_PACK_ID/agent-card.pub" \
   "trust-roots/agent-packs/$AGENT_PACK_ID/agent-card.pub"
 _record_staged_digest "$STAGING_DST/agent-cards/$AGENT_PACK_ID/agent-card.jws" \
   "agent-cards/$AGENT_PACK_ID/agent-card.jws"
 _record_staged_digest "$STAGING_DST/agent-cards/$AGENT_PACK_ID/agent-card.json" \
   "agent-cards/$AGENT_PACK_ID/agent-card.json"
+_record_staged_digest "$STAGING_DST/trust-roots/agent-packs/$ABLATION_AGENT_PACK_ID/agent-card.pub" \
+  "trust-roots/agent-packs/$ABLATION_AGENT_PACK_ID/agent-card.pub"
+_record_staged_digest "$STAGING_DST/agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.jws" \
+  "agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.jws"
+_record_staged_digest "$STAGING_DST/agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.json" \
+  "agent-cards/$ABLATION_AGENT_PACK_ID/agent-card.json"
 
 # Per-tenant plugin allow-list: every released pack admitted for the _default
 # tenant (registration refuses not_in_tenant_allowlist otherwise). The M8.5-C
-# approval probe is an EIGHTH pack and rides the SAME gate — staging its wheel
-# without admitting it here would make boot registration refuse it, and its MCP
-# warm-up (and therefore all of Bar D) would fail. The probe arm is gated on the
-# release exactly like its wheel/pub staging above, so a run without the released
-# probe still emits the original seven-pack list byte-for-byte.
+# approval probe rides the SAME gate — staging its wheel without admitting it
+# here would make boot registration refuse it, and its MCP warm-up (and therefore
+# all of Bar D) would fail. The probe arm is gated on its release exactly like its
+# wheel/pub staging above.
 mkdir -p "$STAGING_DST/policies"
 _ALLOWLIST_PACKS=(
   "$ORACLE_PACK_ID" "$HOOK_PACK_ID" "$CUSTOMER_PACK_ID" "$FINANCIAL_PACK_ID"
-  "$CARDS_PACK_ID" "$ATMRECON_PACK_ID" "$AGENT_PACK_ID"
+  "$CARDS_PACK_ID" "$ATMRECON_PACK_ID" "$HR_PACK_ID" "$ORDERS_PACK_ID"
+  "$WAREHOUSE_PACK_ID" "$HR_LEAVE_PACK_ID" "$AGENT_PACK_ID" "$ABLATION_AGENT_PACK_ID"
 )
 if [ "${COGNIC_PROOF_M85C_PROBE_RELEASED:-0}" = "1" ]; then
   _ALLOWLIST_PACKS+=("$PROBE_PACK_ID")
@@ -449,4 +579,4 @@ cp "$REPO_ROOT/alembic.ini" "$STAGING_DST/alembic.ini"
 # read everything COPY'd from this tree (mirrors the M5/M6 chmod pass).
 chmod -R a+rX "$STAGING_DST"
 
-echo "staged released $ORACLE_PACK_ID@$ORACLE_VERSION + $HOOK_PACK_ID@$HOOK_VERSION + 4 instruction-skill packs@0.1.0 + $AGENT_PACK_ID@$AGENT_VERSION -> $STAGING_DST"
+echo "staged released $ORACLE_PACK_ID@$ORACLE_VERSION + $HR_LEAVE_PACK_ID@$HR_LEAVE_VERSION + $HOOK_PACK_ID@$HOOK_VERSION + 7 instruction-skill packs@0.1.0 + $AGENT_PACK_ID@$AGENT_VERSION + $ABLATION_AGENT_PACK_ID@$ABLATION_AGENT_VERSION -> $STAGING_DST"

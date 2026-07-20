@@ -5155,10 +5155,15 @@ def test_d3_bar_h_rotation_kills_the_old_password_and_keeps_db_backstop() -> Non
     assert '[ "$(probe_ledger_count)" = "$H_LEDGER0" ]' in bar
 
 
-def test_d3_bar_h_is_appended_after_locked_bars_and_owns_the_final_banner() -> None:
+def test_d3_bar_h_remains_locked_before_bar_i_owns_the_final_banner() -> None:
     assert _RUNNER_TEXT.index("# ============================ BAR H") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BAR G) PASS"'
     )
     assert 'echo "PROOF M8.5-C (BARS A-G) PASS"' not in _RUNNER_TEXT
-    assert 'echo "PROOF M8.5-C (BAR H) PASS"' in _bar_h_text()
-    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-C (BARS A-H) PASS"')
+    bar_h = _bar_h_text()
+    assert 'echo "PROOF M8.5-C (BAR H) PASS"' in bar_h
+    assert bar_h.endswith('echo "PROOF M8.5-C (BARS A-H) PASS"')
+    assert _RUNNER_TEXT.index("# ============================ BAR I") > _RUNNER_TEXT.index(
+        'echo "PROOF M8.5-C (BARS A-H) PASS"'
+    )
+    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-E (BARS A-I) PASS"')

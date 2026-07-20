@@ -23,6 +23,10 @@
 --       inside the agent pack's REQUESTED set (core/agent/assignments.py
 --       ingestion invariant: a grant beyond the requested set refuses
 --       agent_grant_not_requested at load, fail-closed).
+--   action_entitlements(id, tenant_id, subject, tool_identity, created_at)
+--     — independent exact-tool write authority. Amir may PROPOSE only the
+--       released HR-leave action; approval and action-context verification
+--       remain separate gates.
 --
 -- Tenant: proof-m85c (the proof-m6 tenant convention). Idempotent: every INSERT
 -- is ON CONFLICT DO NOTHING against its uniqueness contract, so re-running
@@ -38,7 +42,8 @@
 --   assignments   agent bank-analyst = EXACTLY the requested set:
 --                 skills customer-data + financial-data + cards-data +
 --                        hr-data + orders-data + warehouse-data,
---                 tool cognic-tool-oracle-schema/run_readonly_query
+--                 tools cognic-tool-oracle-schema/run_readonly_query +
+--                       cognic-tool-hr-leave/apply_leave
 --                 (the atm-recon skill is NEVER assigned — the BAR-2 negative)
 --
 -- SUBJECT PLACEHOLDERS (M8.5-C): entitlements are keyed by the BOUND
@@ -111,13 +116,19 @@ VALUES
   (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_SARA__', 'retail_analytics', now())
 ON CONFLICT ON CONSTRAINT uq_entitlements_tenant_subject_scope DO NOTHING;
 
+-- === action_entitlements ===
+
+INSERT INTO action_entitlements (id, tenant_id, subject, tool_identity, created_at)
+VALUES
+  (gen_random_uuid(), 'proof-m85c', '__SUBJECT_ANALYST_AMIR__',
+   'cognic-tool-hr-leave/apply_leave', now())
+ON CONFLICT ON CONSTRAINT uq_action_entitlements_tenant_subject_tool DO NOTHING;
+
 -- === agent_assignments ===
--- EXACTLY the agent pack's requested set (cognic-agent-bank-analyst
--- manifest [agent]: requested_skills = customer-data + financial-data +
--- cards-data; requested_tools = cognic-tool-oracle-schema/run_readonly_query).
--- Granting ANYTHING beyond this set would refuse the WHOLE grant load at
--- boot (agent_grant_not_requested, no partial set). The fourth skill is
--- NEVER granted here — the standing BAR-2 negative.
+-- EXACTLY the production agent pack's v0.2 requested set. Granting ANYTHING
+-- beyond this ceiling would refuse the WHOLE grant load at boot
+-- (agent_grant_not_requested, no partial set). atm-recon is NEVER granted --
+-- the standing BAR-2 negative.
 
 INSERT INTO agent_assignments (id, tenant_id, agent_id, capability_kind, capability_ref, created_at)
 VALUES
@@ -127,7 +138,22 @@ VALUES
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'hr-data', now()),
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'orders-data', now()),
   (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'skill', 'warehouse-data', now()),
-  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'tool', 'cognic-tool-oracle-schema/run_readonly_query', now())
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'tool', 'cognic-tool-oracle-schema/run_readonly_query', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst', 'tool', 'cognic-tool-hr-leave/apply_leave', now())
+ON CONFLICT ON CONSTRAINT uq_agent_assignments_tenant_agent_kind_ref DO NOTHING;
+
+-- A-007's with-vs-without baseline uses a separate hosted identity so the
+-- production bank-analyst assignment set is never mutated mid-proof. The
+-- ablation pack requests the exact same v0.2 capability ceiling and carries a
+-- byte-identical persona body; only this tenant-owned assignment set is
+-- narrower. The three legacy data skills + readonly-query tool stay assigned,
+-- while the E skills and governed write are deliberately masked.
+INSERT INTO agent_assignments (id, tenant_id, agent_id, capability_kind, capability_ref, created_at)
+VALUES
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst-ablation', 'skill', 'customer-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst-ablation', 'skill', 'financial-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst-ablation', 'skill', 'cards-data', now()),
+  (gen_random_uuid(), 'proof-m85c', 'bank-analyst-ablation', 'tool', 'cognic-tool-oracle-schema/run_readonly_query', now())
 ON CONFLICT ON CONSTRAINT uq_agent_assignments_tenant_agent_kind_ref DO NOTHING;
 
 COMMIT;

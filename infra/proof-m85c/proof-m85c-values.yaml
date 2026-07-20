@@ -67,11 +67,11 @@ litellm:
   # self-hosted ollama (no cloud dependency beyond tier 1).
   config: |
     model_list:
-      - model_name: cognic-tier1-proof-m85c
+      - model_name: cognic-tier1-proof-m85e
         litellm_params:
           model: openai/gpt-4o
           api_key: os.environ/COGNIC_PROOF_M85C_TIER1_API_KEY
-      - model_name: cognic-tier2-proof-m85c
+      - model_name: cognic-tier2-proof-m85e
         litellm_params:
           model: ollama/qwen3:32b
           api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}

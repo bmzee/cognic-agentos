@@ -93,6 +93,9 @@ spec:
             - name: query-context
               mountPath: /run/cognic/query-context
               readOnly: true
+            - name: action-context
+              mountPath: /run/cognic/action-context
+              readOnly: true
             - name: agentos-tls
               mountPath: /etc/agentos-tls
               readOnly: true
@@ -111,6 +114,10 @@ spec:
           secret:
             secretName: proof-m85c-query-context
             defaultMode: 288   # 0440 — group-readable for the fsGroup-65534 pod
+        - name: action-context
+          secret:
+            secretName: proof-m85c-action-context
+            defaultMode: 288   # 0440 — separate action-mint authority, kernel only
         - name: agentos-tls
           secret:
             secretName: proof-m85c-agentos-tls

@@ -884,7 +884,7 @@ _GOOD_HDR = {"alg": "RS256", "typ": "at+jwt", "kid": "k1"}
 _ISS = "https://cognic-proof-keycloak:8443/realms/proof-m85c"
 _SCOPES_CSV = (
     "conversation.create,conversation.read,conversation.post_turn,"
-    "conversation.close,mcp.tool.list,mcp.tool.invoke"
+    "conversation.close,mcp.tool.list,mcp.tool.invoke,eval.judge.run"
 )
 _GOOD_CLAIMS = {
     "iss": _ISS,

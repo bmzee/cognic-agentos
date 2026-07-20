@@ -617,9 +617,15 @@ def test_kernel_seed_keys_entitlements_by_placeholder_not_username() -> None:
     # The MUTABLE usernames are no longer SQL string literals anywhere.
     assert "'analyst.amir'" not in sql
     assert "'analyst.sara'" not in sql
-    # M8.5-E widens Amir from the original two scopes to five; Sara remains
+    # M8.5-E widens Amir from the original two data scopes to five and adds
+    # exactly one independently governed action entitlement. Sara remains
     # byte-stable at two so the two-human negative keeps its original posture.
-    assert sql.count("'__SUBJECT_ANALYST_AMIR__'") == 5
+    assert sql.count("'__SUBJECT_ANALYST_AMIR__'") == 6
+    action_section = sql.split("-- === action_entitlements ===", 1)[1].split(
+        "-- === agent_assignments ===", 1
+    )[0]
+    assert action_section.count("'__SUBJECT_ANALYST_AMIR__'") == 1
+    assert action_section.count("'cognic-tool-hr-leave/apply_leave'") == 1
     assert sql.count("'__SUBJECT_ANALYST_SARA__'") == 2
 
 
