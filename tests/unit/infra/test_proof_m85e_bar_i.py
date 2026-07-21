@@ -59,6 +59,21 @@ _RELEASES = {
     },
 }
 
+_AGENT_RELEASE_DIGESTS = {
+    "AGENT": {
+        "WHEEL_SHA256": "d04d9e4083aac05991e4c2f8c0f9040bffa200187d0eee7f9ba9f7cc5550d7e4",
+        "PUB_SHA256": "7453bcd691f3f6579b56e2a3f6f9693255e09138e41ff272328e7f904c66c6d1",
+        "CARD_PUB_SHA256": "9364c6e19ce537ac85417ee2186b9b468d20848d5835f31792d98d495ae6ab39",
+        "CARD_JWS_SHA256": "264d62b004bc45f875cad483d8ccea96a26bd44f7de9d40b66da5b514680749b",
+    },
+    "ABLATION_AGENT": {
+        "WHEEL_SHA256": "bf6ef9197884cd5860725530a6e7581795520817b1f391cbd09bd15d9a511253",
+        "PUB_SHA256": "3761e4dde1c5f464c890532bff2761bc5812767c019d8e196fa8e9ac359103f0",
+        "CARD_PUB_SHA256": "f411f578356f269304fb971a0cd13b1e7d3d2f3afad8f58c1be10fbea7a2004d",
+        "CARD_JWS_SHA256": "aba82ff9233cde16cd4a8b6412640adc3b3f2d00b4ed2b8c967b6c99826249f1",
+    },
+}
+
 
 def _shell_value(text: str, name: str) -> str:
     match = re.search(rf'^{re.escape(name)}="([^"]+)"$', text, re.MULTILINE)
@@ -109,7 +124,7 @@ def test_new_skill_roots_are_per_pack_and_hr_leave_is_release_verified_before_re
 
 
 def test_agent_release_requests_the_complete_e_surface() -> None:
-    """Both unreleased agents are complete and fail before any network access."""
+    """Both released agents are exact-pinned and carry the complete surface."""
     stage = _STAGER.read_text(encoding="utf-8")
     runner = _RUNNER.read_text(encoding="utf-8")
 
@@ -117,14 +132,9 @@ def test_agent_release_requests_the_complete_e_surface() -> None:
         assert _shell_value(stage, f"{prefix}_TAG") == "v0.2.0"
         assert _shell_value(stage, f"{prefix}_VERSION") == "0.2.0"
         assert _shell_value(stage, f"{prefix}_WHEEL").endswith("-0.2.0-py3-none-any.whl")
-        for suffix in (
-            "WHEEL_SHA256",
-            "PUB_SHA256",
-            "CARD_PUB_SHA256",
-            "CARD_JWS_SHA256",
-        ):
-            assert _shell_value(stage, f"{prefix}_{suffix}") == "FILL_AT_RELEASE"
-    guard = stage.index("# The agent releases do not exist at authoring time.")
+        for suffix, digest in _AGENT_RELEASE_DIGESTS[prefix].items():
+            assert _shell_value(stage, f"{prefix}_{suffix}") == digest
+    guard = stage.index("# Defense-in-depth over the now-pinned agent releases:")
     first_download = stage.index('_download_release "$ORACLE_REPO"')
     assert guard < first_download
     for prefix in ("AGENT", "ABLATION_AGENT"):

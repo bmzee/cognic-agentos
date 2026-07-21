@@ -165,12 +165,12 @@ AGENT_TAG="v0.2.0"
 AGENT_VERSION="0.2.0"
 AGENT_PACK_ID="cognic-agent-bank-analyst"
 AGENT_WHEEL="cognic_agent_bank_analyst-0.2.0-py3-none-any.whl"
-AGENT_WHEEL_SHA256="FILL_AT_RELEASE"
-AGENT_PUB_SHA256="FILL_AT_RELEASE"
+AGENT_WHEEL_SHA256="d04d9e4083aac05991e4c2f8c0f9040bffa200187d0eee7f9ba9f7cc5550d7e4"
+AGENT_PUB_SHA256="7453bcd691f3f6579b56e2a3f6f9693255e09138e41ff272328e7f904c66c6d1"
 # The dual-root + card assets (M8 finding-#4 custody split: agent-card.pub is
 # the JWS trust root, a SEPARATE cryptographic identity from cosign.pub).
-AGENT_CARD_PUB_SHA256="FILL_AT_RELEASE"
-AGENT_CARD_JWS_SHA256="FILL_AT_RELEASE"
+AGENT_CARD_PUB_SHA256="9364c6e19ce537ac85417ee2186b9b468d20848d5835f31792d98d495ae6ab39"
+AGENT_CARD_JWS_SHA256="264d62b004bc45f875cad483d8ccea96a26bd44f7de9d40b66da5b514680749b"
 # agent-card.json carries NO locked pin — its digest is computed + recorded at
 # stage time into staged-digests.sha256 (the proof-m6 stage-time pattern).
 
@@ -179,10 +179,10 @@ ABLATION_AGENT_TAG="v0.2.0"
 ABLATION_AGENT_VERSION="0.2.0"
 ABLATION_AGENT_PACK_ID="cognic-agent-bank-analyst-ablation"
 ABLATION_AGENT_WHEEL="cognic_agent_bank_analyst_ablation-0.2.0-py3-none-any.whl"
-ABLATION_AGENT_WHEEL_SHA256="FILL_AT_RELEASE"
-ABLATION_AGENT_PUB_SHA256="FILL_AT_RELEASE"
-ABLATION_AGENT_CARD_PUB_SHA256="FILL_AT_RELEASE"
-ABLATION_AGENT_CARD_JWS_SHA256="FILL_AT_RELEASE"
+ABLATION_AGENT_WHEEL_SHA256="bf6ef9197884cd5860725530a6e7581795520817b1f391cbd09bd15d9a511253"
+ABLATION_AGENT_PUB_SHA256="3761e4dde1c5f464c890532bff2761bc5812767c019d8e196fa8e9ac359103f0"
+ABLATION_AGENT_CARD_PUB_SHA256="f411f578356f269304fb971a0cd13b1e7d3d2f3afad8f58c1be10fbea7a2004d"
+ABLATION_AGENT_CARD_JWS_SHA256="aba82ff9233cde16cd4a8b6412640adc3b3f2d00b4ed2b8c967b6c99826249f1"
 
 HOOK_REPO="bmzee/cognic-hook-schema-guard"
 HOOK_TAG="v0.1.0"
@@ -319,9 +319,10 @@ _record_staged_digest() {
   echo "  staged digest recorded: $label $got"
 }
 
-# The agent releases do not exist at authoring time. Refuse their deliberate
-# sentinels BEFORE any network call: a pre-release structural run must stop in
-# milliseconds rather than download unrelated assets and fail later.
+# Defense-in-depth over the now-pinned agent releases: if a future version bump
+# reintroduces a deliberate sentinel, refuse it BEFORE any network call. A
+# pre-release structural run must stop in milliseconds rather than download
+# unrelated assets and fail later.
 for _pin in \
   AGENT_WHEEL_SHA256 AGENT_PUB_SHA256 AGENT_CARD_PUB_SHA256 AGENT_CARD_JWS_SHA256 \
   ABLATION_AGENT_WHEEL_SHA256 ABLATION_AGENT_PUB_SHA256 \
