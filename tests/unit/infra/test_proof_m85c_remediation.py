@@ -5167,3 +5167,30 @@ def test_d3_bar_h_remains_locked_before_bar_i_owns_the_final_banner() -> None:
         'echo "PROOF M8.5-C (BARS A-H) PASS"'
     )
     assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-E (BARS A-I) PASS"')
+
+
+# --------------------------------------------------------------------------- #
+# BAR I live run — Keycloak must not pull from inside the kind node.          #
+# --------------------------------------------------------------------------- #
+
+
+def test_bar_i_keycloak_image_is_pre_pulled_and_kind_loaded_from_one_pin() -> None:
+    """Keep the IdP off the kind node's unreliable registry path.
+
+    The host-side retry helper is the proof's bounded network boundary. Every
+    ``IfNotPresent`` image must cross it before cluster creation and then be
+    loaded into kind. A live BAR I attempt exposed Keycloak as the lone
+    exception: the node hit Docker Hub directly and waited ten minutes in
+    ``ImagePullBackOff``.
+    """
+    documents = [doc for doc in yaml.safe_load_all(_KEYCLOAK_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    manifest_image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+
+    runner_match = re.search(r'^KC_IMAGE="([^"]+)"$', _RUNNER_TEXT, re.MULTILINE)
+    assert runner_match is not None
+    assert runner_match.group(1) == manifest_image
+
+    extra_images = _extract_shell_function("_extra_images")
+    assert '"$KC_IMAGE"' in extra_images
+    assert _RUNNER_TEXT.count("done < <(_backend_images; _extra_images)") == 2

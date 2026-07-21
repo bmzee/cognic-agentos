@@ -467,13 +467,14 @@ _backend_images() {
 
 # Extra (non-backend) images the proof references with imagePullPolicy: IfNotPresent —
 # pre-pulled + kind-loaded so the kind node never reaches the internet for them:
-# Oracle Free + busybox (oracle-pack wait-for-db + topology-perms init) +
+# Keycloak + Oracle Free + busybox (oracle-pack wait-for-db + topology-perms init) +
 # redis (the scheduler control plane) + registry:2 (the local TLS registry) +
 # the OTLP collector (inherited diagnostics — ruling R6: NO M8.5 bar depends
 # on spans; manifests/otel-collector.yaml). ESO is handled separately: kind's
 # manifest-list import needs a digest-verified local alias (see step 4).
 _extra_images() {
   printf '%s\n' \
+    "$KC_IMAGE" \
     "gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8" \
     "busybox:1.36" "redis:7.4-alpine" "registry:2" \
     "otel/opentelemetry-collector:0.111.0"

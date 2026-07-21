@@ -9347,3 +9347,375 @@ PROOF M8.5-C (BARS A-H) PASS
    so no exact model-spend number is claimed.
 6. This closes the D3 live-proof gate, not M8.5-D. D4's AKS deployment and
    D5's released write pack/live external-action proof remain open.
+
+## Proof M8.5 slice — backends readiness FAILURE (2026-07-21T05:09:53Z)
+
+- Failed step: `not Available within 600s: deployment.apps/cognic-proof-keycloak `
+- deploy + pods (-o wide):
+```
+NAME                                    READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS       IMAGES                                                                                           SELECTOR
+deployment.apps/cognic-proof-keycloak   0/1     1            0           10m   keycloak         keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9   app=cognic-proof-keycloak
+deployment.apps/langfuse                1/1     1            1           10m   langfuse         langfuse/langfuse:2                                                                              app=langfuse
+deployment.apps/litellm                 1/1     1            1           10m   litellm          ghcr.io/berriai/litellm:main-stable                                                              app=litellm
+deployment.apps/ollama                  1/1     1            1           10m   ollama           ollama/ollama:0.5.4                                                                              app=ollama
+deployment.apps/otel-collector          1/1     1            1           10m   otel-collector   otel/opentelemetry-collector:0.111.0                                                             app=otel-collector
+deployment.apps/postgres                1/1     1            1           10m   postgres         postgres:16-alpine                                                                               app=postgres
+deployment.apps/qdrant                  1/1     1            1           10m   qdrant           qdrant/qdrant:v1.17.1                                                                            app=qdrant
+deployment.apps/redis                   1/1     1            1           10m   redis            redis:7.4-alpine                                                                                 app=redis
+deployment.apps/vault                   1/1     1            1           10m   vault            hashicorp/vault:1.18                                                                             app=vault
+
+NAME                                        READY   STATUS             RESTARTS        AGE   IP            NODE                             NOMINATED NODE   READINESS GATES
+pod/cognic-proof-keycloak-555bf644d-6fpff   0/1     ImagePullBackOff   0               10m   10.244.0.13   cognic-proofm85c-control-plane   <none>           <none>
+pod/langfuse-7f9f57b4b-79kqc                1/1     Running            2 (10m ago)     10m   10.244.0.14   cognic-proofm85c-control-plane   <none>           <none>
+pod/litellm-854bfdcb5d-xrvkx                1/1     Running            0               10m   10.244.0.10   cognic-proofm85c-control-plane   <none>           <none>
+pod/ollama-84dd449db5-qz9c8                 1/1     Running            1 (9m55s ago)   10m   10.244.0.8    cognic-proofm85c-control-plane   <none>           <none>
+pod/otel-collector-85ffcbbfcf-57m96         1/1     Running            0               10m   10.244.0.12   cognic-proofm85c-control-plane   <none>           <none>
+pod/postgres-74b77c4f75-zkkwb               1/1     Running            0               10m   10.244.0.5    cognic-proofm85c-control-plane   <none>           <none>
+pod/qdrant-54644949b7-qvcmp                 1/1     Running            0               10m   10.244.0.6    cognic-proofm85c-control-plane   <none>           <none>
+pod/redis-74c49dd754-hkskk                  1/1     Running            0               10m   10.244.0.11   cognic-proofm85c-control-plane   <none>           <none>
+pod/vault-564b656fbf-44lgh                  1/1     Running            0               10m   10.244.0.7    cognic-proofm85c-control-plane   <none>           <none>
+```
+- backend deploy describe (tail 120):
+```
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  <none>
+NewReplicaSet:   postgres-74b77c4f75 (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set postgres-74b77c4f75 from 0 to 1
+
+
+Name:                   qdrant
+Namespace:              cognic-proofm85c
+CreationTimestamp:      Tue, 21 Jul 2026 09:59:46 +0500
+Labels:                 app=qdrant
+Annotations:            deployment.kubernetes.io/revision: 1
+Selector:               app=qdrant
+Replicas:               1 desired | 1 updated | 1 total | 1 available | 0 unavailable
+StrategyType:           RollingUpdate
+MinReadySeconds:        0
+RollingUpdateStrategy:  25% max unavailable, 25% max surge
+Pod Template:
+  Labels:  app=qdrant
+  Containers:
+   qdrant:
+    Image:         qdrant/qdrant:v1.17.1
+    Port:          6333/TCP
+    Host Port:     0/TCP
+    Readiness:     http-get http://:6333/readyz delay=0s timeout=1s period=5s #success=1 #failure=3
+    Environment:   <none>
+    Mounts:        <none>
+  Volumes:         <none>
+  Node-Selectors:  <none>
+  Tolerations:     <none>
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  <none>
+NewReplicaSet:   qdrant-54644949b7 (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set qdrant-54644949b7 from 0 to 1
+
+
+Name:                   redis
+Namespace:              cognic-proofm85c
+CreationTimestamp:      Tue, 21 Jul 2026 09:59:46 +0500
+Labels:                 app=redis
+Annotations:            deployment.kubernetes.io/revision: 1
+Selector:               app=redis
+Replicas:               1 desired | 1 updated | 1 total | 1 available | 0 unavailable
+StrategyType:           RollingUpdate
+MinReadySeconds:        0
+RollingUpdateStrategy:  25% max unavailable, 25% max surge
+Pod Template:
+  Labels:  app=redis
+  Containers:
+   redis:
+    Image:         redis:7.4-alpine
+    Port:          6379/TCP
+    Host Port:     0/TCP
+    Readiness:     exec [redis-cli ping] delay=2s timeout=1s period=5s #success=1 #failure=3
+    Environment:   <none>
+    Mounts:        <none>
+  Volumes:         <none>
+  Node-Selectors:  <none>
+  Tolerations:     <none>
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  <none>
+NewReplicaSet:   redis-74c49dd754 (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set redis-74c49dd754 from 0 to 1
+
+
+Name:                   vault
+Namespace:              cognic-proofm85c
+CreationTimestamp:      Tue, 21 Jul 2026 09:59:46 +0500
+Labels:                 app=vault
+Annotations:            deployment.kubernetes.io/revision: 1
+Selector:               app=vault
+Replicas:               1 desired | 1 updated | 1 total | 1 available | 0 unavailable
+StrategyType:           RollingUpdate
+MinReadySeconds:        0
+RollingUpdateStrategy:  25% max unavailable, 25% max surge
+Pod Template:
+  Labels:  app=vault
+  Containers:
+   vault:
+    Image:      hashicorp/vault:1.18
+    Port:       8200/TCP
+    Host Port:  0/TCP
+    Args:
+      server
+      -dev
+    Readiness:  http-get http://:8200/v1/sys/health delay=0s timeout=1s period=5s #success=1 #failure=3
+    Environment:
+      VAULT_DEV_ROOT_TOKEN_ID:   smoke-root-token
+      VAULT_DEV_LISTEN_ADDRESS:  0.0.0.0:8200
+    Mounts:                      <none>
+  Volumes:                       <none>
+  Node-Selectors:                <none>
+  Tolerations:                   <none>
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  <none>
+NewReplicaSet:   vault-564b656fbf (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set vault-564b656fbf from 0 to 1
+```
+- backend pod describe (tail 150):
+```
+    Ready:          True
+    Restart Count:  0
+    Readiness:      http-get http://:6333/readyz delay=0s timeout=1s period=5s #success=1 #failure=3
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-bz92g (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       True
+  ContainersReady             True
+  PodScheduled                True
+Volumes:
+  kube-api-access-bz92g:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+  Normal   Scheduled  10m                default-scheduler  Successfully assigned cognic-proofm85c/qdrant-54644949b7-qvcmp to cognic-proofm85c-control-plane
+  Normal   Pulled     10m                kubelet            Container image "qdrant/qdrant:v1.17.1" already present on machine and can be accessed by the pod
+  Normal   Created    10m                kubelet            Container created
+  Normal   Started    10m                kubelet            Container started
+  Warning  Unhealthy  10m (x2 over 10m)  kubelet            Readiness probe failed: Get "http://10.244.0.6:6333/readyz": dial tcp 10.244.0.6:6333: connect: connection refused
+
+
+Name:             redis-74c49dd754-hkskk
+Namespace:        cognic-proofm85c
+Priority:         0
+Service Account:  default
+Node:             cognic-proofm85c-control-plane/172.27.0.2
+Start Time:       Tue, 21 Jul 2026 09:59:46 +0500
+Labels:           app=redis
+                  pod-template-hash=74c49dd754
+Annotations:      <none>
+Status:           Running
+IP:               10.244.0.11
+IPs:
+  IP:           10.244.0.11
+Controlled By:  ReplicaSet/redis-74c49dd754
+Containers:
+  redis:
+    Container ID:   containerd://7685cd4150718aaccfe002cc20975b1571034a72b63f384a7cc5e095a938f540
+    Image:          redis:7.4-alpine
+    Image ID:       docker.io/library/import-2026-07-21@sha256:79efd9c32eacd292d9a57f77979ca67f3d74d4d1387a19dd4e52a6ee2a3a3bae
+    Port:           6379/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Tue, 21 Jul 2026 09:59:47 +0500
+    Ready:          True
+    Restart Count:  0
+    Readiness:      exec [redis-cli ping] delay=2s timeout=1s period=5s #success=1 #failure=3
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-d56pl (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       True
+  ContainersReady             True
+  PodScheduled                True
+Volumes:
+  kube-api-access-d56pl:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type    Reason     Age   From               Message
+  ----    ------     ----  ----               -------
+  Normal  Scheduled  10m   default-scheduler  Successfully assigned cognic-proofm85c/redis-74c49dd754-hkskk to cognic-proofm85c-control-plane
+  Normal  Pulled     10m   kubelet            Container image "redis:7.4-alpine" already present on machine and can be accessed by the pod
+  Normal  Created    10m   kubelet            Container created
+  Normal  Started    10m   kubelet            Container started
+
+
+Name:             vault-564b656fbf-44lgh
+Namespace:        cognic-proofm85c
+Priority:         0
+Service Account:  default
+Node:             cognic-proofm85c-control-plane/172.27.0.2
+Start Time:       Tue, 21 Jul 2026 09:59:46 +0500
+Labels:           app=vault
+                  pod-template-hash=564b656fbf
+Annotations:      <none>
+Status:           Running
+IP:               10.244.0.7
+IPs:
+  IP:           10.244.0.7
+Controlled By:  ReplicaSet/vault-564b656fbf
+Containers:
+  vault:
+    Container ID:  containerd://66c654deaaa5c0b49617cb410793f9d2a50aeee9090ff3b2617795c0ba1ab869
+    Image:         hashicorp/vault:1.18
+    Image ID:      docker.io/library/import-2026-07-21@sha256:788f4ca97bc806dc326eddea9ef1c7f7659f01d64be365c3bc2e26cfe8c0765a
+    Port:          8200/TCP
+    Host Port:     0/TCP
+    Args:
+      server
+      -dev
+    State:          Running
+      Started:      Tue, 21 Jul 2026 09:59:47 +0500
+    Ready:          True
+    Restart Count:  0
+    Readiness:      http-get http://:8200/v1/sys/health delay=0s timeout=1s period=5s #success=1 #failure=3
+    Environment:
+      VAULT_DEV_ROOT_TOKEN_ID:   smoke-root-token
+      VAULT_DEV_LISTEN_ADDRESS:  0.0.0.0:8200
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-2d2l7 (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       True
+  ContainersReady             True
+  PodScheduled                True
+Volumes:
+  kube-api-access-2d2l7:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age                From               Message
+  ----     ------     ----               ----               -------
+  Normal   Scheduled  10m                default-scheduler  Successfully assigned cognic-proofm85c/vault-564b656fbf-44lgh to cognic-proofm85c-control-plane
+  Normal   Pulled     10m                kubelet            Container image "hashicorp/vault:1.18" already present on machine and can be accessed by the pod
+  Normal   Created    10m                kubelet            Container created
+  Normal   Started    10m                kubelet            Container started
+  Warning  Unhealthy  10m (x2 over 10m)  kubelet            Readiness probe failed: Get "http://10.244.0.7:8200/v1/sys/health": dial tcp 10.244.0.7:8200: connect: connection refused
+```
+- NOT-READY backend pod logs (current + previous instance):
+```
+----- logs: cognic-proof-keycloak-555bf644d-6fpff (tail 80) -----
+Error from server (BadRequest): container "keycloak" in pod "cognic-proof-keycloak-555bf644d-6fpff" is waiting to start: trying and failing to pull image
+----- previous-instance logs: cognic-proof-keycloak-555bf644d-6fpff (tail 40) -----
+Error from server (BadRequest): previous terminated container "keycloak" in pod "cognic-proof-keycloak-555bf644d-6fpff" not found
+----- describe: cognic-proof-keycloak-555bf644d-6fpff (tail 60) -----
+    State:          Waiting
+      Reason:       ImagePullBackOff
+    Ready:          False
+    Restart Count:  0
+    Limits:
+      memory:  1536Mi
+    Requests:
+      cpu:      200m
+      memory:   512Mi
+    Readiness:  tcp-socket :8443 delay=10s timeout=1s period=5s #success=1 #failure=60
+    Environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME:    proof-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD:    <set to the key 'password' in secret 'proof-m85c-keycloak-admin'>  Optional: false
+      KC_HOSTNAME:                    https://cognic-proof-keycloak:8443
+      KC_HTTP_ENABLED:                false
+      KC_HTTPS_CERTIFICATE_FILE:      /etc/keycloak-tls/tls.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE:  /etc/keycloak-tls/tls.key
+      KC_HTTPS_PORT:                  8443
+    Mounts:
+      /etc/keycloak-tls from tls (ro)
+      /opt/keycloak/data/import from realm (ro)
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-srdxr (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       False
+  ContainersReady             False
+  PodScheduled                True
+Volumes:
+  realm:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-keycloak-realm
+    Optional:    false
+  tls:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-keycloak-tls
+    Optional:    false
+  kube-api-access-srdxr:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   Burstable
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age                     From               Message
+  ----     ------     ----                    ----               -------
+  Normal   Scheduled  10m                     default-scheduler  Successfully assigned cognic-proofm85c/cognic-proof-keycloak-555bf644d-6fpff to cognic-proofm85c-control-plane
+  Warning  Failed     9m6s (x2 over 9m41s)    kubelet            Failed to pull image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to pull and unpack image "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to resolve reference "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to do request: Head "https://registry-1.docker.io/v2/keycloak/keycloak/manifests/sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": EOF
+  Warning  Failed     8m5s                    kubelet            Failed to pull image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to pull and unpack image "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to copy: httpReadSeeker: failed open: failed to authorize: failed to fetch anonymous token: Get "https://auth.docker.io/token?scope=%5BREDACTED%5D&service=%5BREDACTED%5D": net/http: TLS handshake timeout
+  Warning  Failed     6m56s                   kubelet            Failed to pull image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to pull and unpack image "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to resolve reference "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to do request: Head "https://registry-1.docker.io/v2/keycloak/keycloak/manifests/sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": dial tcp: lookup registry-1.docker.io on 172.27.0.1:53: read udp 172.27.0.2:48706->172.27.0.1:53: i/o timeout
+  Normal   Pulling    5m25s (x5 over 10m)     kubelet            Pulling image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9"
+  Warning  Failed     4m37s (x5 over 9m41s)   kubelet            Error: ErrImagePull
+  Warning  Failed     4m37s                   kubelet            Failed to pull image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to pull and unpack image "docker.io/keycloak/keycloak@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": failed to copy: httpReadSeeker: failed open: failed to do request: Get "https://registry-1.docker.io/v2/keycloak/keycloak/manifests/sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9": EOF
+  Warning  Failed     3m23s (x16 over 9m41s)  kubelet            Error: ImagePullBackOff
+  Normal   BackOff    2m16s (x21 over 9m41s)  kubelet            Back-off pulling image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9"
+```
