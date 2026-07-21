@@ -20,6 +20,7 @@ _PROOF = _REPO / "infra" / "proof-m85c"
 _RUNNER = _PROOF / "run-proof-m85c.sh"
 _STAGER = _PROOF / "stage-packs.sh"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
+_SEED_DB = _PROOF / "seed-db.sh"
 _ORACLE_PACK = _PROOF / "manifests" / "oracle-pack.yaml"
 _HR_LEAVE_PACK = _PROOF / "manifests" / "hr-leave-pack.yaml"
 _AGENTOS_PATCH = _PROOF / "agentos-sandbox-patch.yaml"
@@ -219,6 +220,35 @@ def test_seed_grants_the_write_action_without_broadening_sara() -> None:
     assert "analyst.amir" in seed
     sara_rows = "\n".join(line for line in seed.splitlines() if "analyst.sara" in line)
     assert "hr-leave" not in sara_rows
+
+
+def test_seed_db_readback_matches_the_expanded_e_assignment_matrix() -> None:
+    """The live readback must track the authority rows the SQL actually seeds."""
+    sql = _KERNEL_SEED.read_text(encoding="utf-8")
+    seed_db = _SEED_DB.read_text(encoding="utf-8")
+    scopes = sql.split("-- === data_scopes ===", 1)[1].split("-- === entitlements ===", 1)[0]
+    entitlements = sql.split("-- === entitlements ===", 1)[1].split(
+        "-- === action_entitlements ===", 1
+    )[0]
+    assignments = sql.split("-- === agent_assignments ===", 1)[1].split("COMMIT;", 1)[0]
+
+    derived = "|".join(
+        str(value)
+        for value in (
+            len(re.findall(r"\(\s*'proof-m85c',\s*'[^']+'", scopes)),
+            len(re.findall(r"\(gen_random_uuid\(\),\s*'proof-m85c'", entitlements)),
+            len(re.findall(r"\(gen_random_uuid\(\),\s*'proof-m85c'", assignments)),
+            entitlements.count("'atm_recon'"),
+            entitlements.count("'__SUBJECT_ANALYST_AMIR__'"),
+            entitlements.count("'__SUBJECT_ANALYST_SARA__'"),
+        )
+    )
+    witness = re.search(r'if \[ "\$COUNTS" != "([0-9|]+)" \]; then', seed_db)
+
+    assert derived == "7|7|12|0|5|2"
+    assert witness is not None
+    assert witness.group(1) == derived
+    assert f"readback expected {derived}" in seed_db
 
 
 def test_bars_a_through_h_remain_byte_identical() -> None:
