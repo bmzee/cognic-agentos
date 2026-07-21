@@ -105,3 +105,22 @@ def test_pinned_binary_downloads_retry_on_transient_failure() -> None:
         assert re.search(r"--retry\s+\d", flags), (
             f"{binary} download must carry --retry <n>; got flags: {flags!r}"
         )
+
+
+def test_builder_dependency_failures_are_not_swallowed_by_optional_strip() -> None:
+    """Only ELF stripping may fail softly after a frozen dependency sync.
+
+    An ungrouped trailing ``|| true`` applies to the whole ``uv sync && ...``
+    chain. A transient resolver failure can then publish an incomplete image
+    even though the dependency install failed. Keep the exception scoped to
+    ``strip`` in both builder stages.
+    """
+    bodies = _stage_bodies()
+    scoped_strip = (
+        '&& { find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true; }'
+    )
+    for stage in ("builder", "default-adapters-builder"):
+        logical_body = re.sub(r"\\\s*\n\s*", " ", bodies[stage])
+        assert scoped_strip in logical_body, (
+            f"{stage}: optional strip failure must be scoped so uv sync stays fail-closed"
+        )

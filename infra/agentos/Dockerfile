@@ -105,7 +105,7 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
  && find /opt/venv -depth \( -type d -name __pycache__ -o -type d -name tests -o -type d -name test \) -exec rm -rf {} + \
  && find /opt/venv -name "*.dist-info" -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/METADATA.bak' _ {} \; \
- && find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
+ && { find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true; }
 
 # ---------- runtime --------------------------------------------------
 FROM python:${PYTHON_VERSION}-alpine AS runtime
@@ -236,7 +236,7 @@ RUN if [ "$COGNIC_INCLUDE_SANDBOX_DOCKER" = "true" ]; then \
  && find /opt/venv -name "*.dist-info" -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/METADATA.bak' _ {} \; \
  && find /opt/venv -name "*.pyc" -delete \
  && find /opt/venv -name "*.pyi" -delete \
- && find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
+ && { find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true; }
 
 # Sprint 4 T13: cosign + OPA Go binaries for the trust gate + policy
 # engine. Both are statically-linked Go binaries (musl-compatible);
