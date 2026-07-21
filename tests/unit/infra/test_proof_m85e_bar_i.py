@@ -150,6 +150,8 @@ def test_agent_release_requests_the_complete_e_surface() -> None:
         'I_ABLATION_EXPECTED="skill:cards-data,skill:customer-data,skill:financial-data,' in runner
     )
     assert "identity separation is the chosen stable-evidence mechanism" in runner
+    assert "primary v0.2.0 uses its post-v0.1.0 rotated cosign + AgentCard JWS roots" in runner
+    assert "ablation v0.2.0 uses independently established roots" in runner
 
 
 def test_action_context_uses_a_distinct_per_run_keypair_and_runtime_secret() -> None:

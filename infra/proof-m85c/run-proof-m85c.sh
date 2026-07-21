@@ -6393,6 +6393,7 @@ I_ABLATION_EXPECTED="skill:cards-data,skill:customer-data,skill:financial-data,t
   || bar_fail "BAR I.0 atm-recon leaked into an agent assignment"
 echo "  Bar I.0 OK: production=8 assignments; ablation=4 assignment-level masks; atm-recon absent"
 echo "  A-007 provenance: with-vs-without + uplift are required; identity separation is the chosen stable-evidence mechanism"
+echo "  Trust provenance: primary v0.2.0 uses its post-v0.1.0 rotated cosign + AgentCard JWS roots; ablation v0.2.0 uses independently established roots; BAR I binds every released root and JWS digest as a committed literal"
 
 # I.1 — the ruled retail -> financial multi-turn proof. Turn 1 establishes the
 # top branch by deposits. Turn 2 deliberately says "that branch" so it depends
