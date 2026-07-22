@@ -6438,7 +6438,8 @@ printf '%s' "$I1_A2" | python3 -c '
 import re, sys
 answer = sys.stdin.read()
 digits = re.sub(r"[^0-9]", "", answer)
-assert "KHI-01" in answer and "2026-06" in answer
+period = re.search(r"\b(?:2026[-/]0?6|Jun(?:e)?\s+2026)\b", answer, re.IGNORECASE)
+assert "KHI-01" in answer and period is not None
 for value in ("25400000", "6100000", "12800000", "18700000"):
     assert value in digits
 ' || bar_fail "BAR I.1 turn 2 did not report the pinned KHI-01/2026-06 P&L row"

@@ -13,6 +13,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -294,6 +296,38 @@ def test_bar_i_prior_context_witness_parenthesizes_json_extractions() -> None:
     expected = "(payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256')"
 
     assert expected in bar
+
+
+def test_bar_i1_turn_2_accepts_the_pinned_period_in_iso_or_natural_month_form() -> None:
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    i1 = bar.split("# I.1", 1)[1].split("# I.2", 1)[0]
+    predicates = re.findall(r"python3 -c '\n(.*?)\n'", i1, re.DOTALL)
+    predicate = next(payload for payload in predicates if "25400000" in payload)
+    answer = (
+        'For branch "KHI-01", the profit and loss for {period} is: '
+        "interest income 25,400,000; fee income 6,100,000; "
+        "operating expense 12,800,000; net income 18,700,000."
+    )
+
+    for period in ("2026-06", "June 2026"):
+        result = subprocess.run(
+            [sys.executable, "-c", predicate],
+            input=answer.format(period=period),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    for drifted_period in ("June 2025", "May 2026"):
+        drifted = subprocess.run(
+            [sys.executable, "-c", predicate],
+            input=answer.format(period=drifted_period),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert drifted.returncode != 0, f"{drifted_period!r} must be rejected"
 
 
 def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
