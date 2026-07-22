@@ -289,6 +289,13 @@ def test_bar_i_has_the_closed_i0_through_i7_ledger_and_terminal_banner() -> None
     assert "PROOF M8.5-E (BARS A-I) PASS" in bar
 
 
+def test_bar_i_prior_context_witness_parenthesizes_json_extractions() -> None:
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    expected = "(payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256')"
+
+    assert expected in bar
+
+
 def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
     runner = _RUNNER.read_text(encoding="utf-8")
     bar_i = runner.index("# ============================ BAR I")

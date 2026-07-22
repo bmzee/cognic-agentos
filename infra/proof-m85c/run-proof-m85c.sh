@@ -6452,7 +6452,7 @@ I1_PNL_PIN="$(oracle_admin_sql "SELECT branch_code || '|' || period || '|' || TO
 I1_PNL_PIN="$(printf '%s' "$I1_PNL_PIN" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tail -n 1)"
 [ "$I1_PNL_PIN" = "KHI-01|2026-06|25400000.00|6100000.00|12800000.00|18700000.00" ] \
   || bar_fail "BAR I.1 live financial seed no longer matches the pinned 2026-06 row"
-I1_CONTEXT="$(PSQL "SELECT payload->>'prior_context_turns' || '|' || payload->>'prior_context_sha256' FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.started' AND payload->>'run_id'='$I1_RUN2';")"
+I1_CONTEXT="$(PSQL "SELECT (payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256') FROM decision_history WHERE tenant_id='$TENANT' AND event_type='agent.run.started' AND payload->>'run_id'='$I1_RUN2';")"
 [[ "$I1_CONTEXT" =~ ^2\|[0-9a-f]{64}$ ]] \
   || bar_fail "BAR I.1 turn 2 was not bound to exactly the two stored turn-1 context messages"
 I1_Q1_B64="$(conv_turn_plaintext_b64 "$I1_CID" 1 user_message)"
