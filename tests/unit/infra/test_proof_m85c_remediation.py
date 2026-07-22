@@ -5295,3 +5295,25 @@ def test_bar_i_bff_port_forward_reaps_the_old_owner_before_binding_the_next() ->
         assert 'kill -0 "$PF_BFF"' in function
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_bar_i_bff_port_forward_reap_is_watchdog_bounded_not_an_open_wait() -> None:
+    """A hang is worse than a red run: it leaves no record and no cleanup.
+
+    The reap must never depend on the forward honouring ``TERM``. A bare
+    ``wait`` blocks forever if it does not, stalling the proof silently with no
+    failure record, no torn-down cluster, and (under an unattended driver) no
+    strike or round-cap to trip — nothing ever *failed*. Pin the watchdog:
+    SIGKILL cannot be ignored, so ``wait`` is always guaranteed to return, and
+    the watchdog is cancelled on the normal path so a stale timer can never
+    SIGKILL a recycled PID.
+    """
+    function = _extract_shell_function("bff_pf_pod")
+    reap = function.split('kill "$PF_BFF"', 1)[1].split("kubectl", 1)[0]
+
+    assert 'sleep 5; kill -9 "$PF_BFF"' in reap, "reap has no SIGKILL watchdog"
+    assert "_reaper=$!" in reap, "watchdog pid is not captured"
+    assert 'wait "$PF_BFF"' in reap, "the old owner is never reaped"
+    assert 'kill "$_reaper"' in reap, "watchdog is not cancelled on the normal path"
+    assert 'wait "$_reaper"' in reap, "cancelled watchdog is not reaped"
+    assert "_reaper" in function.split("\n", 2)[1], "_reaper is not function-local"

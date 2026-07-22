@@ -1353,7 +1353,7 @@ bff_fresh_login_status() {
 # delegates here), and it records the choice in BFF_CURRENT_POD so bff_served_by can
 # name the serving replica for every subsequent step.
 bff_pf_pod() {
-  local pod="$1" _i
+  local pod="$1" _i _reaper
   [ -n "$pod" ] || bar_fail "bff_pf_pod: empty pod name (programming error)"
   BFF_CURRENT_POD="$pod"
   if [ -n "${PF_BFF:-}" ]; then
@@ -1361,7 +1361,17 @@ bff_pf_pod() {
     # Reap the old owner before rebinding 8444. Without this wait, the
     # readiness curl can hit the dying forward while the replacement exits on
     # EADDRINUSE; Chromium then observes ERR_NETWORK_CHANGED on the next step.
+    #
+    # The reap is WATCHDOG-BOUNDED: a bare `wait` blocks forever if the forward
+    # ever ignores TERM, and a hang produces no failure record and no cleanup —
+    # the one outcome worse than a red run. SIGKILL cannot be ignored, so the
+    # watchdog guarantees `wait` returns. The watchdog is itself killed on the
+    # normal path so a stale timer can never SIGKILL a recycled PID.
+    ( sleep 5; kill -9 "$PF_BFF" 2>/dev/null || true ) &
+    _reaper=$!
     wait "$PF_BFF" 2>/dev/null || true
+    kill "$_reaper" 2>/dev/null || true
+    wait "$_reaper" 2>/dev/null || true
     PF_BFF=""
   fi
   kubectl -n "$NS" port-forward --address 127.0.0.1 "$pod" "8444:$HARNESS_PORT" >/dev/null 2>&1 &
