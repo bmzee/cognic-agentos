@@ -5195,3 +5195,103 @@ def test_bar_i_keycloak_image_is_pre_pulled_and_kind_loaded_from_one_pin() -> No
     extra_images = _extract_shell_function("_extra_images")
     assert '"$KC_IMAGE"' in extra_images
     assert _RUNNER_TEXT.count("done < <(_backend_images; _extra_images)") == 2
+
+
+# --------------------------------------------------------------------------- #
+# BAR I live run — rotating a named-pod forward must be an atomic handoff.    #
+# --------------------------------------------------------------------------- #
+
+
+def test_bar_i_bff_port_forward_reaps_the_old_owner_before_binding_the_next() -> None:
+    """Drive the real handoff against a forward that lingers after ``TERM``.
+
+    Without ``wait``, the replacement observes the old process still owning the
+    port and exits, while the readiness curl can hit that dying old listener. The
+    next Chromium navigation then fails with ``ERR_NETWORK_CHANGED``. This fake
+    makes that overlap deterministic instead of relying on host timing.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        calls = tmp / "calls.log"
+        kubectl = bin_dir / "kubectl"
+        kubectl.write_text(
+            "#!/bin/bash\n"
+            "set -eu\n"
+            'if [ ! -f "$OLD_FORWARD_REAPED" ]; then\n'
+            '  echo overlap >> "$FAKE_CALL_LOG"\n'
+            "  exit 42\n"
+            "fi\n"
+            'echo replacement_started >> "$FAKE_CALL_LOG"\n'
+            "trap 'exit 0' TERM INT\n"
+            "while :; do /bin/sleep 0.05; done\n"
+        )
+        kubectl.chmod(0o755)
+        curl = bin_dir / "curl"
+        curl.write_text("#!/bin/sh\nexit 0\n")
+        curl.chmod(0o755)
+
+        function = _extract_shell_function("bff_pf_pod")
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                f'export PATH="{bin_dir}:$PATH"',
+                f'export FAKE_CALL_LOG="{calls}"',
+                f'export OLD_FORWARD_REAPED="{tmp / "old-reaped"}"',
+                (
+                    'wait() { builtin wait "$@"; local rc=$?; '
+                    ': > "$OLD_FORWARD_REAPED"; return "$rc"; }'
+                ),
+                "/bin/sleep 10 &",
+                'PF_BFF="$!"',
+                'export OLD_FORWARD_PID="$PF_BFF"',
+                'NS="proof-m85c"',
+                'HARNESS_PORT="8443"',
+                'HARNESS_BASE_URL="https://127.0.0.1:8444"',
+                'BFF_SERVING_PATH="/signin"',
+                'PROOF_CA="/tmp/proof-ca.pem"',
+                'BFF_CURRENT_POD=""',
+                'bar_fail() { echo "BAR_FAIL: $*" >&2; exit 91; }',
+                'bff_fail() { echo "BFF_FAIL: $*" >&2; exit 92; }',
+                function,
+                'bff_pf_pod "pod/replacement"',
+                'kill "$PF_BFF" 2>/dev/null || true',
+                'wait "$PF_BFF" 2>/dev/null || true',
+                'kill "$OLD_FORWARD_PID" 2>/dev/null || true',
+                'wait "$OLD_FORWARD_PID" 2>/dev/null || true',
+            ]
+        )
+        probe = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert probe.returncode == 0, f"stdout={probe.stdout!r} stderr={probe.stderr!r}"
+        assert calls.read_text().splitlines() == ["replacement_started"]
+
+        # A successful probe is not enough: prove the replacement process itself
+        # still owns the forward. The delayed fake curl gives an immediately exiting
+        # kubectl time to die; without the kill -0 conjunct this falsely returns green.
+        kubectl.write_text("#!/bin/sh\nexit 0\n")
+        curl.write_text("#!/bin/sh\n/bin/sleep 1\nexit 0\n")
+        dead_script = "\n".join(
+            [
+                "set -euo pipefail",
+                f'export PATH="{bin_dir}:$PATH"',
+                'PF_BFF=""',
+                'NS="proof-m85c"',
+                'HARNESS_PORT="8443"',
+                'HARNESS_BASE_URL="https://127.0.0.1:8444"',
+                'BFF_SERVING_PATH="/signin"',
+                'PROOF_CA="/tmp/proof-ca.pem"',
+                'BFF_CURRENT_POD=""',
+                "bar_fail() { exit 91; }",
+                "bff_fail() { exit 92; }",
+                function,
+                'bff_pf_pod "pod/dead-replacement"',
+            ]
+        )
+        dead_probe = subprocess.run(
+            ["bash", "-c", dead_script], capture_output=True, text=True, timeout=10
+        )
+        assert dead_probe.returncode == 92
+        assert 'kill -0 "$PF_BFF"' in function
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

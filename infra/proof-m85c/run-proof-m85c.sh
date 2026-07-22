@@ -1356,12 +1356,23 @@ bff_pf_pod() {
   local pod="$1" _i
   [ -n "$pod" ] || bar_fail "bff_pf_pod: empty pod name (programming error)"
   BFF_CURRENT_POD="$pod"
-  [ -n "${PF_BFF:-}" ] && kill "$PF_BFF" 2>/dev/null || true
+  if [ -n "${PF_BFF:-}" ]; then
+    kill "$PF_BFF" 2>/dev/null || true
+    # Reap the old owner before rebinding 8444. Without this wait, the
+    # readiness curl can hit the dying forward while the replacement exits on
+    # EADDRINUSE; Chromium then observes ERR_NETWORK_CHANGED on the next step.
+    wait "$PF_BFF" 2>/dev/null || true
+    PF_BFF=""
+  fi
   kubectl -n "$NS" port-forward --address 127.0.0.1 "$pod" "8444:$HARNESS_PORT" >/dev/null 2>&1 &
   PF_BFF=$!
   for _i in $(seq 1 30); do
+    if ! kill -0 "$PF_BFF" 2>/dev/null; then
+      bff_fail "per-pod port-forward to $pod exited before becoming reachable"
+    fi
     if curl -fsS -o /dev/null --max-time 5 --cacert "$PROOF_CA" \
-        "$HARNESS_BASE_URL$BFF_SERVING_PATH" 2>/dev/null; then
+        "$HARNESS_BASE_URL$BFF_SERVING_PATH" 2>/dev/null \
+        && kill -0 "$PF_BFF" 2>/dev/null; then
       return 0
     fi
     sleep 1
