@@ -6510,10 +6510,34 @@ I3_AMIR_TURN="$(conv_turn amir "$I3_AMIR_CID" "$I3_QUESTION")"
 load_http_code
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR I.3 Amir cards turn did not return a governed answer"
 I3_AMIR_RUN="$(json_field agent_run_id "$I3_AMIR_TURN")"
-[ "$(json_field refusal_reason "$I3_AMIR_TURN")" = "agent_scope_not_entitled" ] \
-  || bar_fail "BAR I.3 Amir's cards request did not surface agent_scope_not_entitled"
-[ "$(run_dispatch_count "$I3_AMIR_RUN" "payload->>'outcome'='refused' AND payload->>'refusal_reason'='agent_scope_not_entitled' AND payload->>'scope_id'='cards_analytics'")" -ge 1 ] \
+[ "$(json_field terminal_state "$I3_AMIR_TURN")" = "completed" ] \
+  || bar_fail "BAR I.3 Amir's graceful cards refusal did not complete"
+json_assert "BAR I.3 Amir cards refusal is not visible in the chat answer" '
+import json, re, sys
+doc = json.loads(sys.stdin.read())
+answer = doc.get("answer")
+assert isinstance(answer, str), "answer is not a string"
+card = re.compile(r"\b(?:cards?|cards_analytics)\b", re.IGNORECASE)
+denial = re.compile(
+    r"\b(?:not\s+(?:available|entitled|permitted|authori[sz]ed)|"
+    r"(?:unable\s+to|can(?:no|\x27)t)\s+(?:access|retrieve|provide)|"
+    r"(?:do\s+not|don\x27t)\s+have\s+(?:the\s+)?(?:required\s+)?"
+    r"(?:access|entitlement|permission)|"
+    r"(?:access|entitlement|permission)\s+(?:is\s+)?(?:denied|missing|required))\b",
+    re.IGNORECASE,
+)
+sentences = re.split(r"(?<=[.!?])\s+", answer)
+assert any(card.search(sentence) and denial.search(sentence) for sentence in sentences), (
+    "cards entitlement boundary is absent"
+)
+print("ok")
+' "$I3_AMIR_TURN"
+I3_AMIR_REFUSED="$(run_dispatch_count "$I3_AMIR_RUN" "payload->>'outcome'='refused' AND payload->>'refusal_reason'='agent_scope_not_entitled' AND payload->>'scope_id'='cards_analytics'")"
+[ "$I3_AMIR_REFUSED" -ge 1 ] \
   || bar_fail "BAR I.3 Amir's cards refusal is absent from the chain"
+I3_AMIR_OK="$(run_dispatch_count "$I3_AMIR_RUN" "payload->>'outcome'='ok' AND payload->>'scope_id'='cards_analytics'")"
+[ "$I3_AMIR_OK" = "0" ] \
+  || bar_fail "BAR I.3 Amir's unentitled cards request dispatched successfully"
 
 I3_SARA_CREATE="$(conv_create sara)"
 load_http_code
@@ -6527,7 +6551,7 @@ I3_SARA_RUN="$(json_field agent_run_id "$I3_SARA_TURN")"
   || bar_fail "BAR I.3 Sara's entitled cards request did not complete"
 [ "$(run_dispatch_count "$I3_SARA_RUN" "payload->>'outcome'='ok' AND payload->>'scope_id'='cards_analytics' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query'")" -ge 1 ] \
   || bar_fail "BAR I.3 Sara's answer has no successful cards_analytics dispatch"
-echo "  Bar I.3 OK: identical cards ask -> Amir refused visibly + in chain; Sara answered under entitlement"
+echo "  Bar I.3 OK: identical cards ask -> Amir's graceful refusal was visible + chain-exact with zero cards execution; Sara answered under entitlement"
 
 # I.4 — chat-originated governed write. Assignment belongs to the bank; the
 # action remains bound to Amir's signed context and executes only after two

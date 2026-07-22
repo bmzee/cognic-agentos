@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -328,6 +329,69 @@ def test_bar_i1_turn_2_accepts_the_pinned_period_in_iso_or_natural_month_form() 
             check=False,
         )
         assert drifted.returncode != 0, f"{drifted_period!r} must be rejected"
+
+
+def test_bar_i3_accepts_a_visible_recovered_refusal_and_rejects_an_answer() -> None:
+    """A dispatch refusal is evidence, not necessarily the run terminal state.
+
+    The agent loop deliberately lets the model turn a refused tool call into a
+    graceful answer.  Pin the BAR-I contract at its two real surfaces: the
+    answer visibly names the cards boundary, while the immutable dispatch row
+    carries the closed refusal reason (the structural companion test below).
+    """
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    i3 = bar.split("# I.3", 1)[1].split("# I.4", 1)[0]
+    label = "BAR I.3 Amir cards refusal is not visible in the chat answer"
+    match = re.search(
+        rf'json_assert "{re.escape(label)}" \'\n(.*?)\n\' "\$I3_AMIR_TURN"',
+        i3,
+        re.DOTALL,
+    )
+    assert match is not None
+    predicate = match.group(1)
+
+    observed = {
+        "terminal_state": "completed",
+        "refusal_reason": None,
+        "answer": (
+            "I am unable to access the data scope necessary to retrieve "
+            "information about the card with the highest total spend. The "
+            "cards_analytics scope is not entitled for this request."
+        ),
+    }
+    accepted = subprocess.run(
+        [sys.executable, "-c", predicate],
+        input=json.dumps(observed),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout == "ok\n"
+
+    for answer in (
+        "The highest-spend card is 411111, with total spend of 9000.",
+        "Financial data is unavailable. The highest-spend card is 411111.",
+    ):
+        rejected = subprocess.run(
+            [sys.executable, "-c", predicate],
+            input=json.dumps({**observed, "answer": answer}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected.returncode != 0, f"affirmative answer passed: {answer!r}"
+
+
+def test_bar_i3_pins_the_chain_refusal_and_zero_cards_dispatches_for_amir() -> None:
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    i3 = bar.split("# I.3", 1)[1].split("# I.4", 1)[0]
+
+    assert 'json_field refusal_reason "$I3_AMIR_TURN"' not in i3
+    assert "payload->>'refusal_reason'='agent_scope_not_entitled'" in i3
+    assert "payload->>'scope_id'='cards_analytics'" in i3
+    assert 'I3_AMIR_OK="$(run_dispatch_count' in i3
+    assert '[ "$I3_AMIR_OK" = "0" ]' in i3
 
 
 def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
