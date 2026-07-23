@@ -353,21 +353,29 @@ def test_bar_i3_accepts_a_visible_recovered_refusal_and_rejects_an_answer() -> N
     observed = {
         "terminal_state": "completed",
         "refusal_reason": None,
-        "answer": (
+    }
+    accepted_answers = (
+        (
             "I am unable to access the data scope necessary to retrieve "
             "information about the card with the highest total spend. The "
             "cards_analytics scope is not entitled for this request."
         ),
-    }
-    accepted = subprocess.run(
-        [sys.executable, "-c", predicate],
-        input=json.dumps(observed),
-        text=True,
-        capture_output=True,
-        check=False,
+        (
+            "I am not able to access the card spending data for the requested "
+            "month. The data scope required for this information is not within "
+            "the current entitlements."
+        ),
     )
-    assert accepted.returncode == 0, accepted.stderr
-    assert accepted.stdout == "ok\n"
+    for answer in accepted_answers:
+        accepted = subprocess.run(
+            [sys.executable, "-c", predicate],
+            input=json.dumps({**observed, "answer": answer}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert accepted.returncode == 0, accepted.stderr
+        assert accepted.stdout == "ok\n"
 
     for answer in (
         "The highest-spend card is 411111, with total spend of 9000.",

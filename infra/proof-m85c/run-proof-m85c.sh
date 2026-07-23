@@ -6541,7 +6541,7 @@ assert isinstance(answer, str), "answer is not a string"
 card = re.compile(r"\b(?:cards?|cards_analytics)\b", re.IGNORECASE)
 denial = re.compile(
     r"\b(?:not\s+(?:available|entitled|permitted|authori[sz]ed)|"
-    r"(?:unable\s+to|can(?:no|\x27)t)\s+(?:access|retrieve|provide)|"
+    r"(?:(?:unable|not\s+able)\s+to|can(?:no|\x27)t)\s+(?:access|retrieve|provide)|"
     r"(?:do\s+not|don\x27t)\s+have\s+(?:the\s+)?(?:required\s+)?"
     r"(?:access|entitlement|permission)|"
     r"(?:access|entitlement|permission)\s+(?:is\s+)?(?:denied|missing|required))\b",
