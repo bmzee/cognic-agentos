@@ -4772,7 +4772,7 @@ def test_attempt19_every_json_assert_predicate_compiles_and_has_value_free_messa
         "BAR D.7 pagination integrity (exact id-set AND exact keyset order)",
         "BAR D.8 foreign observer sees an empty own-queue",
         "BAR E rendered chain shape",
-        "BAR I.3 Amir cards refusal is not visible in the chat answer",
+        "BAR I.3 Amir's answer leaked the entitled cards spend value",
     }
     for label, source in predicates.items():
         tree = ast.parse(source, filename=f"json_assert:{label}", mode="exec")

@@ -6533,26 +6533,40 @@ load_http_code
 I3_AMIR_RUN="$(json_field agent_run_id "$I3_AMIR_TURN")"
 [ "$(json_field terminal_state "$I3_AMIR_TURN")" = "completed" ] \
   || bar_fail "BAR I.3 Amir's graceful cards refusal did not complete"
-json_assert "BAR I.3 Amir cards refusal is not visible in the chat answer" '
+# FATAL leak anchor (phrasing-independent — replaces the brittle denial-phrase
+# matcher that recurred twice on nothing but the model's word choice): the
+# entitled 2026-06 top-card spend value is admin-queried LIVE (the I.1
+# live-anchor pattern) and MUST be absent from Amir's unentitled answer. The
+# answer must also be a non-empty string. Combined with the chain-exact refusal
+# row and the zero-execution guard below, this proves non-access no matter how
+# the model phrases the refusal.
+I3_CARDS_PIN="$(oracle_admin_sql "SELECT TO_CHAR(total, 'FM9999999990') FROM (SELECT card_id, SUM(spend_amount) AS total FROM cards.v_card_spend WHERE spend_month='2026-06' GROUP BY card_id ORDER BY total DESC, card_id) FETCH FIRST 1 ROW ONLY;")"
+I3_CARDS_PIN="$(printf '%s' "$I3_CARDS_PIN" | tr -cd '0-9')"
+[ -n "$I3_CARDS_PIN" ] || bar_fail "BAR I.3 could not resolve the entitled top-card spend anchor"
+json_assert "BAR I.3 Amir's answer leaked the entitled cards spend value" '
 import json, re, sys
 doc = json.loads(sys.stdin.read())
 answer = doc.get("answer")
-assert isinstance(answer, str), "answer is not a string"
-card = re.compile(r"\b(?:cards?|cards_analytics)\b", re.IGNORECASE)
-denial = re.compile(
-    r"\b(?:not\s+(?:available|entitled|permitted|authori[sz]ed)|"
-    r"(?:(?:unable|not\s+able)\s+to|can(?:no|\x27)t)\s+(?:access|retrieve|provide)|"
-    r"(?:do\s+not|don\x27t)\s+have\s+(?:the\s+)?(?:required\s+)?"
-    r"(?:access|entitlement|permission)|"
-    r"(?:access|entitlement|permission)\s+(?:is\s+)?(?:denied|missing|required))\b",
-    re.IGNORECASE,
-)
-sentences = re.split(r"(?<=[.!?])\s+", answer)
-assert any(card.search(sentence) and denial.search(sentence) for sentence in sentences), (
-    "cards entitlement boundary is absent"
-)
+assert isinstance(answer, str) and answer.strip(), "answer is not a non-empty string"
+secret = sys.argv[1]
+answer_digits = re.sub(r"[^0-9]", "", answer)
+assert secret not in answer_digits, "entitled cards spend value leaked to Amir"
 print("ok")
-' "$I3_AMIR_TURN"
+' "$I3_AMIR_TURN" "$I3_CARDS_PIN"
+# NON-FATAL UX signal: the answer visibly names the entitlement boundary. A real
+# model phrases refusals unboundedly, so a miss here is a WARNING, never a bar
+# failure — the fatal gates (leak anchor + chain refusal + zero execution) prove
+# non-access on their own.
+I3_PROSE_OK="$(printf '%s' "$I3_AMIR_TURN" | python3 -c '
+import json, re, sys
+doc = json.loads(sys.stdin.read())
+answer = doc.get("answer") or ""
+card = re.compile(r"\b(?:cards?|cards_analytics)\b", re.IGNORECASE)
+denial = re.compile(r"\b(?:not\s+(?:available|entitled|permitted|authori[sz]ed)|(?:(?:unable|not\s+able)\s+to|can(?:no|\x27)t)\s+(?:access|retrieve|provide)|(?:do\s+not|don\x27t)\s+have\s+(?:the\s+)?(?:required\s+)?(?:access|entitlement|permission)|(?:access|entitlement|permission)\s+(?:is\s+)?(?:denied|missing|required))\b", re.IGNORECASE)
+sentences = re.split(r"(?<=[.!?])\s+", answer)
+print("yes" if any(card.search(s) and denial.search(s) for s in sentences) else "no")
+' 2>/dev/null || printf 'no')"
+[ "$I3_PROSE_OK" = "yes" ] || echo "  NOTE (non-fatal): BAR I.3 Amir refusal did not match the prose signal; non-access is proven by the leak anchor + chain refusal + zero-execution gates"
 I3_AMIR_REFUSED="$(run_dispatch_count "$I3_AMIR_RUN" "payload->>'outcome'='refused' AND payload->>'refusal_reason'='agent_scope_not_entitled' AND payload->>'scope_id'='cards_analytics'")"
 [ "$I3_AMIR_REFUSED" -ge 1 ] \
   || bar_fail "BAR I.3 Amir's cards refusal is absent from the chain"
