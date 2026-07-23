@@ -24,7 +24,6 @@ import hashlib
 import json
 import logging
 import pathlib
-import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -1075,14 +1074,86 @@ class TestBuildLlmToolSpecs:
         (action_spec, *_) = build_llm_tool_specs(
             run=run,
             capability_classes={_OTHER_REF: "action"},
+            action_tool_schemas={
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "leave_type": {"type": "string"},
+                    },
+                    "required": ["start_date", "end_date", "leave_type"],
+                }
+            },
         )
         assert action_spec.name == "other_tool"
+        assert set(action_spec.parameters["properties"]) == {
+            "start_date",
+            "end_date",
+            "leave_type",
+        }
+        assert action_spec.parameters["required"] == [
+            "start_date",
+            "end_date",
+            "leave_type",
+        ]
         assert action_spec.parameters["additionalProperties"] is False
         assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters["properties"]
         assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters.get("required", [])
-        (key_pattern,) = action_spec.parameters["patternProperties"]
-        assert re.fullmatch(key_pattern, ACTION_CONTEXT_ARGUMENT) is None
-        assert re.fullmatch(key_pattern, "amount") is not None
+
+    @pytest.mark.parametrize(
+        "schemas",
+        [
+            {},
+            {_OTHER_REF: {"type": "array"}},
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": "not-a-schema"},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {ACTION_CONTEXT_ARGUMENT: {"type": "string"}},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "patternProperties": {".*": {}},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "required": ["missing"],
+                }
+            },
+        ],
+    )
+    def test_action_without_a_safe_live_schema_is_not_advertised(
+        self, schemas: dict[str, dict[str, Any]]
+    ) -> None:
+        run = _run(
+            granted=GrantedCapabilities(
+                skills=frozenset(),
+                tools=frozenset({_OTHER_REF}),
+            )
+        )
+
+        names = {
+            spec.name
+            for spec in build_llm_tool_specs(
+                run=run,
+                capability_classes={_OTHER_REF: "action"},
+                action_tool_schemas=schemas,
+            )
+        }
+
+        assert "other_tool" not in names
 
 
 class TestReservedActionContext:

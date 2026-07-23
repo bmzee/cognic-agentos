@@ -131,6 +131,24 @@ class _NoSkills:
         return None
 
 
+class _ActionSchemas:
+    async def load_action_schemas(
+        self, *, tenant_id: str, tool_refs: frozenset[str]
+    ) -> dict[str, dict[str, Any]]:
+        assert tenant_id == _TENANT
+        assert tool_refs == frozenset({_TOOL_REF})
+        return {
+            _TOOL_REF: {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string"},
+                    "amount": {"type": "integer"},
+                },
+                "required": ["account_id", "amount"],
+            }
+        }
+
+
 class _MemoryAPI:
     async def remember(self, *args: Any, **kwargs: Any) -> uuid.UUID:
         return uuid.uuid4()
@@ -314,6 +332,7 @@ async def test_governed_write_pending_grant_execute_and_replay(
             gateway=cast(Any, gateway),
             dispatcher=dispatcher,
             tool_capability_classes={_TOOL_REF: "action"},
+            action_tool_schema_provider=_ActionSchemas(),
             skill_reader=reader,
             memory_factory=memory,
             decision_history=history,

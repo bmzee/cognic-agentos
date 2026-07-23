@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata as md
 import logging
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -469,6 +470,54 @@ class _MCPHostAgentToolProxy:
         return cast("dict[str, Any]", _project_tool_result(getattr(result, "payload", result)))
 
 
+class _MCPHostActionToolSchemaProvider:
+    """Resolve granted action schemas through the tenant-authenticated MCP host."""
+
+    def __init__(self, mcp_host: Any) -> None:
+        self._host = mcp_host
+
+    async def load_action_schemas(
+        self, *, tenant_id: str, tool_refs: frozenset[str]
+    ) -> dict[str, dict[str, Any]]:
+        by_server: dict[str, set[str]] = {}
+        for ref in tool_refs:
+            server_id, separator, tool_name = ref.partition("/")
+            if separator and server_id and tool_name:
+                by_server.setdefault(server_id, set()).add(tool_name)
+
+        schemas: dict[str, dict[str, Any]] = {}
+        for server_id in sorted(by_server):
+            requested_names = by_server[server_id]
+            descriptors = await self._host.list_tools(
+                server_id=server_id,
+                request_id=f"agent-schema-{uuid.uuid4().hex}",
+                tenant_id=tenant_id,
+            )
+            seen: set[str] = set()
+            duplicates: set[str] = set()
+            for descriptor in descriptors:
+                if isinstance(descriptor, dict):
+                    name = descriptor.get("name")
+                    schema = descriptor.get("inputSchema")
+                else:
+                    name = getattr(descriptor, "name", None)
+                    schema = getattr(descriptor, "inputSchema", None)
+                    if schema is None:
+                        schema = getattr(descriptor, "input_schema", None)
+                if not isinstance(name, str) or name not in requested_names:
+                    continue
+                if name in seen:
+                    duplicates.add(name)
+                    schemas.pop(f"{server_id}/{name}", None)
+                    continue
+                seen.add(name)
+                if isinstance(schema, dict):
+                    schemas[f"{server_id}/{name}"] = schema
+            for name in duplicates:
+                schemas.pop(f"{server_id}/{name}", None)
+        return schemas
+
+
 def _resolve_signing_key(path_value: str | None) -> tuple[bytes | None, list[str]]:
     """Resolve ``Settings.agent_query_context_signing_key_path`` to PEM bytes.
 
@@ -582,6 +631,7 @@ async def build_agent_loop(
         gateway=runtime.llm_gateway,
         dispatcher=dispatcher,
         tool_capability_classes=tool_capability_classes,
+        action_tool_schema_provider=_MCPHostActionToolSchemaProvider(mcp_host),
         skill_reader=skill_reader,
         memory_factory=runtime.memory_api_factory,
         decision_history=runtime.decision_history_store,

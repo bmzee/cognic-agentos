@@ -59,6 +59,7 @@ executor's sandbox-import precedent; ``llm`` is deliberately NOT on the
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import secrets
@@ -268,6 +269,39 @@ def _granted_tool_name_map(tools: frozenset[str]) -> dict[str, str]:
             continue
         mapping[tool_name] = ref
     return mapping
+
+
+def _closed_action_tool_schema(schema: object) -> dict[str, Any] | None:
+    """Project one live MCP action schema onto the model surface.
+
+    Action schemas are endpoint-authored data. Only an explicit object schema
+    with named properties is accepted; dynamic-key schemas are omitted because
+    they cannot prove that the kernel-owned action-context key is unmodelable.
+    The returned copy is closed even when the MCP schema omitted
+    ``additionalProperties`` (JSON Schema's permissive default).
+    """
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    properties = schema.get("properties")
+    if (
+        not isinstance(properties, dict)
+        or not all(isinstance(key, str) for key in properties)
+        or not all(isinstance(value, dict) for value in properties.values())
+    ):
+        return None
+    if _ACTION_CONTEXT_ARG in properties or "patternProperties" in schema:
+        return None
+    required = schema.get("required", [])
+    if (
+        not isinstance(required, list)
+        or not all(isinstance(key, str) for key in required)
+        or not set(required).issubset(properties)
+        or _ACTION_CONTEXT_ARG in required
+    ):
+        return None
+    projected = copy.deepcopy(schema)
+    projected["additionalProperties"] = False
+    return projected
 
 
 def _resolve_capability(name: str, granted: GrantedCapabilities) -> CapabilityRef | None:
@@ -786,14 +820,17 @@ def build_llm_tool_specs(
     *,
     run: AgentRunContext,
     capability_classes: Mapping[str, str],
+    action_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[GatewayToolSpec, ...]:
     """The LLM-facing capability surface — kernel-curated for the M8 lane.
 
     One spec per RESOLVABLE granted tool (name = the tool_name segment, off
     the SAME name map dispatch resolves against; duplicates/malformed refs are
     advertised to the LLM as nothing at all) + the two built-ins. The signed
-    class map selects the strict data-query schema. Dispatch independently
-    refuses any granted tool whose class is absent, unknown, or reserved.
+    class map selects the strict data-query schema. Action tools use the live,
+    tenant-scoped MCP input schema supplied by the composition seam; absent or
+    unsafe action schemas are not advertised. Dispatch independently refuses
+    any granted tool whose class is absent, unknown, or reserved.
 
     THE SCHEMA-EXCLUSION PIN: the ``run_readonly_query`` parameters are
     EXACTLY ``{scope_id (required), sql (required), max_rows (optional)}`` —
@@ -832,17 +869,11 @@ def build_llm_tool_specs(
             }
             description = "Run a governed read-only SQL query inside an entitled data scope."
         elif capability_class == "action":
-            # Generic action metadata is not yet projected from MCP tool
-            # schemas. Keep arbitrary application keys possible while closing
-            # the object and excluding the one kernel-owned stamp key.
-            parameters = {
-                "type": "object",
-                "properties": {},
-                "patternProperties": {
-                    r"^(?!_cognic_action_context$).+$": {},
-                },
-                "additionalProperties": False,
-            }
+            schema = (action_tool_schemas or {}).get(full_ref)
+            projected = _closed_action_tool_schema(schema)
+            if projected is None:
+                continue
+            parameters = projected
             description = f"Request the governed action '{tool_name}'."
         else:
             # The kernel does not curate non-data-query tool schemas in this
