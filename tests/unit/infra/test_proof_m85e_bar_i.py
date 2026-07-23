@@ -14,6 +14,7 @@ import ast
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -551,3 +552,100 @@ def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
     assert "read -r" in runner[hold:]
     assert "kubectl" in runner[hold:]
     assert "sqlplus" in runner[hold:]
+
+
+def test_bar_i6_extract_eval_pack_resolves_package_before_destination_under_set_u(
+    tmp_path: Path,
+) -> None:
+    """The destination must not expand package in the same local command.
+
+    Bash expands every argument to ``local`` before assigning any of them.
+    Under the runner's ``set -u``, a declaration such as
+    ``local package="$2" destination=".../$package"`` therefore aborts before
+    the first signed skill wheel can be inspected.
+    """
+    runner = _RUNNER.read_text(encoding="utf-8")
+    match = re.search(
+        r"^extract_eval_pack\(\) \{\n.*?^\}",
+        runner,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    eval_root = tmp_path / "eval"
+    staging_root = tmp_path / "staging"
+    expected = eval_root / "cognic_skill_hr_data" / "cognic_skill_hr_data"
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"I_EVAL_ROOT={shlex.quote(str(eval_root))}",
+            f"STAGING_DST={shlex.quote(str(staging_root))}",
+            'bar_fail() { printf "BAR_FAIL: %s\\n" "$*" >&2; exit 91; }',
+            (
+                "unzip() { "
+                'local destination="${4:?}"; '
+                'mkdir -p "$destination/cognic_skill_hr_data/golden"; '
+                'printf "skill\\n" > "$destination/cognic_skill_hr_data/SKILL.md"; '
+                'printf "{}\\n" > '
+                '"$destination/cognic_skill_hr_data/golden/queries.jsonl"; '
+                'printf "[corpus]\\n" > '
+                '"$destination/cognic_skill_hr_data/golden/manifest.toml"; '
+                "}"
+            ),
+            match.group(0),
+            'result="$(extract_eval_pack fixture.whl cognic_skill_hr_data)"',
+            'printf "RESULT=%s\\n" "$result"',
+        )
+    )
+
+    probe = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert "unbound variable" not in probe.stderr, probe.stderr
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout == f"RESULT={expected}\n"
+
+
+def test_runner_has_no_same_local_command_assignment_self_references() -> None:
+    """No later local assignment may expand a name assigned beside it.
+
+    Bash expands the complete ``local`` command before performing any of its
+    assignments. This whole-runner scan closes the class that previously
+    affected login helpers and two BAR-I.6 functions.
+    """
+    runner = _RUNNER.read_text(encoding="utf-8")
+    local_commands = re.finditer(
+        r"^[ \t]*local[ \t]+(?:\\\n|[^\n])*",
+        runner,
+        re.MULTILINE,
+    )
+    assignment = re.compile(r"(?<!\S)([A-Za-z_][A-Za-z0-9_]*)=")
+    violations: list[str] = []
+
+    for command_match in local_commands:
+        command = command_match.group(0).replace("\\\n", " ")
+        declarations = list(assignment.finditer(command))
+        line_number = runner.count("\n", 0, command_match.start()) + 1
+        for declared_index, declared in enumerate(declarations):
+            name = declared.group(1)
+            reference = re.compile(
+                rf"\$(?:{re.escape(name)}(?![A-Za-z0-9_])|"
+                rf"\{{{re.escape(name)}(?=[^A-Za-z0-9_]))"
+            )
+            for later_index in range(declared_index + 1, len(declarations)):
+                later = declarations[later_index]
+                value_end = (
+                    declarations[later_index + 1].start()
+                    if later_index + 1 < len(declarations)
+                    else len(command)
+                )
+                if reference.search(command[later.end() : value_end]):
+                    violations.append(
+                        f"line {line_number}: {name} is expanded while assigning "
+                        f"{later.group(1)} in the same local command"
+                    )
+
+    assert violations == [], "\n".join(violations)

@@ -6765,7 +6765,8 @@ mkdir -p "$I_EVAL_ROOT"
 command -v unzip >/dev/null 2>&1 || bar_fail "BAR I.6 requires unzip to inspect the signed wheels"
 
 extract_eval_pack() {
-  local wheel="$1" package="$2" destination="$I_EVAL_ROOT/$package"
+  local wheel="$1" package="$2"
+  local destination="$I_EVAL_ROOT/$package"
   mkdir -p "$destination"
   unzip -q "$STAGING_DST/wheel/$wheel" -d "$destination"
   [ -s "$destination/$package/SKILL.md" ] \
@@ -6837,7 +6838,8 @@ json.dump(
 }
 
 run_skill_gate() {
-  local label="$1" pack_dir="$2" proxy_identity="$3" references="$I_EVAL_ROOT/$label-reference-results.json" report rc
+  local label="$1" pack_dir="$2" proxy_identity="$3" report rc
+  local references="$I_EVAL_ROOT/$label-reference-results.json"
   build_live_reference_results "$pack_dir" "$proxy_identity" "$references"
   ensure_token amir
   set +e
