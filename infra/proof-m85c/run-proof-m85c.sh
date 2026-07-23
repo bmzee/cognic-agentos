@@ -6640,10 +6640,41 @@ load_http_code
 [ "$(json_field execution "$I4_GRANT2")" = "executed" ] \
   || bar_fail "BAR I.4 final grant did not auto-execute the action"
 I4_SUBJECT_REF="$(bound_subject analyst.amir | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode()).hexdigest())')"
-[ "$(oracle_admin_sql "SELECT COUNT(*) FROM hr_app.leave_requests WHERE employee_id=103 AND start_date=DATE '2026-08-03' AND end_date=DATE '2026-08-05' AND leave_type='annual' AND requested_by='$I4_SUBJECT_REF';" | tr -d '[:space:]')" = "1" ] \
-  || bar_fail "BAR I.4 Oracle has no exact employee-103 self-leave row bound to Amir"
 [ "$(oracle_admin_sql 'SELECT COUNT(*) FROM hr_app.leave_requests;' | tr -d '[:space:]')" = "1" ] \
   || bar_fail "BAR I.4 write did not produce exactly one total leave row"
+I4_REPLAY_WITNESS="$(PSQL "SELECT encode(canonical_args, 'hex') || '|' || encode(args_digest, 'hex') FROM approval_replay_payloads WHERE tenant_id='$TENANT' AND request_id='$I4_REQ';")"
+I4_ORACLE_WITNESS="$(oracle_admin_sql "SELECT TO_CHAR(employee_id) || '|' || TO_CHAR(start_date, 'YYYY-MM-DD') || '|' || TO_CHAR(end_date, 'YYYY-MM-DD') || '|' || RAWTOHEX(UTL_I18N.STRING_TO_RAW(leave_type, 'AL32UTF8')) || '|' || RAWTOHEX(UTL_I18N.STRING_TO_RAW(reason, 'AL32UTF8')) || '|' || requested_by FROM hr_app.leave_requests;")"
+I4_WRITE_WITNESS="$(printf '%s\n%s' "$I4_REPLAY_WITNESS" "$I4_ORACLE_WITNESS" | python3 -c 'import json,sys; lines=sys.stdin.read().splitlines(); replay=(lines[0].split("|",1) if lines else [""]); print(json.dumps({"replay_hex":replay[0],"args_digest_hex":replay[1] if len(replay)==2 else "","oracle_row":lines[1] if len(lines)==2 else ""}))')"
+json_assert "BAR I.4 Oracle row does not match the digest-verified approved arguments" '
+import hashlib, json, re, sys
+doc = json.loads(sys.stdin.read())
+replay_hex = doc.get("replay_hex")
+args_digest_hex = doc.get("args_digest_hex")
+oracle_row = doc.get("oracle_row")
+assert isinstance(replay_hex, str) and re.fullmatch(r"[0-9a-f]+", replay_hex) and len(replay_hex) % 2 == 0, "replay_bytes_invalid"
+assert isinstance(args_digest_hex, str) and re.fullmatch(r"[0-9a-f]{64}", args_digest_hex), "replay_digest_invalid"
+assert isinstance(oracle_row, str), "oracle_row_invalid"
+approved_bytes = bytes.fromhex(replay_hex)
+assert hashlib.sha256(approved_bytes).hexdigest() == args_digest_hex, "approved_replay_digest_mismatch"
+arguments = json.loads(approved_bytes.decode("utf-8"))
+expected_keys = {"start_date", "end_date", "leave_type", "reason"}
+assert isinstance(arguments, dict) and set(arguments) == expected_keys, "approved_arguments_shape_invalid"
+assert all(isinstance(arguments[key], str) and arguments[key] for key in expected_keys), "approved_argument_value_invalid"
+assert arguments["start_date"] == "2026-08-03" and arguments["end_date"] == "2026-08-05", "approved_dates_do_not_match_prompt"
+normalise = lambda value: " ".join(value.casefold().split()).strip(" .")
+assert normalise(arguments["leave_type"]) in {"annual", "annual leave"}, "approved_leave_type_does_not_match_prompt"
+assert normalise(arguments["reason"]) == "family event", "approved_reason_does_not_match_prompt"
+fields = oracle_row.split("|")
+assert len(fields) == 6, "oracle_row_shape_invalid"
+employee_id, start_date, end_date, leave_type_hex, reason_hex, requested_by = fields
+leave_type = bytes.fromhex(leave_type_hex).decode("utf-8")
+reason = bytes.fromhex(reason_hex).decode("utf-8")
+assert employee_id == "103", "oracle_employee_binding_mismatch"
+assert requested_by == sys.argv[1], "oracle_subject_binding_mismatch"
+assert start_date == arguments["start_date"] and end_date == arguments["end_date"], "oracle_dates_mismatch"
+assert leave_type == arguments["leave_type"] and reason == arguments["reason"], "oracle_action_values_mismatch"
+print("ok")
+' "$I4_WRITE_WITNESS" "$I4_SUBJECT_REF"
 I4_TRANSCRIPT="$(api amir GET "/api/v1/conversations/$I4_CID/transcript")"
 load_http_code
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR I.4 completion transcript could not be read"

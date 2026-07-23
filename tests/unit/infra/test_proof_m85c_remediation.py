@@ -4773,6 +4773,7 @@ def test_attempt19_every_json_assert_predicate_compiles_and_has_value_free_messa
         "BAR D.8 foreign observer sees an empty own-queue",
         "BAR E rendered chain shape",
         "BAR I.3 Amir's answer leaked the entitled cards spend value",
+        "BAR I.4 Oracle row does not match the digest-verified approved arguments",
     }
     for label, source in predicates.items():
         tree = ast.parse(source, filename=f"json_assert:{label}", mode="exec")

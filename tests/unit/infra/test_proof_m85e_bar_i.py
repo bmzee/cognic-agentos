@@ -407,6 +407,95 @@ def test_bar_i3_pins_the_leak_anchor_chain_refusal_zero_dispatch_and_prose_downg
     assert "cards entitlement boundary is absent" not in i3
 
 
+def test_bar_i4_reconciles_approved_replay_bytes_to_the_exact_oracle_row() -> None:
+    """The write witness binds prompt semantics, approved bytes, and DB effects."""
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    i4 = bar.split("# I.4", 1)[1].split("# Opt-in operator inspection", 1)[0]
+    label = "BAR I.4 Oracle row does not match the digest-verified approved arguments"
+    match = re.search(
+        rf'json_assert "{re.escape(label)}" \'\n(.*?)\n\' "\$I4_WRITE_WITNESS" "\$I4_SUBJECT_REF"',
+        i4,
+        re.DOTALL,
+    )
+    assert match is not None
+    predicate = match.group(1)
+    subject_ref = "a" * 64
+
+    def witness(
+        *,
+        approved_leave_type: str = "Annual Leave",
+        approved_reason: str = "Family event",
+        stored_leave_type: str | None = None,
+        stored_reason: str | None = None,
+        employee_id: str = "103",
+        requested_by: str = subject_ref,
+        digest_override: str | None = None,
+    ) -> str:
+        arguments = {
+            "start_date": "2026-08-03",
+            "end_date": "2026-08-05",
+            "leave_type": approved_leave_type,
+            "reason": approved_reason,
+        }
+        canonical = json.dumps(
+            arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        leave_type = approved_leave_type if stored_leave_type is None else stored_leave_type
+        reason = approved_reason if stored_reason is None else stored_reason
+        oracle_row = "|".join(
+            (
+                employee_id,
+                arguments["start_date"],
+                arguments["end_date"],
+                leave_type.encode().hex().upper(),
+                reason.encode().hex().upper(),
+                requested_by,
+            )
+        )
+        return json.dumps(
+            {
+                "replay_hex": canonical.hex(),
+                "args_digest_hex": digest_override or hashlib.sha256(canonical).hexdigest(),
+                "oracle_row": oracle_row,
+            }
+        )
+
+    accepted = subprocess.run(
+        [sys.executable, "-c", predicate, subject_ref],
+        input=witness(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout == "ok\n"
+
+    rejected = (
+        witness(stored_leave_type="annual"),
+        witness(stored_reason="different reason"),
+        witness(approved_leave_type="Sick Leave"),
+        witness(approved_reason="unrelated"),
+        witness(employee_id="104"),
+        witness(requested_by="b" * 64),
+        witness(digest_override="0" * 64),
+    )
+    for document in rejected:
+        result = subprocess.run(
+            [sys.executable, "-c", predicate, subject_ref],
+            input=document,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+
+    assert "approval_replay_payloads" in i4
+    assert "leave_type='annual'" not in i4
+
+
 def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
     runner = _RUNNER.read_text(encoding="utf-8")
     bar_i = runner.index("# ============================ BAR I")
