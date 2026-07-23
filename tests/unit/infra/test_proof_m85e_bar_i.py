@@ -30,7 +30,7 @@ _AGENTOS_PATCH = _PROOF / "agentos-sandbox-patch.yaml"
 _AGENTOS_IMAGE = _PROOF / "Dockerfile.agentos-proof"
 _HR_LEAVE_IMAGE = _PROOF / "Dockerfile.hr-leave-pack"
 
-_AH_SHA256 = "7fbdc030da19391b8e836bd00f9dacb2d6cac61e9195e229e342223222017f7e"
+_AH_SHA256 = "7acdc5b1c98d6bbc90ef379aeaa1e78252f4f4e151d03ad2fa3ebd4162b81f71"
 
 _RELEASES = {
     "HR": {

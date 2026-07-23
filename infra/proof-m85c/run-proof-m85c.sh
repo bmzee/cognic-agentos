@@ -5521,7 +5521,7 @@ C_AMIR_SUB="$(bound_subject analyst.amir)"
 C_ENT_BEFORE="$(entitlement_count "$C_AMIR_SUB" financials)"
 [ "$C_ENT_BEFORE" = "1" ] || bar_fail "BAR C expected exactly 1 amir financials entitlement before revocation (got $C_ENT_BEFORE for subject $C_AMIR_SUB)"
 entitlement_delete "$C_AMIR_SUB" financials >/dev/null
-C_T2="$(drive chat-turn --message "Which branch had the highest profit-and-loss last quarter, and what was the figure? If you cannot access that data, say so." --conversation-id "$C_CID" --state-file "$QC_TMP/session-amir.json")"
+C_T2="$(drive chat-turn --message "Use the financial-data skill. For run_readonly_query, set scope_id to exactly financials (not the skill id). Which branch had the highest profit-and-loss last quarter, and what was the figure? If you cannot access that data, say so." --conversation-id "$C_CID" --state-file "$QC_TMP/session-amir.json")"
 assert_chat_turn_completed "BAR C turn 2" "$C_T2"
 C_ANSWER2="$(jq_get answer_text "$C_T2")"
 [ -n "$C_ANSWER2" ] || bar_fail "BAR C turn 2 rendered no answer (the refusal must surface as a governed answer)"

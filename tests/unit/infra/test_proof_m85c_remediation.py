@@ -799,6 +799,23 @@ def test_r3_s2_and_s3_require_two_distinct_replicas() -> None:
 # --- R4: Bar C proves a VISIBLE refusal, not merely a non-empty answer ------ #
 
 
+def test_r4_bar_c_revocation_prompt_distinguishes_skill_id_from_scope_id() -> None:
+    """The model repeatedly copied the ``financial-data`` skill id into the
+    query tool's ``scope_id`` despite the hosted skill teaching ``financials``.
+    The revocation witness is meaningful only when the attempted scope is the
+    entitlement key that the runner actually revoked."""
+    bar_c = _RUNNER_TEXT.split("# ============================ BAR C", 1)[1].split(
+        "# ============================ BAR D", 1
+    )[0]
+
+    assert "Use the financial-data skill." in bar_c
+    assert "set scope_id to exactly financials (not the skill id)" in bar_c
+    assert (
+        """payload->>'refusal_reason'='agent_scope_not_entitled' AND """
+        """payload->>'scope_id'='financials'"""
+    ) in bar_c
+
+
 def test_r4_bar_c_requires_the_refusal_to_render_on_the_evidence_screen() -> None:
     """The pre-review leg asserted only a non-empty answer + a DB refusal row, so a
     model that hallucinated a plausible figure while the dispatch was refused
@@ -4988,7 +5005,7 @@ def test_d2_bar_g_scope_update_requires_exact_admin_api_readback() -> None:
 
 def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
     assert hashlib.sha256(_bar_a_through_f_text().encode()).hexdigest() == (
-        "92b3942a5b687c072988515f0b6ec6512a3969c5881d5fff342bb26ace778d0a"
+        "00247d90fe8dea85d5bcaf1ae7cd63258d663795052a9437a308d95c314ead2b"
     )
     assert _RUNNER_TEXT.index("# ============================ BAR G") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BARS A-F) PASS"'
