@@ -304,6 +304,25 @@ def test_bar_i5_pins_oracles_cross_schema_object_hiding_refusal() -> None:
     )
 
 
+def test_bar_i5_proves_cross_employee_non_execution_without_model_wording_gate() -> None:
+    runner = _RUNNER.read_text(encoding="utf-8")
+    i5 = runner.split("# I.5", 1)[1].split("# I.6", 1)[0]
+
+    assert 'json_field terminal_state "$I5_TURN"' in i5
+    assert '[[ "$I5_ANSWER" =~ [^[:space:]] ]]' in i5
+    assert 'assert_turn_digest_coupling "$I5_CID" 1' in i5
+    assert "cross-employee refusal was not visible in the answer" not in i5
+    assert "NOTE (non-fatal): BAR I.5" in i5
+    zero_dispatch = (
+        '"$(run_dispatch_count "$I5_RUN" '
+        '"payload->>\'capability_ref\'=\'$HR_LEAVE_PACK_ID/$HR_LEAVE_TOOL\'")" = "0"'
+    )
+    unchanged_rows = "BAR I.5 cross-employee request wrote a row"
+    assert zero_dispatch in i5
+    assert unchanged_rows in i5
+    assert i5.index(zero_dispatch) < i5.index(unchanged_rows)
+
+
 def test_bar_i_prior_context_witness_parenthesizes_json_extractions() -> None:
     bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
     expected = "(payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256')"
