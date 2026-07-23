@@ -279,7 +279,7 @@ def test_bar_i_has_the_closed_i0_through_i7_ledger_and_terminal_banner() -> None
     assert "golden_all_correct" in bar
     assert "approval.executed" in bar
     assert "agent.run.dispatch" in bar
-    assert "ORA-01031" in bar
+    assert "ORA-00942" in bar
     assert "from cognic_agentos.protocol.mcp_host import _canonical_tool_identity" in bar
     assert "hashlib.sha256(raw)" not in bar
     write_leg = bar.split("# I.4", 1)[1].split("# Opt-in operator inspection", 1)[0]
@@ -290,6 +290,18 @@ def test_bar_i_has_the_closed_i0_through_i7_ledger_and_terminal_banner() -> None
     assert write_leg.count(exact_one) == 2
     assert "PROOF M8.5-E (BAR I) PASS" in bar
     assert "PROOF M8.5-E (BARS A-I) PASS" in bar
+
+
+def test_bar_i5_pins_oracles_cross_schema_object_hiding_refusal() -> None:
+    """EXECUTE-only AN_HR_WRITER cannot resolve the underlying HR_APP table."""
+    runner = _RUNNER.read_text(encoding="utf-8")
+    i5 = runner.split("# I.5", 1)[1].split("# I.6", 1)[0]
+
+    assert "grep -q 'ORA-00942'" in i5
+    assert "ORA-01031" not in i5
+    assert i5.index("grep -q 'ORA-00942'") < i5.index(
+        "BAR I.5 direct-DML negative changed the leave table"
+    )
 
 
 def test_bar_i_prior_context_witness_parenthesizes_json_extractions() -> None:

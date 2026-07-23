@@ -6723,8 +6723,8 @@ I5_DML_OUT="$(oracle_proxy_sql AN_HR_WRITER "INSERT INTO hr_app.leave_requests (
 I5_DML_RC=$?
 set -e
 unset I5_PASSWORD
-[ "$I5_DML_RC" -ne 0 ] && grep -q 'ORA-01031' <<<"$I5_DML_OUT" \
-  || bar_fail "BAR I.5 AN_HR_WRITER direct INSERT did not die with ORA-01031"
+[ "$I5_DML_RC" -ne 0 ] && grep -q 'ORA-00942' <<<"$I5_DML_OUT" \
+  || bar_fail "BAR I.5 AN_HR_WRITER direct INSERT did not die with ORA-00942"
 [ "$(oracle_admin_sql 'SELECT COUNT(*) FROM hr_app.leave_requests;' | tr -d '[:space:]')" = "1" ] \
   || bar_fail "BAR I.5 direct-DML negative changed the leave table"
 I5_CREATE="$(conv_create amir)"
@@ -6743,7 +6743,7 @@ printf '%s' "$I5_ANSWER" | grep -Eiq 'own|another person|employee.*submit' \
 [ "$(oracle_admin_sql 'SELECT COUNT(*) FROM hr_app.leave_requests;' | tr -d '[:space:]')" = "1" ] \
   || bar_fail "BAR I.5 cross-employee request wrote a row"
 unset I5_DML_OUT
-echo "  Bar I.5 OK: direct DML refused ORA-01031; cross-employee chat refused before tool dispatch"
+echo "  Bar I.5 OK: direct DML refused ORA-00942; cross-employee chat refused before tool dispatch"
 
 # I.6 — evaluate the signed wheel contents, never local skill checkouts. Live
 # reference values are queried independently through each scope's Oracle proxy
