@@ -496,6 +496,20 @@ def test_bar_i4_reconciles_approved_replay_bytes_to_the_exact_oracle_row() -> No
     assert "leave_type='annual'" not in i4
 
 
+def test_oracle_admin_sql_disables_sqlplus_line_wrapping_before_machine_reads() -> None:
+    """I.4's six-field witness exceeds SQL*Plus' default 80-column width.
+
+    A wrapped database row is multiple physical lines and must not be mistaken
+    for multiple rows or silently truncated by the strict witness assembler.
+    """
+    runner = _RUNNER.read_text(encoding="utf-8")
+    helper = runner.split("oracle_admin_sql() {", 1)[1].split("# oracle_proxy_sql", 1)[0]
+    sql_write = "printf '%s\\n' \"$sql\""
+
+    assert "'SET LINESIZE 32767'" in helper
+    assert helper.index("'SET LINESIZE 32767'") < helper.index(sql_write)
+
+
 def test_hold_for_operator_is_opt_in_and_after_the_write_leg() -> None:
     runner = _RUNNER.read_text(encoding="utf-8")
     bar_i = runner.index("# ============================ BAR I")
