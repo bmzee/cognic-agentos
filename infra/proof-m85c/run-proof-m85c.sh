@@ -6793,7 +6793,7 @@ for line in (root / "golden" / "queries.jsonl").read_text(encoding="utf-8").spli
 print(json.dumps({"schema_version": 1, "reference": manifest["reference"], "cases": cases}))
 PY
   [ -s "$request" ] || bar_fail "BAR I.6 could not build the live reference request"
-  kubectl -n "$NS" exec -i deploy/proof-oracle-pack -- /opt/venv/bin/python -c '
+  kubectl -n "$NS" exec -i deploy/proof-oracle-pack -- python -c '
 import datetime, decimal, json, os, pathlib, sys
 import oracledb
 
@@ -6833,8 +6833,8 @@ json.dump(
     separators=(",", ":"),
 )
 ' "$proxy_identity" < "$request" > "$output" \
-    || bar_fail "BAR I.6 live reference query failed for $pack_dir"
-  [ -s "$output" ] || bar_fail "BAR I.6 live reference output is empty for $pack_dir"
+    || bar_fail "BAR I.6 live reference query failed for ${pack_dir##*/}"
+  [ -s "$output" ] || bar_fail "BAR I.6 live reference output is empty for ${pack_dir##*/}"
 }
 
 run_skill_gate() {

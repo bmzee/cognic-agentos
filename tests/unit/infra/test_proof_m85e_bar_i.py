@@ -269,7 +269,11 @@ def test_bar_i_has_the_closed_i0_through_i7_ledger_and_terminal_banner() -> None
 
     for leg in range(8):
         assert f"BAR I.{leg}" in bar
-    embedded = re.findall(r"(?:python3|/opt/venv/bin/python) -c '\n(.*?)\n'", bar, re.DOTALL)
+    embedded = re.findall(
+        r"(?:python3|python|/opt/venv/bin/python) -c '\n(.*?)\n'",
+        bar,
+        re.DOTALL,
+    )
     assert len(embedded) == 9
     for payload in embedded:
         ast.parse(payload)
@@ -623,6 +627,29 @@ def test_bar_i6_extract_eval_pack_resolves_package_before_destination_under_set_
     assert "unbound variable" not in probe.stderr, probe.stderr
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout == f"RESULT={expected}\n"
+
+
+def test_bar_i6_reference_query_uses_the_oracle_pack_image_interpreter() -> None:
+    """The tool image uses system Python, not AgentOS's ``/opt/venv`` layout."""
+    runner = _RUNNER.read_text(encoding="utf-8")
+    i6 = runner.split("# I.6", 1)[1].split("# I.7", 1)[0]
+    dockerfile = (_PROOF / "Dockerfile.oracle-pack").read_text(encoding="utf-8")
+    command_match = re.search(r"^CMD (\[.*\])$", dockerfile, re.MULTILINE)
+
+    assert command_match is not None
+    interpreter = json.loads(command_match.group(1))[0]
+    assert f'kubectl -n "$NS" exec -i deploy/proof-oracle-pack -- {interpreter} -c' in i6
+    assert "deploy/proof-oracle-pack -- /opt/venv/bin/python" not in i6
+
+
+def test_bar_i6_reference_failures_do_not_disclose_the_host_pack_path() -> None:
+    runner = _RUNNER.read_text(encoding="utf-8")
+    i6 = runner.split("# I.6", 1)[1].split("# I.7", 1)[0]
+
+    assert "live reference query failed for ${pack_dir##*/}" in i6
+    assert "live reference output is empty for ${pack_dir##*/}" in i6
+    assert "live reference query failed for $pack_dir" not in i6
+    assert "live reference output is empty for $pack_dir" not in i6
 
 
 def test_runner_has_no_same_local_command_assignment_self_references() -> None:
