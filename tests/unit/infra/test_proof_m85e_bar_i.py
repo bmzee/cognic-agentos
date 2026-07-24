@@ -652,12 +652,12 @@ def test_bar_i6_reference_failures_do_not_disclose_the_host_pack_path() -> None:
     assert "live reference output is empty for $pack_dir" not in i6
 
 
-def test_bar_i6_live_reference_rows_match_the_tool_and_evaluator_contract(
+def test_bar_i6_live_reference_rows_match_the_tool_and_numeric_evaluator_contract(
     tmp_path: Path,
 ) -> None:
-    """Execute the runner's real query program and normalize its scalar result."""
+    """Execute the runner's query program across scalar and Oracle NUMBER rows."""
     from cognic_agentos.evaluation.skill_corpus import load_skill_corpus
-    from cognic_agentos.evaluation.skill_eval import _normalised_reference
+    from cognic_agentos.evaluation.skill_eval import _expected_value, _normalised_reference
 
     runner = _RUNNER.read_text(encoding="utf-8")
     i6 = runner.split("# I.6", 1)[1].split("# I.7", 1)[0]
@@ -674,10 +674,12 @@ def test_bar_i6_live_reference_rows_match_the_tool_and_evaluator_contract(
     (tmp_path / "oracledb.py").write_text(
         """
 class _Column:
-    name = "EMPLOYEE_COUNT"
+    def __init__(self, name):
+        self.name = name
 
 class _Cursor:
-    description = [_Column()]
+    description = []
+    rows = []
 
     def __enter__(self):
         return self
@@ -686,10 +688,18 @@ class _Cursor:
         return None
 
     def execute(self, sql):
-        assert sql == "SELECT COUNT(*) AS employee_count FROM hr.v_employees"
+        if sql == "SELECT COUNT(*) AS employee_count FROM hr.v_employees":
+            self.description = [_Column("EMPLOYEE_COUNT")]
+            self.rows = [(107,)]
+            return
+        if sql == "SELECT first_name, salary FROM hr.v_employees":
+            self.description = [_Column("FIRST_NAME"), _Column("SALARY")]
+            self.rows = [("Steven", 24000.0)]
+            return
+        raise AssertionError(sql)
 
     def fetchall(self):
-        return [(107,)]
+        return self.rows
 
 class _Connection:
     def __enter__(self):
@@ -722,7 +732,11 @@ def connect(*, user, password, dsn):
             {
                 "case_id": "fx-001",
                 "sql": "SELECT COUNT(*) AS employee_count FROM hr.v_employees",
-            }
+            },
+            {
+                "case_id": "fx-002",
+                "sql": "SELECT first_name, salary FROM hr.v_employees",
+            },
         ],
     }
     probe = subprocess.run(
@@ -741,11 +755,21 @@ def connect(*, user, password, dsn):
 
     assert probe.returncode == 0, probe.stderr
     payload = json.loads(probe.stdout)
-    result = payload["results"]["fx-001"]
-    assert result == {"rows": [{"EMPLOYEE_COUNT": 107}]}
+    scalar_result = payload["results"]["fx-001"]
+    assert scalar_result == {"rows": [{"EMPLOYEE_COUNT": 107}]}
+    row_result = payload["results"]["fx-002"]
+    assert row_result == {"rows": [{"FIRST_NAME": "Steven", "SALARY": 24_000.0}]}
     corpus = load_skill_corpus(_REPO / "tests" / "fixtures" / "skill_eval" / "valid_pack")
-    case = next(item for item in corpus.cases if item.case_id == "fx-001")
-    assert _normalised_reference(case, result) == 107
+    scalar_case = corpus.case_by_id["fx-001"]
+    assert _normalised_reference(scalar_case, scalar_result) == 107
+    source = corpus.case_by_id["fx-002"]
+    expected_value = {
+        "columns": ["first_name", "salary"],
+        "rows": [["Steven", 24_000]],
+    }
+    expected = source.expected.model_copy(update={"mode": "rows", "value": expected_value})
+    row_case = source.model_copy(update={"expected": expected})
+    assert _expected_value(row_case, {"fx-002": row_result}) == expected_value
 
 
 def test_runner_has_no_same_local_command_assignment_self_references() -> None:

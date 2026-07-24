@@ -646,6 +646,38 @@ def _canonical_comparable(value: object) -> bytes:
     )
 
 
+def _reference_values_equal(authored: object, live: object) -> bool:
+    """Compare JSON-shaped reference values with numeric semantic equality."""
+    authored_is_number = type(authored) in {int, float, Decimal}
+    live_is_number = type(live) in {int, float, Decimal}
+    if authored_is_number or live_is_number:
+        if not authored_is_number or not live_is_number:
+            return False
+        authored_number = Decimal(str(authored))
+        live_number = Decimal(str(live))
+        return (
+            authored_number.is_finite()
+            and live_number.is_finite()
+            and authored_number == live_number
+        )
+    if isinstance(authored, Mapping):
+        return (
+            isinstance(live, Mapping)
+            and set(authored) == set(live)
+            and all(_reference_values_equal(authored[key], live[key]) for key in authored)
+        )
+    if isinstance(authored, list):
+        return (
+            isinstance(live, list)
+            and len(authored) == len(live)
+            and all(
+                _reference_values_equal(authored_item, live_item)
+                for authored_item, live_item in zip(authored, live, strict=True)
+            )
+        )
+    return _canonical_comparable(authored) == _canonical_comparable(live)
+
+
 def _expected_value(case: SkillCorpusCase, reference_values: Mapping[str, object]) -> object:
     if not case.expected.verify_live:
         return case.expected.value
@@ -657,7 +689,7 @@ def _expected_value(case: SkillCorpusCase, reference_values: Mapping[str, object
     if (
         authored is not None
         and (case.expected.mode in {"scalar", "rows"} or authored_is_table)
-        and _canonical_comparable(authored) != _canonical_comparable(live)
+        and not _reference_values_equal(authored, live)
     ):
         raise SkillEvalContractError(f"live reference drift for {case.case_id}")
     if case.expected.mode not in {"scalar", "rows"}:

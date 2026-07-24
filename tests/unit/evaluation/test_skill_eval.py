@@ -315,6 +315,30 @@ def test_live_reference_normalises_authored_row_lists_without_losing_row_identit
     ) == [["Alice", 42]]
 
 
+def test_live_reference_treats_equivalent_oracle_number_shapes_as_equal() -> None:
+    corpus = load_skill_corpus(_FIXTURE)
+    source = corpus.case_by_id["fx-001"]
+    expected_value = {
+        "columns": ["name", "salary"],
+        "rows": [["Steven", 24_000]],
+    }
+    expected = source.expected.model_copy(update={"mode": "rows", "value": expected_value})
+    case = source.model_copy(update={"expected": expected})
+
+    assert (
+        _expected_value(
+            case,
+            {"fx-001": {"rows": [{"NAME": "Steven", "SALARY": 24_000.0}]}},
+        )
+        == expected_value
+    )
+    with pytest.raises(SkillEvalContractError, match=r"live reference drift for fx-001"):
+        _expected_value(
+            case,
+            {"fx-001": {"rows": [{"NAME": "Steven", "SALARY": 24_000.01}]}},
+        )
+
+
 def test_live_reference_is_paired_with_an_assumption_contract_not_compared_to_it() -> None:
     corpus = load_skill_corpus(_FIXTURE)
     source = corpus.case_by_id["fx-001"]
