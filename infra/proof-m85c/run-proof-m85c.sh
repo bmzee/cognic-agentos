@@ -6822,10 +6822,13 @@ with oracledb.connect(
         for case in request["cases"]:
             cursor.execute(case["sql"].strip().removesuffix(";"))
             columns = [column.name for column in cursor.description or ()]
-            rows = [[public(value) for value in row] for row in cursor.fetchall()]
+            rows = [
+                {column: public(value) for column, value in zip(columns, row)}
+                for row in cursor.fetchall()
+            ]
             if not columns or not rows:
                 raise SystemExit("live reference query returned no rows for " + str(case["case_id"]))
-            results[case["case_id"]] = {"columns": columns, "rows": rows}
+            results[case["case_id"]] = {"rows": rows}
 json.dump(
     {"schema_version": 1, "reference": request["reference"], "results": results},
     sys.stdout,

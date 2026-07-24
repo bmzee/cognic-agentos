@@ -652,6 +652,102 @@ def test_bar_i6_reference_failures_do_not_disclose_the_host_pack_path() -> None:
     assert "live reference output is empty for $pack_dir" not in i6
 
 
+def test_bar_i6_live_reference_rows_match_the_tool_and_evaluator_contract(
+    tmp_path: Path,
+) -> None:
+    """Execute the runner's real query program and normalize its scalar result."""
+    from cognic_agentos.evaluation.skill_corpus import load_skill_corpus
+    from cognic_agentos.evaluation.skill_eval import _normalised_reference
+
+    runner = _RUNNER.read_text(encoding="utf-8")
+    i6 = runner.split("# I.6", 1)[1].split("# I.7", 1)[0]
+    program_match = re.search(
+        (
+            r'kubectl -n "\$NS" exec -i deploy/proof-oracle-pack -- python -c \'\n'
+            r"(?P<program>.*?)\n' \"\$proxy_identity\""
+        ),
+        i6,
+        re.DOTALL,
+    )
+    assert program_match is not None
+
+    (tmp_path / "oracledb.py").write_text(
+        """
+class _Column:
+    name = "EMPLOYEE_COUNT"
+
+class _Cursor:
+    description = [_Column()]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def execute(self, sql):
+        assert sql == "SELECT COUNT(*) AS employee_count FROM hr.v_employees"
+
+    def fetchall(self):
+        return [(107,)]
+
+class _Connection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def cursor(self):
+        return _Cursor()
+
+def connect(*, user, password, dsn):
+    assert user == "COGNIC[AN_HR]"
+    assert password == "fixture-credential"
+    assert dsn == "oracle.example/FREEPDB1"
+    return _Connection()
+""".lstrip(),
+        encoding="utf-8",
+    )
+    credential = tmp_path / "oracle-password"
+    credential.write_text("fixture-credential\n", encoding="utf-8")
+    request = {
+        "schema_version": 1,
+        "reference": {
+            "server_id": "cognic-tool-oracle-schema",
+            "tool_name": "run_readonly_query",
+            "scope_id": "fixture",
+        },
+        "cases": [
+            {
+                "case_id": "fx-001",
+                "sql": "SELECT COUNT(*) AS employee_count FROM hr.v_employees",
+            }
+        ],
+    }
+    probe = subprocess.run(
+        [sys.executable, "-c", program_match.group("program"), "AN_HR"],
+        input=json.dumps(request),
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PYTHONPATH": str(tmp_path),
+            "COGNIC_ORACLE_PASSWORD_FILE": str(credential),
+            "COGNIC_ORACLE_USER": "COGNIC",
+            "COGNIC_ORACLE_DSN": "oracle.example/FREEPDB1",
+        },
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    payload = json.loads(probe.stdout)
+    result = payload["results"]["fx-001"]
+    assert result == {"rows": [{"EMPLOYEE_COUNT": 107}]}
+    corpus = load_skill_corpus(_REPO / "tests" / "fixtures" / "skill_eval" / "valid_pack")
+    case = next(item for item in corpus.cases if item.case_id == "fx-001")
+    assert _normalised_reference(case, result) == 107
+
+
 def test_runner_has_no_same_local_command_assignment_self_references() -> None:
     """No later local assignment may expand a name assigned beside it.
 
