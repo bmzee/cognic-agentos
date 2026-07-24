@@ -2009,7 +2009,7 @@ print(value)
   [ "$rc" -eq 0 ] && [ -n "$cid" ] \
     || bar_fail "BAR H governed rotation query received no canonical conversation id"
 
-  turn="$(conv_turn "$role" "$cid" "Call run_readonly_query exactly once with scope_id=retail_analytics, max_rows=1, and sql exactly: SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE WHERE STATUS = 'ACTIVE'. Do not use any placeholder or any other scope_id. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
+  turn="$(conv_turn "$role" "$cid" "Follow the bank-analyst data workflow exactly. First read the customer-data skill with read_skill. Then answer this governed data question: How many active customers are there? After reading the skill, call run_readonly_query exactly once with scope_id=retail_analytics, max_rows=1, and sql exactly: SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE WHERE STATUS = 'ACTIVE'. Do not use any placeholder or any other scope_id. In your final answer, copy the tool result's credential_rotation_ref exactly once on a final plain-text line in this exact form: CREDENTIAL_ROTATION_REF=<value>. Do not infer, alter, quote, or wrap that line in Markdown.")"
   load_http_code
   [ "$HTTP_CODE" = "200" ] \
     || bar_fail "BAR H governed rotation query did not complete on the conversation wire (HTTP $HTTP_CODE)"

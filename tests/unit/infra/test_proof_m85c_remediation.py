@@ -5113,6 +5113,21 @@ def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
     assert '[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ]' in bar
 
 
+def test_d3_bar_h_governed_rotation_query_follows_the_skill_first_persona() -> None:
+    helper = _extract_shell_function("governed_rotation_query")
+    skill_first = "First read the customer-data skill with read_skill."
+    natural_question = "How many active customers are there?"
+    exact_query = (
+        "SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE "
+        "WHERE STATUS = 'ACTIVE'"
+    )
+
+    assert helper.count(skill_first) == 1
+    assert helper.count(natural_question) == 1
+    assert helper.count(exact_query) == 1
+    assert helper.index(skill_first) < helper.index(natural_question) < helper.index(exact_query)
+
+
 def test_d3_bar_h_malformed_model_rotation_ref_is_refused_value_free() -> None:
     helper = _extract_shell_function("governed_rotation_query")
     start_marker = "  parsed=\"$(printf '%s' \"$turn\" | python3 -c '\n"
