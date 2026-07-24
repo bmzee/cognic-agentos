@@ -6840,8 +6840,60 @@ json.dump(
   [ -s "$output" ] || bar_fail "BAR I.6 live reference output is empty for ${pack_dir##*/}"
 }
 
+summarize_skill_gate_failure() {
+  python3 -c '
+import json, math, re, sys
+
+doc = json.load(sys.stdin)
+if not isinstance(doc, dict):
+    raise SystemExit(1)
+
+bool_fields = (
+    "passed",
+    "hard_zero_observed",
+    "trigger_passed",
+    "golden_all_correct",
+    "ablation_passed",
+)
+number_fields = (
+    "trigger_accuracy",
+    "accuracy",
+    "wrong_answer_rate",
+    "golden_accuracy",
+    "ablation_uplift",
+)
+case_id_fields = ("golden_failure_case_ids", "failure_case_ids")
+case_id_pattern = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+summary = {}
+
+for field in bool_fields:
+    value = doc.get(field)
+    if not isinstance(value, bool):
+        raise SystemExit(1)
+    summary[field] = value
+for field in number_fields:
+    value = doc.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(1)
+    if not math.isfinite(float(value)):
+        raise SystemExit(1)
+    summary[field] = value
+for field in case_id_fields:
+    value = doc.get(field)
+    if (
+        not isinstance(value, list)
+        or len(value) > 100
+        or any(not isinstance(item, str) or not case_id_pattern.fullmatch(item) for item in value)
+    ):
+        raise SystemExit(1)
+    summary[field] = value
+
+json.dump(summary, sys.stdout, sort_keys=True, separators=(",", ":"))
+'
+}
+
 run_skill_gate() {
-  local label="$1" pack_dir="$2" proxy_identity="$3" report rc
+  local label="$1" pack_dir="$2" proxy_identity="$3" report rc red_summary
   local references="$I_EVAL_ROOT/$label-reference-results.json"
   build_live_reference_results "$pack_dir" "$proxy_identity" "$references"
   ensure_token amir
@@ -6853,7 +6905,14 @@ run_skill_gate() {
       --reference-results "$references")"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || bar_fail "BAR I.6 $label A-007 evaluator returned red (exit $rc)"
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 1 ]; then
+      red_summary="$(printf '%s' "$report" | summarize_skill_gate_failure)" \
+        || bar_fail "BAR I.6 $label A-007 evaluator returned an unreadable red report (exit 1)"
+      bar_fail "BAR I.6 $label A-007 evaluator returned red (exit 1); report=$red_summary"
+    fi
+    bar_fail "BAR I.6 $label A-007 evaluator failed (exit $rc)"
+  fi
   printf '%s' "$report" | python3 -c '
 import json, sys
 doc = json.load(sys.stdin)

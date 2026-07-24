@@ -274,7 +274,7 @@ def test_bar_i_has_the_closed_i0_through_i7_ledger_and_terminal_banner() -> None
         bar,
         re.DOTALL,
     )
-    assert len(embedded) == 9
+    assert len(embedded) == 10
     for payload in embedded:
         ast.parse(payload)
     assert "KHI-01|237150000.00" in bar
@@ -650,6 +650,71 @@ def test_bar_i6_reference_failures_do_not_disclose_the_host_pack_path() -> None:
     assert "live reference output is empty for ${pack_dir##*/}" in i6
     assert "live reference query failed for $pack_dir" not in i6
     assert "live reference output is empty for $pack_dir" not in i6
+
+
+def test_bar_i6_red_gate_preserves_only_a_bounded_examiner_summary() -> None:
+    """A red A-007 report must diagnose the case without retaining answers."""
+    runner = _RUNNER.read_text(encoding="utf-8")
+
+    def shell_function(name: str) -> str:
+        match = re.search(
+            rf"^{re.escape(name)}\(\) \{{\n.*?^\}}",
+            runner,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None
+        return match.group(0)
+
+    red_report = {
+        "skill_id": "hr-data",
+        "corpus_case_count": 9,
+        "n_reps": 3,
+        "passed": False,
+        "hard_zero_observed": True,
+        "trigger_accuracy": 1.0,
+        "trigger_passed": True,
+        "accuracy": 8 / 9,
+        "wrong_answer_rate": 1 / 9,
+        "golden_accuracy": 8 / 9,
+        "golden_all_correct": False,
+        "golden_failure_case_ids": ["hr-005"],
+        "ablation_uplift": 0.5,
+        "ablation_passed": True,
+        "failure_case_ids": ["hr-005"],
+        "raw_answer": "MUST-NOT-REACH-DURABLE-EVIDENCE",
+    }
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            "declare -A ROLE_TOKEN=([amir]=fixture-token)",
+            "PROOF_CA=/tmp/fixture-ca",
+            "BASE_URL=https://fixture.invalid",
+            "AGENT_ID=primary",
+            "ABLATION_AGENT_ID=ablation",
+            "I_EVAL_ROOT=/tmp/fixture-eval",
+            "build_live_reference_results() { :; }",
+            "ensure_token() { :; }",
+            f"uv() {{ printf '%s\\n' {shlex.quote(json.dumps(red_report))}; return 1; }}",
+            'bar_fail() { printf "BAR_FAIL: %s\\n" "$*" >&2; exit 91; }',
+            shell_function("summarize_skill_gate_failure"),
+            shell_function("run_skill_gate"),
+            "run_skill_gate hr-data /tmp/hr-data AN_HR",
+        )
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 91
+    assert "BAR I.6 hr-data A-007 evaluator returned red (exit 1)" in result.stderr
+    assert '"golden_failure_case_ids":["hr-005"]' in result.stderr
+    assert '"failure_case_ids":["hr-005"]' in result.stderr
+    assert '"golden_all_correct":false' in result.stderr
+    assert "MUST-NOT-REACH-DURABLE-EVIDENCE" not in result.stderr
 
 
 def test_bar_i6_live_reference_rows_match_the_tool_and_numeric_evaluator_contract(
