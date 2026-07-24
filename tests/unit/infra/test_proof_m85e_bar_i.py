@@ -331,6 +331,22 @@ def test_bar_i_prior_context_witness_parenthesizes_json_extractions() -> None:
     assert expected in bar
 
 
+def test_bar_i1_followup_distinguishes_financial_skill_id_from_scope_id() -> None:
+    """The hosted skill is ``financial-data`` but its entitlement key is
+    ``financials``. The live model has repeatedly copied the former into the
+    query tool's ``scope_id`` despite reading the signed skill."""
+    bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
+    i1 = bar.split("# I.1", 1)[1].split("# I.2", 1)[0]
+
+    assert "Use the financial-data skill." in i1
+    assert "set scope_id to exactly financials (not the skill id)" in i1
+    assert (
+        """payload->>'outcome'='ok' AND """
+        """payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND """
+        """payload->>'scope_id'='financials'"""
+    ) in i1
+
+
 def test_bar_i1_turn_2_accepts_the_pinned_period_in_iso_or_natural_month_form() -> None:
     bar = _RUNNER.read_text(encoding="utf-8").split("# ============================ BAR I", 1)[1]
     i1 = bar.split("# I.1", 1)[1].split("# I.2", 1)[0]

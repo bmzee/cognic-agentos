@@ -6448,7 +6448,7 @@ I1_DEPOSIT_PIN="$(printf '%s' "$I1_DEPOSIT_PIN" | tr -d '\r' | sed -e 's/^[[:spa
 [ "$I1_DEPOSIT_PIN" = "KHI-01|237150000.00" ] \
   || bar_fail "BAR I.1 live retail seed no longer has the ruled KHI-01 deposit anchor"
 
-I1_Q2="For that branch, show the profit and loss for period 2026-06: interest income, fee income, operating expense, and net income."
+I1_Q2="Use the financial-data skill. For run_readonly_query, set scope_id to exactly financials (not the skill id). For that branch, show the profit and loss for period 2026-06: interest income, fee income, operating expense, and net income."
 I1_T2="$(conv_turn amir "$I1_CID" "$I1_Q2")"
 load_http_code
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR I.1 turn 2 failed (HTTP $HTTP_CODE)"
