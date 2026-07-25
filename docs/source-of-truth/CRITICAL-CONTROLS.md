@@ -30,9 +30,18 @@ The following modules are **critical controls**. They get extra scrutiny — 95%
 - `core/guardrails.py`
 - `core/escalation.py`
 - `core/sla.py`
-- `core/auto_degradation.py`
-- `core/citation.py`
-- `retrieval/citation_verifier.py`
+
+> **Not built.** `core/auto_degradation.py`, `core/citation.py`, and
+> `retrieval/citation_verifier.py` were listed here as critical controls but
+> **do not exist on disk** — verified 2026-07-25, and independently flagged by
+> the 2026-07-19 adversarial audit (cluster 1 P3, cluster 10 P1). They were
+> never in `_CRITICAL_FILES`, so the coverage gate was never affected; the
+> claim was prose-only. They are removed rather than left as phantom entries.
+> If any of them is built later, it is added here at that time, against the
+> five criteria in `AGENTS.md`. `core/__init__.py` correctly describes them as
+> planned, not present. ADR-006 and ADR-011 track the citation-verification
+> capability itself; the ADR-011 `no_citation_target` deferral is the live
+> record of why the agent path has no citation target yet.
 
 *Runtime authority + emergency (Sprint 13.5 approval; Sprint 13.6a kill switches; Sprint 13.6b quotas):*
 - `core/approval/engine.py` (per ADR-014 — the runtime approval state machine. Sprint 13.5 owns tier classification, human/tenant/scope/reason authority, maker-checker, 4-eyes, actor/binding replay checks, and lazy expiry. M8.5-D D2 extends the same boundary to assignment-derived N-way approval (`required_count` frozen at mint; index-sensitive originator exclusion), atomic consume-once via `consume_grant_for_action` (`engine.py:233`), and the startup-reconciliation predicate (`:265`) consumed by the kernel executor. The final-grant portal handoff invokes `ApprovalExecutionService`; it does not create a second approval authority.)
