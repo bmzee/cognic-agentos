@@ -103,6 +103,26 @@ promotion time against fresh full-suite data, not against numbers quoted
 earlier in a plan. Sibling regressions are common and the promotion commit is
 where they surface.
 
+**The gate is a budget, not a ratchet.** The count has only ever grown — 129
+to 156 with no removal — because promotion has a procedure and demotion does
+not. Every promotion permanently raises the cost of touching that file, so the
+set must be curated rather than accumulated.
+
+- A promotion commit states **which of the five criteria** the module meets.
+  "It felt important" is not one of them.
+- A promotion commit also records a **demotion review**: does any existing
+  entry no longer qualify? Recording "none" is a valid outcome; skipping the
+  question is not.
+- **Demotion is a normal action, not a weakening.** Demote when a module has
+  become thin wiring, when the enforcement it owned moved elsewhere, or when
+  its contract stopped being wire-protocol-public. The enforcement that
+  replaced it stays gated; the shell does not.
+- Removing an entry needs the same scrutiny as adding one — human review,
+  and a statement of where the guarantee now lives.
+
+Net growth is expected while the kernel is still acquiring trust boundaries.
+Growth without review is not.
+
 **The inventory** — every gated module, why it is gated, and its load-bearing
 invariants — lives in `docs/source-of-truth/CRITICAL-CONTROLS.md`. Consult it
 per-module when you touch that module. It is deliberately not part of the
