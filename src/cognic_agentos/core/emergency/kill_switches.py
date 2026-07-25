@@ -376,14 +376,20 @@ class KillSwitchEngine:
         active: bool,
         decision_type: str,
     ) -> FlipResult:
-        """Review patch 3 — the brake-before-evidence doctrine. Redis write
-        FIRST (the brake takes effect even if evidence fails), THEN the chain
-        row. Evidence failure after a successful Redis write leaves the switch
-        LIVE (it must never resurrect a killed path), logs loud, and reports
-        ``evidence_degraded=True`` so the portal returns the closed-enum
-        ``kill_switch_live_evidence_degraded`` error. Re-flipping an
-        already-in-state switch performs NO Redis state change but appends the
-        evidence row — the chain converges on retry."""
+        """Persist the requested brake state before emitting success evidence.
+
+        A Redis write may be skipped only when a successful, well-formed
+        authoritative Redis read proves the requested state is already stored.
+        A GET failure, malformed document, or any local cache value never
+        authorizes that skip: SET is attempted and any SET failure propagates
+        before a chain row can be appended. A valid authoritative observation
+        refreshes the cache before SET; malformed state poisons it active, so a
+        failed repair cannot preserve a contradicted fail-open cache. Evidence
+        failure after successful persistence leaves the requested state in
+        effect, logs loud, and reports ``evidence_degraded=True``; an
+        authoritative same-state retry appends the missing evidence without
+        rewriting Redis.
+        """
         if self._decision_history is None:
             raise RuntimeError(
                 "kill_switch_engine_requires_decision_history_for_writes: construct "
@@ -397,8 +403,28 @@ class KillSwitchEngine:
                     f"{sorted(_FEATURE_NAMES)}"
                 )
         key = _switch_key(class_, scope_key)
-        current = await self.is_class_active(class_=class_, scope_key=scope_key)
-        if current != active:
+        authoritative_current: bool | None = None
+        try:
+            raw = await self._redis.get(key)
+        except Exception:
+            pass
+        else:
+            if raw is None:
+                authoritative_current = False
+                self._cache[key] = (False, self._clock())
+            else:
+                try:
+                    doc = json.loads(raw if isinstance(raw, str) else raw.decode())
+                    stored_state = doc[_state_field(class_)]
+                    _custody = (doc["updated_at"], doc["actor_id"], doc["reason"])
+                    if not isinstance(stored_state, bool):
+                        raise ValueError(f"{_state_field(class_)} must be a JSON bool")
+                    authoritative_current = stored_state
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    self._cache[key] = (True, self._clock())
+                else:
+                    self._cache[key] = (stored_state, self._clock())
+        if authoritative_current != active:
             doc = json.dumps(
                 {
                     _state_field(class_): active,

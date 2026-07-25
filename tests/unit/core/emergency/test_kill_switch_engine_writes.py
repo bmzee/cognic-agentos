@@ -32,12 +32,18 @@ class _RecordingRedis:
     def __init__(self, events: list[tuple[str, str]]) -> None:
         self.store: dict[str, str] = {}
         self._events = events
+        self.fail_get = False
+        self.fail_set = False
 
     async def get(self, key: str) -> Any:
+        if self.fail_get:
+            raise RuntimeError("redis get down")
         return self.store.get(key)
 
     async def set(self, key: str, value: Any, **kwargs: Any) -> Any:
         self._events.append(("redis_set", key))
+        if self.fail_set:
+            raise RuntimeError("redis set down")
         self.store[key] = value
 
 
@@ -162,6 +168,403 @@ class TestBrakeBeforeEvidence:
         assert await engine.is_class_active(class_="model", scope_key="tier1") is True
         doc = json.loads(redis.store[_switch_key("model", "tier1")])
         assert doc["active"] is True
+
+
+class TestAuthoritativeWritePersistence:
+    async def test_flip_get_failure_forces_set_before_success_evidence(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        redis.fail_get = True
+
+        result = await engine.flip(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-1",
+            reason="incident",
+            category="incident_response",
+        )
+
+        key = _switch_key("model", "tier1")
+        assert events == [
+            ("redis_set", key),
+            ("chain_append", "emergency.kill_switch_flipped"),
+        ]
+        assert result.evidence_degraded is False
+        assert result.chain_record_id is not None
+        assert len(dh.records) == 1
+        assert json.loads(redis.store[key]) == {
+            "active": True,
+            "updated_at": json.loads(redis.store[key])["updated_at"],
+            "actor_id": "ops-1",
+            "reason": "incident",
+        }
+
+    async def test_flip_get_and_set_failure_emits_no_success_evidence(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        redis.fail_get = True
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.flip(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-1",
+                reason="incident",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", _switch_key("model", "tier1"))]
+        assert dh.records == []
+
+    async def test_flip_authoritative_already_active_converges_without_set(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": True,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-original",
+                "reason": "original incident",
+            }
+        )
+
+        result = await engine.flip(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-retry",
+            reason="retry evidence",
+            category="incident_response",
+        )
+
+        assert events == [("chain_append", "emergency.kill_switch_flipped")]
+        assert result.evidence_degraded is False
+        assert len(dh.records) == 1
+        assert json.loads(redis.store[key]) == {
+            "active": True,
+            "updated_at": "2026-07-24T00:00:00+00:00",
+            "actor_id": "ops-original",
+            "reason": "original incident",
+        }
+
+    async def test_flip_fresh_active_cache_cannot_skip_set_after_get_failure(self) -> None:
+        engine, redis, _dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": True,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-original",
+                "reason": "original incident",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+        redis.fail_get = True
+        events.clear()
+
+        await engine.flip(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-retry",
+            reason="outage retry",
+            category="incident_response",
+        )
+
+        assert events == [
+            ("redis_set", key),
+            ("chain_append", "emergency.kill_switch_flipped"),
+        ]
+        assert json.loads(redis.store[key])["reason"] == "outage retry"
+
+    @pytest.mark.parametrize(
+        "malformed_document",
+        [
+            '{"active": true}',
+            '{"active": 1, "updated_at": "x", "actor_id": "x", "reason": "x"}',
+        ],
+        ids=["missing-custody", "non-bool-state"],
+    )
+    async def test_flip_malformed_document_forces_repairing_set(
+        self, malformed_document: str
+    ) -> None:
+        engine, redis, _dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = malformed_document
+
+        await engine.flip(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-1",
+            reason="repair malformed state",
+            category="incident_response",
+        )
+
+        assert events == [
+            ("redis_set", key),
+            ("chain_append", "emergency.kill_switch_flipped"),
+        ]
+        assert json.loads(redis.store[key])["reason"] == "repair malformed state"
+
+    async def test_failed_revert_preserves_authoritative_active_cache(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-stale",
+                "reason": "stale inactive state",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+        redis.store[key] = json.dumps(
+            {
+                "active": True,
+                "updated_at": "2026-07-24T00:01:00+00:00",
+                "actor_id": "ops-current",
+                "reason": "authoritative active state",
+            }
+        )
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.revert(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-revert",
+                reason="attempted resolution",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", key)]
+        assert dh.records == []
+        redis.fail_get = True
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+
+    async def test_failed_malformed_repair_preserves_poisoned_active_cache(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-stale",
+                "reason": "stale inactive state",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+        redis.store[key] = '{"active": true}'
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.flip(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-repair",
+                reason="repair malformed state",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", key)]
+        assert dh.records == []
+        redis.fail_get = True
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+
+    async def test_failed_malformed_revert_preserves_poisoned_active_cache(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-stale",
+                "reason": "stale inactive state",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+        redis.store[key] = '{"active": false}'
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.revert(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-repair",
+                reason="repair malformed state",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", key)]
+        assert dh.records == []
+        redis.fail_get = True
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+
+    async def test_failed_flip_preserves_authoritative_inactive_cache(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": True,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-stale",
+                "reason": "stale active state",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:01:00+00:00",
+                "actor_id": "ops-current",
+                "reason": "authoritative inactive state",
+            }
+        )
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.flip(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-flip",
+                reason="attempted activation",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", key)]
+        assert dh.records == []
+        redis.fail_get = True
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+
+    async def test_absent_key_revert_refreshes_inactive_cache_without_set(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": True,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-stale",
+                "reason": "stale active state",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is True
+        del redis.store[key]
+
+        await engine.revert(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-revert",
+            reason="already inactive",
+            category="incident_response",
+        )
+
+        assert events == [("chain_append", "emergency.kill_switch_reverted")]
+        assert len(dh.records) == 1
+        redis.fail_get = True
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+
+    @pytest.mark.parametrize(
+        "malformed_document",
+        [
+            '{"active": false}',
+            '{"active": 0, "updated_at": "x", "actor_id": "x", "reason": "x"}',
+        ],
+        ids=["inactive-missing-custody", "falsey-non-bool-state"],
+    )
+    async def test_revert_malformed_document_forces_repairing_set(
+        self, malformed_document: str
+    ) -> None:
+        engine, redis, _dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = malformed_document
+
+        await engine.revert(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-1",
+            reason="repair malformed state",
+            category="incident_response",
+        )
+
+        assert events == [
+            ("redis_set", key),
+            ("chain_append", "emergency.kill_switch_reverted"),
+        ]
+        assert json.loads(redis.store[key])["active"] is False
+        assert json.loads(redis.store[key])["reason"] == "repair malformed state"
+
+    async def test_revert_get_failure_forces_set_even_with_fresh_inactive_cache(self) -> None:
+        engine, redis, _dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-original",
+                "reason": "original resolution",
+            }
+        )
+        assert await engine.is_class_active(class_="model", scope_key="tier1") is False
+        redis.fail_get = True
+        events.clear()
+
+        await engine.revert(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-retry",
+            reason="outage retry",
+            category="incident_response",
+        )
+
+        assert events == [
+            ("redis_set", key),
+            ("chain_append", "emergency.kill_switch_reverted"),
+        ]
+        assert json.loads(redis.store[key])["reason"] == "outage retry"
+
+    async def test_revert_get_and_set_failure_emits_no_success_evidence(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        redis.fail_get = True
+        redis.fail_set = True
+
+        with pytest.raises(RuntimeError, match="redis set down"):
+            await engine.revert(
+                class_="model",
+                scope_key="tier1",
+                actor_id="ops-1",
+                reason="resolved",
+                category="incident_response",
+            )
+
+        assert events == [("redis_set", _switch_key("model", "tier1"))]
+        assert dh.records == []
+
+    async def test_revert_authoritative_already_inactive_converges_without_set(self) -> None:
+        engine, redis, dh, events = _build_engine()
+        key = _switch_key("model", "tier1")
+        redis.store[key] = json.dumps(
+            {
+                "active": False,
+                "updated_at": "2026-07-24T00:00:00+00:00",
+                "actor_id": "ops-original",
+                "reason": "original resolution",
+            }
+        )
+
+        result = await engine.revert(
+            class_="model",
+            scope_key="tier1",
+            actor_id="ops-retry",
+            reason="retry evidence",
+            category="incident_response",
+        )
+
+        assert events == [("chain_append", "emergency.kill_switch_reverted")]
+        assert result.evidence_degraded is False
+        assert len(dh.records) == 1
+        assert json.loads(redis.store[key]) == {
+            "active": False,
+            "updated_at": "2026-07-24T00:00:00+00:00",
+            "actor_id": "ops-original",
+            "reason": "original resolution",
+        }
 
 
 class TestIdempotentReflip:
