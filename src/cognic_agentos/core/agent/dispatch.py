@@ -385,9 +385,14 @@ class AgentDispatcher:
         """Run THE PIPELINE (order IS the contract — see the module docstring).
 
         Every arm — each refusal AND the ok path — ends in exactly ONE
-        ``agent.run.dispatch`` evidence row. The single non-arm exit is the
-        fail-loud RuntimeError on a missing signing key (a DEPLOYMENT error:
-        nothing governed executed, so nothing is evidenced).
+        ``agent.run.dispatch`` evidence row. Two non-arm exits cannot produce
+        that dispatch row because the existing evidence schema cannot
+        truthfully represent them: a missing signing key (a DEPLOYMENT error)
+        and direct injection of arguments that have no canonical digest. No
+        capability or tool side effect has executed in either case. The
+        production model path cannot reach the known non-finite-float
+        argument case because ``LLMGateway`` recursively rejects it before
+        returning a ``GatewayToolCall``.
         """
         # The dispatch-evidence args digest — ALWAYS over the LLM-AUTHORED
         # args (PRE-stamp; the token key never enters any digest basis).
@@ -642,6 +647,12 @@ class AgentDispatcher:
                     originator_subject=run.originator_subject,
                     approval_request_id=None,
                 )
+            # Result canonicalizability is part of successful execution.
+            # Probe it inside this try so an unrepresentable result rides the
+            # existing evidenced tool-failure arm.  The actual evidence write
+            # stays outside: DecisionHistory failures must never be mistaken
+            # for tool failures or trigger a second write attempt.
+            canonical_bytes(result)
         except AgentToolApprovalPending as pending:
             await self._emit_dispatch(
                 run=run,

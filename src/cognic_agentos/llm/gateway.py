@@ -25,6 +25,7 @@ import dataclasses as _dataclasses
 import datetime as _dt
 import json as _json
 import logging as _logging
+import math as _math
 import time as _time
 import uuid as _uuid
 from collections.abc import Sequence
@@ -277,6 +278,27 @@ def _serialize_tool_spec(spec: GatewayToolSpec) -> dict[str, Any]:
     }
 
 
+def _reject_non_finite_json_constant(value: str) -> Any:
+    """Local ``json.loads`` hook; executable body is pinned to the
+    supply-chain verifier's independently owned copy by a drift test."""
+    raise ValueError(f"non-finite JSON constant rejected: {value!r}")
+
+
+def _reject_non_finite_tool_arguments(value: Any) -> None:
+    """Recursively refuse non-finite floats in an already-decoded JSON tree."""
+    if isinstance(value, float):
+        if not _math.isfinite(value):
+            raise ValueError("non-finite float in tool-call arguments")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_non_finite_tool_arguments(key)
+            _reject_non_finite_tool_arguments(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_non_finite_tool_arguments(item)
+
+
 def _parse_tool_calls(raw: Any) -> tuple[GatewayToolCall, ...]:
     """Parse LiteLLM-normalized ``choices[0].message.tool_calls`` into typed
     calls (M8 A2). None → (); non-list → malformed. Each entry:
@@ -303,8 +325,11 @@ def _parse_tool_calls(raw: Any) -> tuple[GatewayToolCall, ...]:
             arguments = raw_args
         elif isinstance(raw_args, str):
             try:
-                arguments = _json.loads(raw_args)
-            except _json.JSONDecodeError as exc:
+                arguments = _json.loads(
+                    raw_args,
+                    parse_constant=_reject_non_finite_json_constant,
+                )
+            except (_json.JSONDecodeError, ValueError) as exc:
                 raise _MalformedToolCall(
                     f"tool_calls[{index}].function.arguments is not valid JSON"
                 ) from exc
@@ -316,6 +341,12 @@ def _parse_tool_calls(raw: Any) -> tuple[GatewayToolCall, ...]:
             raise _MalformedToolCall(
                 f"tool_calls[{index}].function.arguments is neither a dict nor a str"
             )
+        try:
+            _reject_non_finite_tool_arguments(arguments)
+        except ValueError as exc:
+            raise _MalformedToolCall(
+                f"tool_calls[{index}].function.arguments contains a non-finite float"
+            ) from exc
         entry_id = entry.get("id")
         call_id = entry_id if isinstance(entry_id, str) and entry_id else f"call_{index}"
         calls.append(GatewayToolCall(id=call_id, name=name, arguments=arguments))

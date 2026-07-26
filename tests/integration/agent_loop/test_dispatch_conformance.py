@@ -23,10 +23,15 @@ PROVEN:
   the exact canonical argument digest and never the question, answer, or raw
   arguments;
 * the decision-history chain VERIFIES after the run.
+* the production ``LLMGateway`` rejects a non-finite model-authored argument
+  before the composed dispatcher is awaited, leaving a chain-valid failed run
+  and no dispatch row.
 
 SUBSTITUTED (inherited from the package, plus):
 
-* the model is a ``ScriptedGateway`` — determinism is the point;
+* dispatch-gate tests use a ``ScriptedGateway`` — determinism is the point.
+  The non-finite ingress test below is the exception and constructs the real
+  ``LLMGateway`` over a mock HTTP transport;
 * the MCP tool proxy is a recording stub. A positive dispatch reaches that
   proxy, proving the execution arm is wired, but no real MCP server executes;
 * a generated RSA private key exists only under ``tmp_path`` so the positive
@@ -40,15 +45,17 @@ or database query.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from cryptography.hazmat.primitives import serialization
@@ -66,9 +73,14 @@ from cognic_agentos.core.agent.query_context import verify_query_context
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.chain_verifier import ChainVerifier
+from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, _decision_history
 from cognic_agentos.core.entitlements.store import _data_scopes, _entitlements
-from cognic_agentos.llm.gateway import GatewayResponse, GatewayToolCall
+from cognic_agentos.core.sla import SLAPolicy
+from cognic_agentos.llm.concurrency import ProfileRateLimiter
+from cognic_agentos.llm.gateway import GatewayResponse, GatewayToolCall, LLMGateway
+from cognic_agentos.llm.ledger import GatewayCallLedger
+from cognic_agentos.llm.preflight import PreflightResolver
 
 from ._synthetic import (
     DEFAULT_AGENT_ID,
@@ -127,12 +139,13 @@ class _RecordingToolProxy:
     """Records governed tool invocations. Nothing here executes a real tool —
     the point is to observe whether a dispatch reached execution AT ALL."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, result: Any = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._result = {"ok": True, "rows": []} if result is None else result
 
     async def call_tool(self, **kwargs: Any) -> Any:
         self.calls.append(dict(kwargs))
-        return {"ok": True, "rows": []}
+        return self._result
 
 
 async def _seed_assignment(engine: AsyncEngine, *, kind: str, ref: str) -> None:
@@ -184,7 +197,7 @@ async def _build(
     engine: AsyncEngine,
     dists: list[Any],
     tmp_path: Path,
-    gateway: ScriptedGateway,
+    gateway: Any,
     proxy: _RecordingToolProxy,
     *,
     capability_class: str = "data_query",
@@ -230,6 +243,59 @@ async def _build(
     # _MCPHostAgentToolProxy adapter. Do not replace that collaborator here:
     # the positive control must prove the composed execute seam is live.
     return loop
+
+
+def _real_gateway_with_response(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    *,
+    response_body: dict[str, Any],
+) -> tuple[LLMGateway, httpx.AsyncClient, GatewayCallLedger]:
+    """Construct the production gateway with only HTTP transport substituted."""
+    config = tmp_path / "litellm-d1.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "model_list:",
+                "  - model_name: cognic-tier1-dev",
+                "    litellm_params:",
+                "      model: ollama/qwen3:8b",
+                "      api_base: http://ollama:11434",
+                "litellm_settings: {}",
+                "general_settings: {}",
+                "",
+            ]
+        )
+    )
+
+    def _respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=response_body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_respond))
+    ledger = GatewayCallLedger(engine)
+    gateway = LLMGateway(
+        settings=Settings(
+            allow_external_llm=False,
+            policy_mode="self_hosted",
+            allowed_providers=[],
+            llm_guardrail_scope="all",
+            llm_concurrency_per_profile=4,
+            llm_concurrency_mode="queued",
+            litellm_base_url="http://litellm.test:4000",
+            litellm_master_key="sk-test-key",
+        ),
+        ledger=ledger,
+        audit_store=AuditStore(engine),
+        rate_limiter=ProfileRateLimiter(per_profile=4, mode="queued"),
+        preflight=PreflightResolver.from_yaml(config),
+        sla_policy=SLAPolicy(
+            name="default",
+            total_budget=timedelta(seconds=30),
+            warning_threshold=timedelta(seconds=20),
+        ),
+        http_client=client,
+    )
+    return gateway, client, ledger
 
 
 async def _dispatch_rows(engine: AsyncEngine) -> list[Any]:
@@ -607,6 +673,78 @@ class TestRealPolicyGateAndExecution:
         assert row.payload["args_sha256"] == expected_digest
 
     @opa_required
+    async def test_non_finite_tool_result_becomes_one_evidenced_safe_refusal(
+        self,
+        engine: AsyncEngine,
+        metadata_env: list[Any],
+        tmp_path: Path,
+        signing_key: tuple[str, bytes],
+    ) -> None:
+        """A side effect may finish, but its uncanonicalizable result may not
+        escape before the single digest-only refusal row is committed."""
+        key_path, _public_pem = signing_key
+        await _seed_assignment(engine, kind="tool", ref=TOOL_REF)
+        await _seed_scope_and_entitlement(engine, entitled=True)
+        proxy = _RecordingToolProxy(result={"value": float("nan")})
+        gateway = ScriptedGateway(
+            [
+                _response(
+                    "",
+                    tool_calls=(
+                        GatewayToolCall(
+                            id="non-finite-result",
+                            name=TOOL_NAME,
+                            arguments={"scope_id": SCOPE_ID, "sql": "select 1"},
+                        ),
+                    ),
+                ),
+                _response(ANSWER),
+            ]
+        )
+        loop = await _build(
+            engine,
+            metadata_env,
+            tmp_path,
+            gateway,
+            proxy,
+            signing_key_path=key_path,
+        )
+
+        result = await loop.ask(
+            agent_id=DEFAULT_AGENT_ID,
+            question=QUESTION,
+            actor_tenant_id=TENANT,
+            actor_subject=SUBJECT,
+        )
+
+        assert result.terminal_state == "completed"
+        assert len(proxy.calls) == 1, (
+            "the proxy invocation completed exactly once before returning the noncanonical result"
+        )
+        assert len(gateway.calls) == 2, "the safe refusal must return to the model"
+        tool_messages = [
+            message for message in gateway.calls[1]["messages"] if message.get("role") == "tool"
+        ]
+        assert len(tool_messages) == 1
+        assert json.loads(tool_messages[0]["content"]) == {
+            "refused": True,
+            "reason": "agent_tool_dispatch_failed",
+            "message": "the tool call failed (ValueError)",
+        }
+        assert "NaN" not in tool_messages[0]["content"]
+        assert '"value"' not in tool_messages[0]["content"]
+
+        row = await _one_dispatch_row(engine)
+        assert row.payload["outcome"] == "refused"
+        assert row.payload["refusal_reason"] == "agent_tool_dispatch_failed"
+        assert row.payload["result_sha256"] is None
+        assert row.payload["result_bytes"] is None
+
+        report = await ChainVerifier(engine, chain_id="decision_history").walk()
+        assert report.is_clean is True, report.detail
+        assert report.records_checked > 0
+
+    @opa_required
     async def test_step_bound_is_denied_by_shipped_rego_before_execution(
         self,
         engine: AsyncEngine,
@@ -667,6 +805,79 @@ class TestRealPolicyGateAndExecution:
         assert (
             row.payload["args_sha256"] == hashlib.sha256(canonical_bytes(raw_arguments)).hexdigest()
         )
+
+
+class TestProductionGatewayIngress:
+    async def test_non_finite_model_argument_fails_before_dispatch_and_chain_stays_clean(
+        self,
+        engine: AsyncEngine,
+        metadata_env: list[Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        response_body = {
+            "id": "resp-non-finite",
+            "object": "chat.completion",
+            "model": "ollama/qwen3:8b",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "bad-arguments",
+                                "type": "function",
+                                "function": {
+                                    "name": TOOL_NAME,
+                                    "arguments": '{"scope_id":"x","value":NaN}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        gateway, client, ledger = _real_gateway_with_response(
+            engine,
+            tmp_path,
+            response_body=response_body,
+        )
+        proxy = _RecordingToolProxy()
+        loop = await _build(engine, metadata_env, tmp_path, gateway, proxy)
+        dispatcher_spy = AsyncMock(wraps=loop._dispatcher.dispatch)
+        monkeypatch.setattr(loop._dispatcher, "dispatch", dispatcher_spy)
+
+        try:
+            result = await loop.ask(
+                agent_id=DEFAULT_AGENT_ID,
+                question=QUESTION,
+                actor_tenant_id=TENANT,
+                actor_subject=SUBJECT,
+            )
+        finally:
+            await client.aclose()
+
+        assert result.terminal_state == "failed"
+        dispatcher_spy.assert_not_awaited()
+        assert proxy.calls == []
+        assert await _dispatch_rows(engine) == []
+
+        started = await _event_rows(engine, "agent.run.started")
+        failed = await _event_rows(engine, "agent.run.failed")
+        assert len(started) == 1
+        assert len(failed) == 1
+        assert failed[0].payload["error_class"] == "_MalformedToolCall"
+        ledger_rows = await ledger.read_recent_calls(window_minutes=60)
+        assert len(ledger_rows) == 1
+        assert ledger_rows[0].outcome == "upstream_error"
+
+        report = await ChainVerifier(engine, chain_id="decision_history").walk()
+        assert report.is_clean is True, report.detail
+        assert report.records_checked > 0
 
 
 class TestEvidenceIsDigestOnly:

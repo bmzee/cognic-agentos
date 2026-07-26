@@ -1251,6 +1251,53 @@ class TestDispatchFailure:
 
 
 class TestDispatchEvidence:
+    async def test_noncanonical_tool_result_becomes_one_evidenced_refusal(self) -> None:
+        """The result probe is a dispatcher invariant, independent of whether
+        a real OPA binary is available for the composed integration packet."""
+        h = _harness(proxy_result={"value": float("nan")})
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("other_tool"),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert len(h.proxy.calls) == 1
+        assert outcome.refused is True
+        assert outcome.reason == "agent_tool_dispatch_failed"
+        assert outcome.message == "the tool call failed (ValueError)"
+        row = _only_row(h)
+        assert row.payload["outcome"] == "refused"
+        assert row.payload["refusal_reason"] == "agent_tool_dispatch_failed"
+        assert row.payload["result_sha256"] is None
+        assert row.payload["result_bytes"] is None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="positive-infinity"),
+            pytest.param(float("-inf"), id="negative-infinity"),
+        ],
+    )
+    async def test_direct_noncanonical_arguments_fail_loud_before_execution_or_evidence(
+        self, value: float
+    ) -> None:
+        """The current evidence schema requires the real canonical argument
+        digest, so direct callers may not fabricate a row for values that have
+        no canonical bytes.  Production model ingress is closed in LLMGateway."""
+        h = _harness()
+
+        with pytest.raises(ValueError, match="non-finite float not allowed in canonical form"):
+            await h.dispatcher.dispatch(
+                call=_call("other_tool", nested={"value": value}),
+                step_index=0,
+                run=_run(),
+            )
+
+        assert h.proxy.calls == []
+        assert h.dh.records == []
+
     async def test_valid_credential_rotation_ref_is_lifted_verbatim(self) -> None:
         rotation_ref = "2026-07-18T00:00:00+00:00"
         h = _harness(
