@@ -135,6 +135,14 @@ async def test_construction_success_wires_executor_and_closes_client(
         return backend, fake_client
 
     monkeypatch.setattr(hs, "build_sandbox_backend", _build)
+    spawner_build_calls = 0
+
+    def _build_spawner(**kw: Any) -> object:
+        nonlocal spawner_build_calls
+        spawner_build_calls += 1
+        return object()
+
+    monkeypatch.setattr(hs, "build_subagent_spawner", _build_spawner)
     app = create_app(
         _settings(
             memory_settings, tmp_path, sandbox_runtime_enabled=True, vault_addr="http://vault:8200"
@@ -153,8 +161,13 @@ async def test_construction_success_wires_executor_and_closes_client(
         from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
 
         assert isinstance(executor._runs, RunRecordStore)
+        assert app.state.run_record_store is executor._runs
         assert isinstance(executor._checkpoints, CheckpointStore)
         assert app.state.checkpoint_store is executor._checkpoints
+        # A-015: N9 owns the future production wiring. A fully configured
+        # lifespan must leave the existing route on its fail-closed 503 arm.
+        assert spawner_build_calls == 0
+        assert app.state.subagent_spawner is None
         assert fake_client.closed is False  # not yet — closed on shutdown
     assert fake_client.closed is True  # the owned docker client is closed on shutdown
 

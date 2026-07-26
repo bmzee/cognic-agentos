@@ -948,22 +948,12 @@ def create_app(
                             checkpoint_store=checkpoint_store,
                         )
                         # 2026-06-20 (ADR-005, Fork B) — publish the SAME run-record
-                        # store the executor uses so POST /api/v1/subagents can
-                        # resolve parent_run_id -> task_id (tenant-scoped). Co-populated
-                        # with the spawner; the route's combined 503 dep covers either.
+                        # store the executor uses. Amendment A-015 disables the
+                        # premature portal spawner wiring until N9 owns the real
+                        # sibling-budget ledger and production composition. The
+                        # mounted route therefore remains on its existing
+                        # subagent_spawner_unavailable 503 arm.
                         app.state.run_record_store = run_record_store
-                        # 2026-06-20 (ADR-005) — compose the live SubAgentSpawner
-                        # off the SAME runtime + engine. WIRED-but-DORMANT: no
-                        # route/caller consumes app.state.subagent_spawner yet
-                        # (mirrors the 13.7 scheduler / 13.8 MCP-host posture).
-                        from cognic_agentos.harness.sandbox import build_subagent_spawner
-
-                        app.state.subagent_spawner = build_subagent_spawner(
-                            runtime=runtime,
-                            managed_run_executor=app.state.managed_run_executor,
-                            engine=adapters.relational.engine,
-                            settings=settings,
-                        )
                     except Exception:
                         logger.error("sandbox.runtime_construction_failed", exc_info=True)
                         if sandbox_docker_client is not None:
@@ -1349,7 +1339,8 @@ def create_app(
     app.state.hosted_skills = []  # M6 (ADR-025) — /system/plugins surface; lifespan populates.
     app.state.agent_loop = None  # M8 A13 (ADR-027) — lifespan populates via build_agent_loop.
     app.state.hosted_agents = []  # M8 A13 (ADR-027) — /system/plugins surface; lifespan populates.
-    app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
+    # Amendment A-015: disabled until N9 wires the sibling-budget ledger.
+    app.state.subagent_spawner = None
     app.state.run_record_store = None  # 2026-06-20 (ADR-005) — lifespan publishes; route resolves.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
