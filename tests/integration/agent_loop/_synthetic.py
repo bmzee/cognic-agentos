@@ -5,17 +5,28 @@ The pack is deliberately BORING: one requested skill, one requested tool (a real
 two-line persona. Its only job is to be trivially correct so that any failure
 in a conformance run is attributable to the KERNEL and never to pack quality.
 
-What is REAL here (versus the unit suite's stubs):
+REAL here (versus the unit suite's stubs):
 
 * the manifest and ``AGENT.md`` are real bytes on disk, read by the real
   ``extract_pack_manifest`` / ``extract_agent_md`` through the real
-  ``Distribution.locate_file`` resolution path — only distribution *lookup* is
-  redirected, so the deferred-load invariant is exercised, not bypassed;
-* the record loader is the real :func:`_build_agent_records` walk.
+  ``Distribution.locate_file`` — the deferred-load invariant is exercised,
+  not bypassed;
+* the record loader is the real :func:`_build_agent_records` walk;
+* :func:`candidate` builds the REAL ``RegisteredPackCandidate``.
 
-What is necessarily scripted: the model (no LLM in CI) and the MCP tool proxy
-(no MCP server in CI). Both are the *inputs* to the governed decisions under
-test, never the decisions themselves.
+SUBSTITUTED — every seam, named:
+
+* **distribution lookup** — ``importlib.metadata.distribution`` is redirected;
+  ``locate_file`` still reads real files;
+* **the registry** — :class:`Registry` yields candidates directly. The real
+  ``PluginRegistry`` and ``registry_boot`` trust registration are NOT exercised
+  by this module;
+* **the model and the MCP tool proxy** — no LLM and no MCP server in CI. Both
+  are *inputs* to the governed decisions under test, never the decisions.
+
+Do not describe this module as "only distribution lookup is redirected": the
+registry is a seam too, and understating it would let the suite be cited for
+more than it proves.
 """
 
 from __future__ import annotations
@@ -34,6 +45,13 @@ DEFAULT_DIST = "cognic-agent-conformance"
 DEFAULT_PACKAGE = "cognic_agent_conformance"
 DEFAULT_AGENT_ID = "conformance-agent"
 DEFAULT_VERSION = "0.1.0"
+DEFAULT_SIGNATURE_DIGEST = "0" * 64
+
+#: The persona body EXACTLY as ``parse_skill_md`` returns it — the leading
+#: newline after the closing frontmatter delimiter is retained, and the digest
+#: below is taken over these exact bytes.
+DEFAULT_PERSONA_BODY = "\nAnswer using only assigned capabilities.\n"
+DEFAULT_PERSONA_SHA256 = "731a35b77710017ef42d6826a6449017158f11c741c9be4d66387ef38443f623"
 
 
 class FakeDist:
@@ -168,7 +186,7 @@ def candidate(
     *,
     distribution_name: str = DEFAULT_DIST,
     package_name: str = DEFAULT_PACKAGE,
-    signature_digest: str | None = "0" * 64,
+    signature_digest: str | None = DEFAULT_SIGNATURE_DIGEST,
 ) -> RegisteredPackCandidate:
     """A registered-pack row for the loader walk.
 

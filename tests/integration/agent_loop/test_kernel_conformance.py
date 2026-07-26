@@ -9,26 +9,53 @@ first proves logic but never wiring; the second cannot distinguish a kernel
 defect from a pack defect, which is exactly how a fixture's ambiguous goldens
 came to block a kernel milestone.
 
-This suite closes that gap. It drives the REAL composition — real manifest
-extraction through ``Distribution.locate_file``, the real ``_build_agent_records``
-walk, real ``AssignmentStore`` / ``EntitlementStore`` over a migrated database,
-the real Rego bundle — against a synthetic pack that is trivially correct by
-construction.
+This suite is being built to close that gap. Read the scope statement below
+before citing it as evidence of anything.
 
-THE ATTRIBUTION RULE THIS BUYS
-------------------------------
+WHAT THIS FILE PROVES TODAY — and what it does NOT
+--------------------------------------------------
+PROVEN (real code, not stubs):
+
+* manifest and ``AGENT.md`` resolution through the real ``extract_pack_manifest``
+  / ``extract_agent_md`` and the real ``Distribution.locate_file``, against real
+  bytes on disk — so the deferred-load invariant is exercised, not bypassed;
+* the real ``agent_host._build_agent_records`` admission walk, including its
+  per-pack fail-closed warn-skip arm;
+* the real ``RegisteredPackCandidate`` projection (built, not imitated, so a
+  field change fails this suite instead of passing against a stale shape).
+
+DELIBERATELY SUBSTITUTED — these are seams, and naming them is the point:
+
+* **distribution lookup** — ``importlib.metadata.distribution`` is redirected to
+  a fake list; ``locate_file`` still reads real files;
+* **the registry** — ``Registry`` / ``candidate()`` supply candidates directly.
+  The real ``PluginRegistry`` and ``registry_boot`` trust registration are NOT
+  exercised here (that path is cosign-gated and proven by
+  ``tests/integration/pack_loop/test_proof_1a_inprocess.py``).
+
+NOT YET PROVEN — do not cite this file for any of it:
+
+* ``build_agent_loop`` production composition;
+* ``AssignmentStore`` / ``EntitlementStore`` against a migrated database;
+* the Rego dispatch gate, refusal feedback to the model, or digest-only
+  chain-valid dispatch evidence.
+
+Those land in the dispatch-conformance packet. Until then this file proves
+pack-load wiring only.
+
+THE ATTRIBUTION RULE THIS IS BEING BUILT FOR
+--------------------------------------------
 * fails here                      -> KERNEL defect (the pack cannot be at fault)
 * passes here, fails a real pack  -> PACK defect, or an underspecified boundary
                                      contract (a kernel *docs* defect)
 * passes both, answer still wrong -> model/skill quality; never a kernel milestone
-
-The scripted model is a FEATURE, not a compromise: it removes the
-non-determinism that makes model-driven bars unreliable as gates.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata as _im
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +67,9 @@ from ._synthetic import (
     DEFAULT_AGENT_ID,
     DEFAULT_DIST,
     DEFAULT_PACKAGE,
+    DEFAULT_PERSONA_BODY,
+    DEFAULT_PERSONA_SHA256,
+    DEFAULT_SIGNATURE_DIGEST,
     DEFAULT_VERSION,
     FakeDist,
     Registry,
@@ -108,25 +138,56 @@ class TestSyntheticPackIsAdmissible:
 
         assert set(records) == {DEFAULT_AGENT_ID}
         record = records[DEFAULT_AGENT_ID]
+
+        # EVERY field of the projection is pinned. A shape-only check (e.g.
+        # ``len(persona_sha256) == 64``) would pass against a wrong digest, and
+        # unpinned fields are how a loader regression ships green.
         assert record.agent_id == DEFAULT_AGENT_ID
         assert record.requested_skills == ("conformance-skill",)
-        # NOTE: entries are ``<server_id>/<tool_name>`` identities, not bare
-        # names — the first-``/``-partition rule at ``agent_host._requested_tools``.
+        # Entries are ``<server_id>/<tool_name>`` identities, not bare names —
+        # the first-``/``-partition rule at ``agent_host._requested_tools``.
         assert record.requested_tools == ("conformance-server/conformance_query",)
         assert record.max_steps == 4
         assert record.risk_tier == "read_only"
-        assert record.persona_body.strip()
-        assert len(record.persona_sha256) == 64
 
-    def test_missing_agent_md_warn_skips_rather_than_raising(
-        self, metadata_env: list[Any], tmp_path: Path
-    ) -> None:
-        """Fail-closed per-pack: a malformed pack is skipped, never fatal, and
-        never silently admitted."""
-        _install_pack(metadata_env, tmp_path, write_agent_md=False)
-
-        records = agent_host._build_agent_records(
-            registry=Registry([candidate()]), settings=object()
+        # Byte-exact persona custody. The body keeps its leading newline (the
+        # frontmatter delimiter is not stripped), and the digest is taken over
+        # those exact bytes — change the fixture body and this MUST fail.
+        assert record.persona_body == DEFAULT_PERSONA_BODY
+        assert record.persona_sha256 == DEFAULT_PERSONA_SHA256
+        assert (
+            hashlib.sha256(record.persona_body.encode("utf-8")).hexdigest() == record.persona_sha256
         )
 
+        # Provenance carried from the distribution + the registered candidate.
+        assert record.pack_version == DEFAULT_VERSION
+        assert record.signed_artefact_digest == DEFAULT_SIGNATURE_DIGEST
+        assert record.registered is True
+
+    def test_missing_agent_md_warn_skips_rather_than_raising(
+        self,
+        metadata_env: list[Any],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Fail-closed per-pack: skipped, never fatal, never silently admitted.
+
+        The WARNING is asserted, not just the empty result. Without it a silent
+        drop would pass this test identically — and silent-drop vs warn-skip is
+        precisely the operational difference an operator needs to see.
+        """
+        _install_pack(metadata_env, tmp_path, write_agent_md=False)
+
+        with caplog.at_level(logging.WARNING, logger="cognic_agentos.harness.agent_host"):
+            records = agent_host._build_agent_records(
+                registry=Registry([candidate()]), settings=object()
+            )
+
         assert records == {}
+        warnings = [
+            rec
+            for rec in caplog.records
+            if rec.levelno >= logging.WARNING and rec.message == "agent.agent_md_not_found"
+        ]
+        assert len(warnings) == 1, f"expected exactly one warn-skip, saw {caplog.messages}"
+        assert getattr(warnings[0], "distribution_name", None) == DEFAULT_DIST
