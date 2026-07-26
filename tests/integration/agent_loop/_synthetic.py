@@ -278,3 +278,61 @@ class ScriptedGateway:
         self.calls.append(recorded)
         assert self._responses, "ScriptedGateway script exhausted"
         return self._responses.pop(0)
+
+
+# --- synthetic TOOL pack (for the capability-class map) --------------------- #
+
+TOOL_DIST = "conformance-server"
+TOOL_PACKAGE = "conformance_server"
+TOOL_NAME = "conformance_query"
+TOOL_REF = f"{TOOL_DIST}/{TOOL_NAME}"
+
+
+def write_tool_pack(
+    root: Path,
+    *,
+    package: str = TOOL_PACKAGE,
+    tool_name: str = TOOL_NAME,
+    capability_class: str = "data_query",
+) -> Path:
+    """A signed-manifest tool pack contributing ONE capability-class entry.
+
+    ``build_tool_capability_classes`` keys the map ``<distribution>/<name>``, so
+    the distribution name is what makes the agent pack's requested
+    ``conformance-server/conformance_query`` resolvable.
+    """
+    pkg_dir = root / package
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / MANIFEST_BASENAME).write_text(
+        "\n".join(
+            [
+                "[pack]",
+                f'pack_id = "{TOOL_DIST}"',
+                'kind = "tool"',
+                "",
+                "[[tool.cognic.tools]]",
+                f'name = "{tool_name}"',
+                f'capability_class = "{capability_class}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return pkg_dir
+
+
+def tool_pack_record_files(package: str = TOOL_PACKAGE) -> list[str]:
+    return [f"{package}/{MANIFEST_BASENAME}", f"{package}/__init__.py"]
+
+
+def tool_candidate(
+    *,
+    distribution_name: str = TOOL_DIST,
+    package_name: str = TOOL_PACKAGE,
+    signature_digest: str | None = DEFAULT_SIGNATURE_DIGEST,
+) -> RegisteredPackCandidate:
+    return RegisteredPackCandidate(
+        distribution_name=distribution_name,
+        package_name=package_name,
+        signature_digest=signature_digest,
+    )
