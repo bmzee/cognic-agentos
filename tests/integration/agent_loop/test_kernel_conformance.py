@@ -16,18 +16,13 @@ WHAT THIS FILE PROVES TODAY — and what it does NOT
 --------------------------------------------------
 PROVEN (real code, not stubs):
 
-* the real ``extract_pack_manifest`` / ``extract_agent_md`` — their
-  ``package_name`` identifier guard, path resolution, filesystem existence
-  check and read, TOML parse and frontmatter validation, all against real bytes
-  on disk, with no pack code imported (the deferred-load invariant). They do
-  NOT walk ``dist.files``: neither extractor consults RECORD despite
-  documenting that it does. That mismatch is a separately-recorded production
-  forward item for authorized critical-control review — do not restate the
-  RECORD claim here, and do not fix it from a test packet;
-* the real ``agent_host._build_agent_records`` admission walk, including its
-  per-pack fail-closed warn-skip arm;
-* the real ``RegisteredPackCandidate`` TYPE (constructed, not imitated, so a
-  field rename fails this suite instead of passing against a stale shape).
+* a valid manifest + ``AGENT.md`` stored as real disk bytes passes through the
+  real extractors and ``agent_host._build_agent_records`` into one exact
+  ``LoadedAgentRecord`` projection;
+* the missing-``AGENT.md`` per-pack arm warn-skips with one exact operational
+  warning and never admits the pack;
+* the real ``RegisteredPackCandidate`` dataclass supplies the distribution,
+  package, and signature-digest provenance consumed by that loader path.
 
 DELIBERATELY SUBSTITUTED — these are seams, and naming them is the point:
 
@@ -39,32 +34,32 @@ DELIBERATELY SUBSTITUTED — these are seams, and naming them is the point:
 * **the registry** — ``Registry`` / ``candidate()`` hand-construct candidates.
   This proves the candidate SHAPE, not ``PluginRegistry``'s projection
   SEMANTICS (which derives ``package_name`` from ``record.entry_point_value``
-  at ``plugin_registry.py:867``). The real registry and ``registry_boot`` trust
-  registration are NOT exercised here — that path is cosign-gated and proven by
+  in its registered-candidate projection). The real registry and
+  ``registry_boot`` trust registration are NOT exercised here — that path is
+  cosign-gated and proven by
   ``tests/integration/pack_loop/test_proof_1a_inprocess.py``.
 
-NOT YET PROVEN — do not cite this file for any of it:
+NOT PROVEN HERE — do not cite this file for any of it:
 
-* ``build_agent_loop`` production composition;
-* ``AssignmentStore`` / ``EntitlementStore`` against a migrated database;
-* the Rego dispatch gate, refusal feedback to the model, or digest-only
-  chain-valid dispatch evidence.
+* rejection arms for path-shaped ``package_name`` values, poisoned importable
+  pack code, or malformed ``AGENT.md`` frontmatter;
+* production ``PluginRegistry`` projection/trust, stdlib
+  ``Distribution.locate_file``, or RECORD membership;
+* loop composition and dispatch. Those are covered, at their separately
+  disclosed seam level, by sibling modules in this package.
 
-Those land in the dispatch-conformance packet. Until then this file proves
-pack-load wiring only.
-
-THE ATTRIBUTION RULE THIS IS BEING BUILT FOR
---------------------------------------------
-* fails here                      -> KERNEL defect (the pack cannot be at fault)
-* passes here, fails a real pack  -> PACK defect, or an underspecified boundary
-                                     contract (a kernel *docs* defect)
-* passes both, answer still wrong -> model/skill quality; never a kernel milestone
+ATTRIBUTION LIMIT
+-----------------
+These fixtures remove real product-pack quality and external services from the
+named assertions. A failure can still be in the fixture, migration,
+environment, or exercised kernel path. Passing this package does not prove
+whole-answer correctness or every prompt/loop behavior; conclusions must stay
+within each module's explicit PROVEN bullets.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata as _im
 import logging
 from pathlib import Path
 from typing import Any
@@ -84,34 +79,8 @@ from ._synthetic import (
     FakeDist,
     Registry,
     candidate,
-    pack_record_files,
     write_agent_pack,
 )
-
-
-@pytest.fixture
-def metadata_env(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Redirect distribution LOOKUP to a mutable fake list.
-
-    Only resolution is redirected — ``locate_file`` still reads real bytes from
-    disk, so the real extractors and the deferred-load invariant are exercised.
-    Both ``agent_manifest`` and ``mcp_manifest`` bind the same
-    ``importlib.metadata`` module object, so one patch site covers both.
-    """
-    dists: list[Any] = []
-
-    def _distribution(name: str) -> Any:
-        for dist in dists:
-            if dist.metadata["Name"] == name:
-                return dist
-        raise _im.PackageNotFoundError(name)
-
-    def _distributions() -> Any:
-        return iter(list(dists))
-
-    monkeypatch.setattr(_im, "distribution", _distribution)
-    monkeypatch.setattr(_im, "distributions", _distributions)
-    return dists
 
 
 def _install_pack(dists: list[Any], tmp_path: Path, **kwargs: Any) -> Path:
@@ -124,7 +93,6 @@ def _install_pack(dists: list[Any], tmp_path: Path, **kwargs: Any) -> Path:
             name=DEFAULT_DIST,
             version=DEFAULT_VERSION,
             root=root,
-            files=pack_record_files(package),
         )
     )
     return root

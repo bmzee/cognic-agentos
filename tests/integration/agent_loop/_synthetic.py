@@ -1,33 +1,36 @@
-"""Synthetic agent-pack fixtures for the kernel conformance suite.
+"""Synthetic pack fixtures for the kernel conformance suite.
 
 The pack is deliberately BORING: one requested skill, one requested tool (a real
 ``<server_id>/<tool_name>`` identity), a
-two-line persona. Its only job is to be trivially correct so that any failure
-in a conformance run is attributable to the KERNEL and never to pack quality.
+two-line persona. Its only job is to remove real product-pack quality from the
+test equation. A failure can still be in the fixture, migration, environment,
+or kernel; the tests below distinguish those cases with explicit assertions.
 
-REAL here (versus the unit suite's stubs):
+EXERCISED here (versus the unit suite's pure stubs):
 
-* the manifest and ``AGENT.md`` are real bytes on disk, parsed by the real
-  ``extract_pack_manifest`` / ``extract_agent_md`` — their ``package_name``
-  identifier guard, path resolution, filesystem existence check and read, TOML
-  parse and frontmatter validation all run for real, and no pack code is
-  imported. (They do NOT walk ``dist.files``: neither extractor consults RECORD
-  despite documenting that it does — see the separately-recorded forward item;
-  do not restate the RECORD claim here.);
+* a valid manifest and ``AGENT.md`` are real bytes on disk consumed by the real
+  ``extract_pack_manifest`` / ``extract_agent_md`` positive path;
 * the record loader is the real :func:`_build_agent_records` walk;
-* :func:`candidate` constructs the REAL ``RegisteredPackCandidate`` type.
+* :func:`candidate` constructs the real ``RegisteredPackCandidate`` dataclass
+  shape consumed by the loader.
 
 SUBSTITUTED — every seam, named:
 
 * **distribution lookup** — ``importlib.metadata.distribution`` is redirected;
 * **``locate_file``** — :meth:`FakeDist.locate_file` is a two-line
   ``root / relative`` join. The stdlib implementation is NOT exercised;
-* **the registry** — :class:`Registry` yields hand-built candidates, proving the
-  candidate SHAPE and not ``PluginRegistry``'s projection SEMANTICS. The real
-  registry and ``registry_boot`` trust registration are NOT exercised here;
-* **the model and the MCP tool proxy** — absent, and NOT YET REACHED: no
-  dispatch occurs in this package today. They become inputs to the governed
-  decisions when the dispatch-conformance packet lands.
+* **the registry and pack trust** — :class:`Registry` yields hand-built
+  post-trust candidates. This proves the candidate shape consumed downstream,
+  not ``PluginRegistry`` projection semantics, cosign verification,
+  attestations, allow-listing, or ``registry_boot``;
+* **the model and MCP execution** — ``ScriptedGateway`` and the recording MCP
+  proxy in ``test_dispatch_conformance`` are deterministic test doubles. The
+  real loop and dispatcher consume them, but no model provider or MCP server
+  runs;
+* **extractor rejection/deferred-load claims** — path-shaped package-name
+  refusal, malformed-frontmatter refusal, and the absence of pack-code import
+  are not asserted by this package. RECORD membership is not consulted on this
+  path and is not claimed.
 
 Do not narrow this list when describing the module. Understating a seam is how
 a suite gets cited for more than it proves.
@@ -35,7 +38,6 @@ a suite gets cited for more than it proves.
 
 from __future__ import annotations
 
-import importlib.metadata as _im
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -75,12 +77,10 @@ class FakeDist:
         name: str,
         version: str,
         root: Path,
-        files: list[str] | None,
     ) -> None:
         self._name = name
         self.version = version
         self._root = root
-        self._files = files
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -89,12 +89,6 @@ class FakeDist:
     @property
     def entry_points(self) -> tuple[Any, ...]:
         return ()
-
-    @property
-    def files(self) -> list[_im.PackagePath] | None:
-        if self._files is None:
-            return None
-        return [_im.PackagePath(f) for f in self._files]
 
     def locate_file(self, relative: Any) -> Path:
         return self._root / str(relative)
@@ -179,15 +173,6 @@ def write_agent_pack(
     return pkg_dir
 
 
-def pack_record_files(package: str = DEFAULT_PACKAGE) -> list[str]:
-    """RECORD-style file list for a synthetic agent pack."""
-    return [
-        f"{package}/{MANIFEST_BASENAME}",
-        f"{package}/{AGENT_MD_BASENAME}",
-        f"{package}/__init__.py",
-    ]
-
-
 def candidate(
     *,
     distribution_name: str = DEFAULT_DIST,
@@ -196,9 +181,9 @@ def candidate(
 ) -> RegisteredPackCandidate:
     """A registered-pack row for the loader walk.
 
-    Deliberately builds the REAL :class:`RegisteredPackCandidate` rather than a
-    look-alike: if the projection gains or renames a field, this suite fails
-    loudly instead of passing against a stale shape.
+    Deliberately builds the real :class:`RegisteredPackCandidate` rather than a
+    look-alike. This does not exercise ``PluginRegistry``'s projection into the
+    dataclass; that remains a disclosed substituted seam.
     """
     return RegisteredPackCandidate(
         distribution_name=distribution_name,
@@ -222,14 +207,18 @@ class Registry:
 
 @dataclass
 class LoopSettings:
-    """``_AgentLoopSettings`` conformer with production-shaped defaults.
+    """Focused ``_AgentLoopSettings`` test conformer.
 
-    Field names and types mirror the Protocol exactly; the real ``Settings``
-    conforms structurally, so a Protocol change breaks this at type-check time.
+    The fields are the values ``build_agent_loop`` reads. Focused assertions
+    pin the policy-path default and scenario overrides this package relies on;
+    the other convenience values are not claimed to equal production
+    ``Settings`` defaults, and this dataclass is not evidence that every future
+    Protocol/type change is statically caught.
     """
 
-    # Mirrors the real Settings default (core/config.py:2099) — the FILE, not
-    # the directory: OPAEngine requires ``bundle_path.is_file()``.
+    # Mirrors the real Settings default — the FILE, not the directory:
+    # OPAEngine requires ``bundle_path.is_file()``. A focused test compares
+    # this value to Settings' declared field default without a line citation.
     agents_policy_bundle: Path = Path("policies/_default/agents.rego")
     agent_query_context_signing_key_path: str | None = None
     agent_query_context_ttl_s: float = 30.0
@@ -295,11 +284,12 @@ def write_tool_pack(
     tool_name: str = TOOL_NAME,
     capability_class: str = "data_query",
 ) -> Path:
-    """A signed-manifest tool pack contributing ONE capability-class entry.
+    """A manifest-shaped tool fixture contributing ONE capability-class entry.
 
     ``build_tool_capability_classes`` keys the map ``<distribution>/<name>``, so
     the distribution name is what makes the agent pack's requested
-    ``conformance-server/conformance_query`` resolvable.
+    ``conformance-server/conformance_query`` resolvable. Registry trust and
+    signature verification are deliberately substituted in this package.
     """
     pkg_dir = root / package
     pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -319,10 +309,6 @@ def write_tool_pack(
         encoding="utf-8",
     )
     return pkg_dir
-
-
-def tool_pack_record_files(package: str = TOOL_PACKAGE) -> list[str]:
-    return [f"{package}/{MANIFEST_BASENAME}", f"{package}/__init__.py"]
 
 
 def tool_candidate(

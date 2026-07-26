@@ -11,8 +11,9 @@ that cannot be pinned by a test belongs in SUBSTITUTED or must be deleted.
   ``harness.agent_host.build_agent_loop`` entry point, its 3-state dependency
   discipline, and the identity of the collaborators it composes.
 * :mod:`~tests.integration.agent_loop.test_dispatch_conformance` — the governed
-  dispatch pipeline: assignment and entitlement gates, the Rego policy gate,
-  refusal feedback, and digest-only dispatch evidence.
+  dispatch pipeline: assignment and entitlement gates; shipped-Rego allow and
+  deny through the composed dispatcher; refusal feedback; a recording-proxy
+  positive execution control; and canonical-digest, chain-valid evidence.
 
 Read the module scope statement before citing any of it as evidence.
 """
