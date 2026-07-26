@@ -42,8 +42,9 @@ The load-bearing deltas, each with a test:
 * **Key custody carries forward.** No private-key material and no bypass flags
   anywhere in the tree; the realm (client secret + passwords) is a Secret, never
   a ConfigMap or a committed file.
-* **The kernel is untouched.** ``protocol/mcp_authz.py`` is byte-identical to
-  ``main`` and the migration head is ``0017``.
+* **The MCP authorization control is pinned.** ``protocol/mcp_authz.py`` is
+  byte-identical to the separately reviewed D2 tenant-isolation reference and
+  the migration head is ``0017``.
 """
 
 from __future__ import annotations
@@ -66,9 +67,9 @@ _PROOF = _REPO / "infra" / "proof-m85c"
 _RUNNER = _PROOF / "run-proof-m85c.sh"
 _PROOF_APP = _PROOF / "proof_m85c" / "proof_app.py"
 
-# AGENTS.md-locked digest of protocol/mcp_authz.py (the M4/M5 standing byte-lock).
+# Separately reviewed D2 digest of protocol/mcp_authz.py.
 _MCP_AUTHZ_PATH = _REPO / "src" / "cognic_agentos" / "protocol" / "mcp_authz.py"
-_MCP_AUTHZ_LOCKED_SHA256 = "3a9724d3891f11b539f141d888bb8e8318f25b73cd7820ea5b11830b364ffaac"
+_MCP_AUTHZ_REVIEWED_D2_SHA256 = "56e410c8c34472dbd87e3c3e50963b1899cffa3b23949dc870db617033b4dfbd"
 _GEN_REALM = _PROOF / "keycloak" / "gen_realm.py"
 _PKCE = _PROOF / "keycloak" / "pkce_login.py"
 _ASSERT_CLAIM = _PROOF / "keycloak" / "assert_claim_contract.py"
@@ -1107,16 +1108,13 @@ def test_migrate_failure_capture_uses_selector_only_for_job_and_pod() -> None:
     assert "get job/agentos-migrate,pod -l" not in text
 
 
-def test_mcp_authz_is_byte_identical_to_main() -> None:
-    # Assert the AGENTS.md-locked sha256 directly. A ``git diff main`` is NOT
-    # portable: CI's shallow PR checkout has no local ``main`` ref (it resolves
-    # ``origin/<base>`` instead), so the ref form fails with "bad revision".
-    # The digest is self-contained and cannot break on checkout topology; the
-    # dynamic base-ref byte-compare lives in
-    # tests/unit/architecture/test_mcp_authz_untouched.py.
+def test_mcp_authz_matches_reviewed_d2_reference() -> None:
+    # Assert the reviewed post-D2 sha256 directly. The digest is self-contained
+    # and cannot break on checkout topology; it also rejects a rollback to the
+    # prior tenantless cache implementation.
     digest = hashlib.sha256(_MCP_AUTHZ_PATH.read_bytes()).hexdigest()
-    assert digest == _MCP_AUTHZ_LOCKED_SHA256, (
-        "protocol/mcp_authz.py has drifted from the AGENTS.md-locked digest "
-        "(must stay byte-identical to main); a deliberate, separately-reviewed "
-        "change must update the lock in AGENTS.md and this constant together."
+    assert digest == _MCP_AUTHZ_REVIEWED_D2_SHA256, (
+        "protocol/mcp_authz.py has drifted from the reviewed D2 tenant-isolation "
+        "reference; a deliberate later change requires fresh critical-control "
+        "review and an explicit lock update."
     )

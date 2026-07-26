@@ -66,8 +66,15 @@ Authorization":
      (b) tenant policy permits.
 
   6. **Token cache + refresh** — tokens cached per
-     ``(server, scopes, resource)`` tuple; refreshed before expiry;
-     ``audit.mcp_token_refresh`` event per refresh.
+     ``(server, scopes, resource, tenant)`` tuple; refreshed before
+     expiry; ``audit.mcp_token_refresh`` event per refresh. A
+     same-tenant cache hit deliberately does not re-read the AS
+     allow-list: that list is a Vault-backed network read, not a
+     local lookup. Delisting staleness is bounded by the token's
+     effective expiry, which is capped by
+     ``settings.mcp_oauth_token_cache_ttl_s`` (default one hour);
+     cache hits stop :data:`_TOKEN_REFRESH_BUFFER_S` before that
+     expiry. Cross-tenant cache hits are impossible.
 
 Closed-enum error vocabulary (matches the registry-side
 :class:`RefusalReason` extension landing in T6):
@@ -495,20 +502,24 @@ class MCPAuthzClient:
         self._internal_host_allowlist_store = internal_host_allowlist_store
 
         # Token cache keyed by (server_url, granted-scopes-frozenset,
-        # resource_indicator). The asyncio.Lock guards reads + writes
-        # of BOTH the cache and the in-flight map; the lock is held
-        # only across the cache-lookup + in-flight-register check —
-        # NEVER across the network round-trip.
-        self._token_cache: dict[tuple[str, frozenset[str], str], Token] = {}
+        # resource_indicator, tenant_id). Tenant is an independent
+        # dimension in addition to the exact granted-scope match.
+        # The asyncio.Lock guards reads + writes of BOTH the cache and
+        # the in-flight map; the lock is held only across the cache-
+        # lookup + in-flight-register check — NEVER across the network
+        # round-trip.
+        self._token_cache: dict[tuple[str, frozenset[str], str, str], Token] = {}
         # In-flight coalescing map (R11 P2 (a)). Keyed by the same
         # cache-key shape as the token cache (so the lookup miss key
         # is also the in-flight key). Value is an ``asyncio.Future[Token]``
         # that the in-flight owner resolves on completion or failure.
         # Concurrent cold callers for the same cache key observe the
         # Future under lock and await it, so the AS sees one network
-        # round-trip per `(server, exact_scope_set, resource)` even
-        # under contention.
-        self._inflight_acquires: dict[tuple[str, frozenset[str], str], asyncio.Future[Token]] = {}
+        # round-trip per `(server, exact_scope_set, resource, tenant)`
+        # even under contention. Different tenants never coalesce.
+        self._inflight_acquires: dict[
+            tuple[str, frozenset[str], str, str], asyncio.Future[Token]
+        ] = {}
         self._cache_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -631,9 +642,10 @@ class MCPAuthzClient:
         result.
 
         Steps:
-          1. Cache lookup (return only if a non-expired cached token's
-             GRANTED scopes EQUAL the requested ``manifest_scopes`` —
-             least-privilege match per R10 P2).
+          1. Tenant-isolated cache lookup (return only if a
+             non-expired cached token's GRANTED scopes EQUAL the
+             requested ``manifest_scopes`` — least-privilege match
+             per R10 P2).
           2. PRM discovery (via :meth:`discover_resource_metadata`).
           3. Per-tenant AS allow-list lookup; refuse if AS not allowed.
           4. Token request to the allowed AS with RFC 8707 resource
@@ -642,9 +654,14 @@ class MCPAuthzClient:
           6. Cache (under the GRANTED scope set, not the requested set
              — see :meth:`_cache_put_under_granted`) + return.
 
-        Cache-key doctrine (R9 P2 + R10 P2): the cache key is the
-        actual GRANTED scope set, and the lookup match is **exact** on
-        granted == requested. Two invariants compose:
+        Cache-key doctrine (D2 + R9 P2 + R10 P2): ``tenant_id`` is an
+        independent key dimension, the scope dimension is the actual
+        GRANTED scope set, and lookup is **exact** on
+        granted == requested. Three invariants compose:
+
+        - **Tenant isolation** — a token acquired with one tenant's
+          allow-list and OAuth credentials can never satisfy another
+          tenant's lookup or in-flight acquisition.
 
         - **R9** — granted-narrower-than-requested: AS narrowed
           ``("mcp:tools", "mcp:tools.write")`` to ``("mcp:tools",)``.
@@ -690,11 +707,13 @@ class MCPAuthzClient:
         # The lock is released BEFORE the network round-trip — the
         # in-flight map serves the same coalescing purpose without
         # holding the lock through I/O.
-        inflight_key = (server_url, frozenset(manifest_scopes), server_url)
+        inflight_key = (server_url, frozenset(manifest_scopes), server_url, tenant_id)
         we_own_inflight = False
         async with self._cache_lock:
             cached = self._lookup_cached_for_exact_scopes(
-                server_url=server_url, requested_scopes=manifest_scopes
+                server_url=server_url,
+                requested_scopes=manifest_scopes,
+                tenant_id=tenant_id,
             )
             if cached is not None:
                 return cached
@@ -775,7 +794,7 @@ class MCPAuthzClient:
 
             # Step 6: cache under GRANTED scopes
             async with self._cache_lock:
-                self._cache_put_under_granted(token)
+                self._cache_put_under_granted(token, tenant_id=tenant_id)
             # Guarded resolve: if a waiter somehow cancelled the Future
             # despite shield, ``set_result`` would raise InvalidStateError.
             # Skip the call when already done; finally still deregisters.
@@ -801,10 +820,14 @@ class MCPAuthzClient:
                     self._inflight_acquires.pop(inflight_key, None)
 
     def _lookup_cached_for_exact_scopes(
-        self, *, server_url: str, requested_scopes: tuple[str, ...]
+        self,
+        *,
+        server_url: str,
+        requested_scopes: tuple[str, ...],
+        tenant_id: str,
     ) -> Token | None:
-        """Return the cached token whose GRANTED scopes equal the
-        requested set exactly, or ``None``.
+        """Return this tenant's cached token whose GRANTED scopes
+        equal the requested set exactly, or ``None``.
 
         Least-privilege match (R10 P2): the lookup never returns a
         token whose granted scopes are broader OR narrower than the
@@ -820,20 +843,22 @@ class MCPAuthzClient:
         - **Exact-grant**: the only HIT path.
 
         ADR-002 + Sprint-5 plan describe minimum-scope token
-        acquisition with cache keys by ``(server, scope, resource)``;
-        the exact-match rule is the natural reading of that contract.
+        acquisition. D2 makes the complete cache key
+        ``(server, scope, resource, tenant)``; the exact scope match
+        remains unchanged.
 
         Caller MUST hold ``self._cache_lock``.
         """
-        cache_key = (server_url, frozenset(requested_scopes), server_url)
+        cache_key = (server_url, frozenset(requested_scopes), server_url, tenant_id)
         cached = self._token_cache.get(cache_key)
         if cached is None or _is_token_near_expiry(cached):
             return None
         return cached
 
-    def _cache_put_under_granted(self, token: Token) -> None:
+    def _cache_put_under_granted(self, token: Token, *, tenant_id: str) -> None:
         """Insert a freshly-acquired token into the cache keyed by its
-        GRANTED scope set (``frozenset(token.scopes)``).
+        tenant and GRANTED scope set
+        (``tenant_id`` + ``frozenset(token.scopes)``).
 
         Caller MUST hold ``self._cache_lock``. The granted-keyed
         insert combined with the exact-match lookup
@@ -845,6 +870,7 @@ class MCPAuthzClient:
             token.resource_indicator,
             frozenset(token.scopes),
             token.resource_indicator,
+            tenant_id,
         )
         self._token_cache[cache_key] = token
 
@@ -862,12 +888,13 @@ class MCPAuthzClient:
         same dead token from cache.
 
         Cache keys are ``(resource_indicator, frozenset(scopes),
-        resource_indicator)`` per :meth:`_cache_put_under_granted`;
-        invalidation matches on the resource_indicator (which the
-        cache uses as a stand-in for server_url since that's the
-        bound-to audience). Drops EVERY scope-tier entry for the
-        server — a 401 invalidates the auth context, not just the
-        specific scope tier the failing call used.
+        resource_indicator, tenant_id)`` per
+        :meth:`_cache_put_under_granted`; invalidation matches on the
+        resource_indicator (which the cache uses as a stand-in for
+        server_url since that's the bound-to audience). Drops EVERY
+        tenant + scope-tier entry for the server — preserving the
+        existing server-global invalidation contract because this
+        public method receives no tenant identity.
 
         No-op for a server with no cached entries (idempotent).
         Token-free per the same discipline as the rest of this
@@ -999,7 +1026,7 @@ class MCPAuthzClient:
 
         # Update cache with the wider-scoped token (keyed by granted)
         async with self._cache_lock:
-            self._cache_put_under_granted(token)
+            self._cache_put_under_granted(token, tenant_id=tenant_id)
         return token
 
     async def refresh_token(
@@ -1086,7 +1113,7 @@ class MCPAuthzClient:
 
         # Update cache (keyed by GRANTED scopes — same as acquire/step-up)
         async with self._cache_lock:
-            self._cache_put_under_granted(new_token)
+            self._cache_put_under_granted(new_token, tenant_id=tenant_id)
         return new_token
 
     # ------------------------------------------------------------------

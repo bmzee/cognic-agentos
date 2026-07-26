@@ -3295,13 +3295,15 @@ class TestCacheLookupBranchCoverage:
         # Reach into the cache directly. The helper is protected by
         # the cache lock in production; this test runs single-threaded
         # so the bare-write is safe.
-        cache_key = (server, frozenset(("mcp:tools",)), server)
+        cache_key = (server, frozenset(("mcp:tools",)), server, "bank_a")
         authz._token_cache[cache_key] = near_expiry
 
         # Lookup MUST return None (the only cached entry is too close
         # to expiry to be reused).
         result = authz._lookup_cached_for_exact_scopes(
-            server_url=server, requested_scopes=("mcp:tools",)
+            server_url=server,
+            requested_scopes=("mcp:tools",),
+            tenant_id="bank_a",
         )
         assert result is None
 
@@ -3947,8 +3949,15 @@ class TestInvalidateCachedToken:
             resource_indicator=server,
             client_id="cognic-mcp-bank_a",
         )
-        authz._token_cache[(server, frozenset(("mcp:tools",)), server)] = narrow
-        authz._token_cache[(server, frozenset(("mcp:tools", "mcp:tools.write")), server)] = wide
+        narrow_key = (server, frozenset(("mcp:tools",)), server, "bank_a")
+        wide_key = (
+            server,
+            frozenset(("mcp:tools", "mcp:tools.write")),
+            server,
+            "bank_b",
+        )
+        authz._token_cache[narrow_key] = narrow
+        authz._token_cache[wide_key] = wide
         # Plus an unrelated server's token — MUST NOT be touched
         other = "https://other.example/mcp"
         other_token = Token(
@@ -3959,19 +3968,16 @@ class TestInvalidateCachedToken:
             resource_indicator=other,
             client_id="cognic-mcp-bank_a",
         )
-        authz._token_cache[(other, frozenset(("mcp:tools",)), other)] = other_token
+        other_key = (other, frozenset(("mcp:tools",)), other, "bank_a")
+        authz._token_cache[other_key] = other_token
 
         await authz.invalidate_cached_token(server_url=server)
 
         # All entries for the target server are gone
-        assert (server, frozenset(("mcp:tools",)), server) not in authz._token_cache
-        assert (
-            server,
-            frozenset(("mcp:tools", "mcp:tools.write")),
-            server,
-        ) not in authz._token_cache
+        assert narrow_key not in authz._token_cache
+        assert wide_key not in authz._token_cache
         # Unrelated server's entry is preserved
-        assert (other, frozenset(("mcp:tools",)), other) in authz._token_cache
+        assert other_key in authz._token_cache
 
     async def test_invalidate_idempotent_on_empty_cache(self, authz: MCPAuthzClient) -> None:
         """No-op for a server with no cached entries (orchestrator
@@ -3994,17 +4000,18 @@ class TestInvalidateCachedToken:
             resource_indicator=server,
             client_id="cognic-mcp-bank_a",
         )
-        authz._token_cache[(server, frozenset(("mcp:tools",)), server)] = token
+        cache_key = (server, frozenset(("mcp:tools",)), server, "bank_a")
+        authz._token_cache[cache_key] = token
 
         # Acquire the lock; invalidate must wait
         async with authz._cache_lock:
             invalidate_task = asyncio.create_task(authz.invalidate_cached_token(server_url=server))
             await asyncio.sleep(0.01)
             # Task is blocked on the lock — entry still present
-            assert (server, frozenset(("mcp:tools",)), server) in authz._token_cache
+            assert cache_key in authz._token_cache
         # Lock released; invalidation completes
         await invalidate_task
-        assert (server, frozenset(("mcp:tools",)), server) not in authz._token_cache
+        assert cache_key not in authz._token_cache
 
 
 # ---------------------------------------------------------------------------
