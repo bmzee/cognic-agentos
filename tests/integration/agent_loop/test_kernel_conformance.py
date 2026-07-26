@@ -16,9 +16,14 @@ WHAT THIS FILE PROVES TODAY — and what it does NOT
 --------------------------------------------------
 PROVEN (real code, not stubs):
 
-* the real ``extract_pack_manifest`` / ``extract_agent_md`` — their RECORD walk,
-  identifier guards, TOML parse and frontmatter validation run against real
-  bytes on disk, and no pack code is imported (the deferred-load invariant);
+* the real ``extract_pack_manifest`` / ``extract_agent_md`` — their
+  ``package_name`` identifier guard, path resolution, filesystem existence
+  check and read, TOML parse and frontmatter validation, all against real bytes
+  on disk, with no pack code imported (the deferred-load invariant). They do
+  NOT walk ``dist.files``: neither extractor consults RECORD despite
+  documenting that it does. That mismatch is a separately-recorded production
+  forward item for authorized critical-control review — do not restate the
+  RECORD claim here, and do not fix it from a test packet;
 * the real ``agent_host._build_agent_records`` admission walk, including its
   per-pack fail-closed warn-skip arm;
 * the real ``RegisteredPackCandidate`` TYPE (constructed, not imitated, so a

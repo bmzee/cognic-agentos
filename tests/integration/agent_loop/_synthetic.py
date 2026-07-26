@@ -8,8 +8,12 @@ in a conformance run is attributable to the KERNEL and never to pack quality.
 REAL here (versus the unit suite's stubs):
 
 * the manifest and ``AGENT.md`` are real bytes on disk, parsed by the real
-  ``extract_pack_manifest`` / ``extract_agent_md`` — their RECORD walk,
-  identifier guards and validation run for real, and no pack code is imported;
+  ``extract_pack_manifest`` / ``extract_agent_md`` — their ``package_name``
+  identifier guard, path resolution, filesystem existence check and read, TOML
+  parse and frontmatter validation all run for real, and no pack code is
+  imported. (They do NOT walk ``dist.files``: neither extractor consults RECORD
+  despite documenting that it does — see the separately-recorded forward item;
+  do not restate the RECORD claim here.);
 * the record loader is the real :func:`_build_agent_records` walk;
 * :func:`candidate` constructs the REAL ``RegisteredPackCandidate`` type.
 
@@ -32,7 +36,9 @@ a suite gets cited for more than it proves.
 from __future__ import annotations
 
 import importlib.metadata as _im
+import shutil
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -209,3 +215,66 @@ class Registry:
 
     def iter_registered_pack_candidates(self) -> Iterator[RegisteredPackCandidate]:
         return iter(list(self._candidates))
+
+
+# --- build_agent_loop composition seams ------------------------------------ #
+
+
+@dataclass
+class LoopSettings:
+    """``_AgentLoopSettings`` conformer with production-shaped defaults.
+
+    Field names and types mirror the Protocol exactly; the real ``Settings``
+    conforms structurally, so a Protocol change breaks this at type-check time.
+    """
+
+    # Mirrors the real Settings default (core/config.py:2099) — the FILE, not
+    # the directory: OPAEngine requires ``bundle_path.is_file()``.
+    agents_policy_bundle: Path = Path("policies/_default/agents.rego")
+    agent_query_context_signing_key_path: str | None = None
+    agent_query_context_ttl_s: float = 30.0
+    agent_max_steps: int = 4
+    agent_run_token_budget: int = 100_000
+    agent_run_wall_clock_s: float = 60.0
+    # Resolved from PATH so the composition uses the REAL binary. ``None`` when
+    # opa is absent, which is what ``@opa_required`` skips on.
+    opa_path: str | None = field(default_factory=lambda: shutil.which("opa"))
+    opa_eval_timeout_s: float = 5.0
+    sandbox_canonical_runtime_python_image: str = "cognic/sandbox-runtime-python:test"
+
+
+@dataclass
+class LoopRuntime:
+    """``_AgentLoopRuntime`` conformer.
+
+    The four members are read as plain attributes by ``build_agent_loop``'s
+    dependency gate, so ``None`` on any of them exercises a real
+    partial-configuration arm rather than a synthetic one.
+    """
+
+    llm_gateway: Any = None
+    memory_api_factory: Any = None
+    audit_store: Any = None
+    decision_history_store: Any = None
+
+
+class ScriptedGateway:
+    """Deterministic stand-in for ``LLMGateway``.
+
+    Determinism is the POINT: a scripted model removes the non-determinism that
+    makes model-driven bars unusable as gates. It records every call so the
+    prompt-assembly side of the loop stays observable.
+    """
+
+    def __init__(self, responses: list[Any] | None = None) -> None:
+        self._responses = list(responses or [])
+        self.calls: list[dict[str, Any]] = []
+
+    async def completion(self, **kwargs: Any) -> Any:
+        recorded = dict(kwargs)
+        # The loop appends to a LIVE message list; snapshot or later rounds
+        # mutate what was already recorded.
+        recorded["messages"] = [dict(m) for m in kwargs.get("messages", [])]
+        self.calls.append(recorded)
+        assert self._responses, "ScriptedGateway script exhausted"
+        return self._responses.pop(0)
