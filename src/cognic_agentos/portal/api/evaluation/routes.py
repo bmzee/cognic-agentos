@@ -56,7 +56,7 @@ def _require_decision_history_store(request: Request) -> DecisionHistoryStore:
     return store
 
 
-def build_eval_routes(*, eval_judge_tier: str) -> APIRouter:
+def build_eval_routes(*, eval_judge_tier: str, eval_judge_model_alias: str) -> APIRouter:
     router = APIRouter()
     _require_scope = RequireScope("eval.judge.run")
 
@@ -108,6 +108,7 @@ def build_eval_routes(*, eval_judge_tier: str) -> APIRouter:
                         "output_digest": output_digest,
                         "response_digest": _digest(outcome.response.content),
                         "model": outcome.response.upstream_model,
+                        "model_alias": eval_judge_model_alias,
                         "tier": outcome.response.tier,
                         "latency_ms": outcome.response.latency_ms,
                     },
@@ -132,6 +133,7 @@ def build_eval_routes(*, eval_judge_tier: str) -> APIRouter:
                     "input_digest": input_digest,
                     "output_digest": output_digest,
                     "model": outcome.response.upstream_model,
+                    "model_alias": eval_judge_model_alias,
                     "tier": outcome.response.tier,
                     "latency_ms": outcome.response.latency_ms,
                 },
@@ -143,6 +145,7 @@ def build_eval_routes(*, eval_judge_tier: str) -> APIRouter:
             rationale=outcome.rationale,
             criteria_results=list(outcome.criteria_results),
             model=outcome.response.upstream_model,
+            model_alias=eval_judge_model_alias,
             tier=outcome.response.tier,
             latency_ms=outcome.response.latency_ms,
         )

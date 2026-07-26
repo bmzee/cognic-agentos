@@ -24,7 +24,6 @@ import hashlib
 import json
 import logging
 import pathlib
-import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -1075,14 +1074,86 @@ class TestBuildLlmToolSpecs:
         (action_spec, *_) = build_llm_tool_specs(
             run=run,
             capability_classes={_OTHER_REF: "action"},
+            action_tool_schemas={
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "leave_type": {"type": "string"},
+                    },
+                    "required": ["start_date", "end_date", "leave_type"],
+                }
+            },
         )
         assert action_spec.name == "other_tool"
+        assert set(action_spec.parameters["properties"]) == {
+            "start_date",
+            "end_date",
+            "leave_type",
+        }
+        assert action_spec.parameters["required"] == [
+            "start_date",
+            "end_date",
+            "leave_type",
+        ]
         assert action_spec.parameters["additionalProperties"] is False
         assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters["properties"]
         assert ACTION_CONTEXT_ARGUMENT not in action_spec.parameters.get("required", [])
-        (key_pattern,) = action_spec.parameters["patternProperties"]
-        assert re.fullmatch(key_pattern, ACTION_CONTEXT_ARGUMENT) is None
-        assert re.fullmatch(key_pattern, "amount") is not None
+
+    @pytest.mark.parametrize(
+        "schemas",
+        [
+            {},
+            {_OTHER_REF: {"type": "array"}},
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": "not-a-schema"},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {ACTION_CONTEXT_ARGUMENT: {"type": "string"}},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "patternProperties": {".*": {}},
+                }
+            },
+            {
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "required": ["missing"],
+                }
+            },
+        ],
+    )
+    def test_action_without_a_safe_live_schema_is_not_advertised(
+        self, schemas: dict[str, dict[str, Any]]
+    ) -> None:
+        run = _run(
+            granted=GrantedCapabilities(
+                skills=frozenset(),
+                tools=frozenset({_OTHER_REF}),
+            )
+        )
+
+        names = {
+            spec.name
+            for spec in build_llm_tool_specs(
+                run=run,
+                capability_classes={_OTHER_REF: "action"},
+                action_tool_schemas=schemas,
+            )
+        }
+
+        assert "other_tool" not in names
 
 
 class TestReservedActionContext:
@@ -1180,6 +1251,53 @@ class TestDispatchFailure:
 
 
 class TestDispatchEvidence:
+    async def test_noncanonical_tool_result_becomes_one_evidenced_refusal(self) -> None:
+        """The result probe is a dispatcher invariant, independent of whether
+        a real OPA binary is available for the composed integration packet."""
+        h = _harness(proxy_result={"value": float("nan")})
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("other_tool"),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert len(h.proxy.calls) == 1
+        assert outcome.refused is True
+        assert outcome.reason == "agent_tool_dispatch_failed"
+        assert outcome.message == "the tool call failed (ValueError)"
+        row = _only_row(h)
+        assert row.payload["outcome"] == "refused"
+        assert row.payload["refusal_reason"] == "agent_tool_dispatch_failed"
+        assert row.payload["result_sha256"] is None
+        assert row.payload["result_bytes"] is None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="positive-infinity"),
+            pytest.param(float("-inf"), id="negative-infinity"),
+        ],
+    )
+    async def test_direct_noncanonical_arguments_fail_loud_before_execution_or_evidence(
+        self, value: float
+    ) -> None:
+        """The current evidence schema requires the real canonical argument
+        digest, so direct callers may not fabricate a row for values that have
+        no canonical bytes.  Production model ingress is closed in LLMGateway."""
+        h = _harness()
+
+        with pytest.raises(ValueError, match="non-finite float not allowed in canonical form"):
+            await h.dispatcher.dispatch(
+                call=_call("other_tool", nested={"value": value}),
+                step_index=0,
+                run=_run(),
+            )
+
+        assert h.proxy.calls == []
+        assert h.dh.records == []
+
     async def test_valid_credential_rotation_ref_is_lifted_verbatim(self) -> None:
         rotation_ref = "2026-07-18T00:00:00+00:00"
         h = _harness(

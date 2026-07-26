@@ -103,11 +103,12 @@ echo "  entitled subjects: analyst.amir -> $AMIR_SUB"
 echo "                     analyst.sara -> $SARA_SUB"
 PSQL <<<"$SEED_SQL"
 
-# Readback assertion — the exact maintainer matrix (4 scopes / 4 entitlements /
-# 4 assignments) landed for the proof tenant; atm_recon entitled to NOBODY; and
-# the entitlement rows are keyed by the RENDERED bound subjects (2 each), so a
+# Readback assertion — the exact E composition matrix (7 scopes / 7
+# entitlements / 12 assignments across the primary and ablation agents) landed
+# for the proof tenant; atm_recon is entitled to NOBODY; and the entitlement
+# rows are keyed by the RENDERED bound subjects (Amir 5 / Sara 2), so a
 # wrong-but-substituted subject (e.g. a stale realm-subjects.env) also dies here
-# instead of surfacing 30 minutes later as an inexplicable empty scope set.
+# instead of surfacing later as an inexplicable empty scope set.
 COUNTS="$(PSQL -tA <<SQL
 SELECT (SELECT count(*) FROM data_scopes WHERE tenant_id = '$T')
     || '|' || (SELECT count(*) FROM entitlements WHERE tenant_id = '$T')
@@ -117,8 +118,8 @@ SELECT (SELECT count(*) FROM data_scopes WHERE tenant_id = '$T')
     || '|' || (SELECT count(*) FROM entitlements WHERE tenant_id = '$T' AND subject = '$SARA_SUB');
 SQL
 )"
-if [ "$COUNTS" != "4|4|4|0|2|2" ]; then
-  echo "FAIL: seed-db.sh (M8.5 slice) readback expected 4|4|4|0|2|2 (scopes|entitlements|assignments|atm_recon-entitlements|amir-subject|sara-subject), got: $COUNTS" >&2
+if [ "$COUNTS" != "7|7|12|0|5|2" ]; then
+  echo "FAIL: seed-db.sh (M8.5 slice) readback expected 7|7|12|0|5|2 (scopes|entitlements|assignments|atm_recon-entitlements|amir-subject|sara-subject), got: $COUNTS" >&2
   exit 1
 fi
-echo "seed-db.sh (M8.5 slice): 0014 rows verified (4 scopes, 4 entitlements keyed by bound subjects, 4 assignments, atm_recon entitled to NOBODY)"
+echo "seed-db.sh (M8.5 slice): authority rows verified (7 scopes, 7 entitlements keyed by bound subjects, 12 assignments, atm_recon entitled to NOBODY)"

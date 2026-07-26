@@ -35,7 +35,8 @@ def test_eval_dir_has_expected_sources() -> None:
     the fences pass trivially."""
     names = {p.name for p in _eval_sources()}
     # The expected set grows only through reviewed evaluation slices: Sprint 12's
-    # generic runner, Sprint 13a replay, and M8.5-E's A-007 skill corpus/evaluator.
+    # generic runner, Sprint 13a replay, and M8.5-E's A-007 skill corpus, evaluator,
+    # and human-labelled judge calibration.
     assert names == {
         "__init__.py",
         "judge.py",
@@ -45,6 +46,7 @@ def test_eval_dir_has_expected_sources() -> None:
         "scorers.py",
         "skill_corpus.py",
         "skill_eval.py",
+        "skill_calibration.py",
         "runner.py",
         "storage.py",
         "replay.py",

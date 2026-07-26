@@ -379,9 +379,13 @@ def _decode_arguments(value: bytes) -> dict[str, Any]:
 
 def _project_result(call_result: Any) -> dict[str, Any]:
     payload = getattr(call_result, "payload", call_result)
+    if getattr(payload, "isError", False) or getattr(payload, "is_error", False):
+        raise RuntimeError("MCP action result carries isError=true")
     if hasattr(payload, "model_dump"):
         payload = payload.model_dump(mode="json")
     if isinstance(payload, dict):
+        if payload.get("isError") is True or payload.get("is_error") is True:
+            raise RuntimeError("MCP action result carries isError=true")
         structured = payload.get("structuredContent")
         if isinstance(structured, dict):
             return structured

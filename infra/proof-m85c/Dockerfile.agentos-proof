@@ -11,7 +11,7 @@ ARG KERNEL_GIT_SHA
 LABEL io.cognic.proof.kernel-anchor=$KERNEL_GIT_SHA \
       io.cognic.proof.milestone="m8.5-conversational-slice"
 USER root
-# trust staging (same shape as proof-m6, now SEVEN released packs): wheel
+# trust staging (same shape as proof-m6, extended to the composed release set): wheel
 # installs + per-pack attestations + trust roots + alembic.ini. stage-packs.sh
 # downloads + sha256-verifies the released assets and arranges
 # proof-m85c-staging/ before build.
@@ -132,9 +132,10 @@ ENV COGNIC_PACK_ATTESTATION_ROOT_PATH=/opt/cognic/pack-attestations \
 #     deploy time (operator env; never image-baked).
 ENV COGNIC_AGENTS_POLICY_BUNDLE=/app/policies/_default/agents.rego \
     COGNIC_AGENT_QUERY_CONTEXT_SIGNING_KEY_PATH=/run/cognic/query-context/query-context-private.pem \
+    COGNIC_ACTION_CONTEXT_SIGNING_KEY_PATH=/run/cognic/action-context/action-context-private.pem \
     COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH=/opt/cognic/trust-roots/agent-packs/cognic-agent-bank-analyst/agent-card.pub \
-    COGNIC_TIER1_ALIAS=cognic-tier1-proof-m85c \
-    COGNIC_TIER2_ALIAS=cognic-tier2-proof-m85c
+    COGNIC_TIER1_ALIAS=cognic-tier1-proof-m85e \
+    COGNIC_TIER2_ALIAS=cognic-tier2-proof-m85e
 # /app/proof_m85c is vendored (COPY, not pip-installed), so /app must be
 # importable (the default-adapters base sets no PYTHONPATH and runs uvicorn
 # as a console script).

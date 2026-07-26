@@ -127,6 +127,14 @@ class AgentRecordLoader(Protocol):
     ) -> LoadedAgentRecord | None: ...
 
 
+class ActionToolSchemaProvider(Protocol):
+    """Tenant-scoped live MCP schema seam for granted action tools."""
+
+    async def load_action_schemas(
+        self, *, tenant_id: str, tool_refs: frozenset[str]
+    ) -> Mapping[str, Mapping[str, Any]]: ...
+
+
 # --- Pure helpers (module-level so every defensive arm is direct-testable —
 # --- the A10 ``_granted_tool_name_map`` precedent) ------------------------------
 
@@ -226,6 +234,7 @@ class AgentLoop:
         gateway: LLMGateway,
         dispatcher: AgentDispatcher,
         tool_capability_classes: Mapping[str, str],
+        action_tool_schema_provider: ActionToolSchemaProvider,
         skill_reader: SkillBodyReader,
         memory_factory: MemoryApiFactory,
         decision_history: DecisionHistoryStore,
@@ -240,6 +249,7 @@ class AgentLoop:
         self._gateway = gateway
         self._dispatcher = dispatcher
         self._tool_capability_classes = dict(tool_capability_classes)
+        self._action_tool_schema_provider = action_tool_schema_provider
         self._skill_reader = skill_reader
         self._memory_factory = memory_factory
         self._decision_history = decision_history
@@ -279,6 +289,17 @@ class AgentLoop:
             )
         granted = await self._assignments.load_for_agent(
             tenant_id=actor_tenant_id, agent_id=agent_id, record=record
+        )
+        action_refs = frozenset(
+            ref for ref in granted.tools if self._tool_capability_classes.get(ref) == "action"
+        )
+        action_tool_schemas = (
+            await self._action_tool_schema_provider.load_action_schemas(
+                tenant_id=actor_tenant_id,
+                tool_refs=action_refs,
+            )
+            if action_refs
+            else {}
         )
 
         # --- 2. Mint the run + the started evidence row.
@@ -345,6 +366,7 @@ class AgentLoop:
         specs = build_llm_tool_specs(
             run=run,
             capability_classes=self._tool_capability_classes,
+            action_tool_schemas=action_tool_schemas,
         )
 
         prompt_tokens_total = 0
@@ -601,6 +623,7 @@ class AgentLoop:
 
 
 __all__ = (
+    "ActionToolSchemaProvider",
     "AgentLoop",
     "AgentRecordLoader",
     "RunBoundKind",

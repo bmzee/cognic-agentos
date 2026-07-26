@@ -799,6 +799,23 @@ def test_r3_s2_and_s3_require_two_distinct_replicas() -> None:
 # --- R4: Bar C proves a VISIBLE refusal, not merely a non-empty answer ------ #
 
 
+def test_r4_bar_c_revocation_prompt_distinguishes_skill_id_from_scope_id() -> None:
+    """The model repeatedly copied the ``financial-data`` skill id into the
+    query tool's ``scope_id`` despite the hosted skill teaching ``financials``.
+    The revocation witness is meaningful only when the attempted scope is the
+    entitlement key that the runner actually revoked."""
+    bar_c = _RUNNER_TEXT.split("# ============================ BAR C", 1)[1].split(
+        "# ============================ BAR D", 1
+    )[0]
+
+    assert "Use the financial-data skill." in bar_c
+    assert "set scope_id to exactly financials (not the skill id)" in bar_c
+    assert (
+        """payload->>'refusal_reason'='agent_scope_not_entitled' AND """
+        """payload->>'scope_id'='financials'"""
+    ) in bar_c
+
+
 def test_r4_bar_c_requires_the_refusal_to_render_on_the_evidence_screen() -> None:
     """The pre-review leg asserted only a non-empty answer + a DB refusal row, so a
     model that hallucinated a plausible figure while the dispatch was refused
@@ -4772,6 +4789,8 @@ def test_attempt19_every_json_assert_predicate_compiles_and_has_value_free_messa
         "BAR D.7 pagination integrity (exact id-set AND exact keyset order)",
         "BAR D.8 foreign observer sees an empty own-queue",
         "BAR E rendered chain shape",
+        "BAR I.3 Amir's answer leaked the entitled cards spend value",
+        "BAR I.4 Oracle row does not match the digest-verified approved arguments",
     }
     for label, source in predicates.items():
         tree = ast.parse(source, filename=f"json_assert:{label}", mode="exec")
@@ -4986,7 +5005,7 @@ def test_d2_bar_g_scope_update_requires_exact_admin_api_readback() -> None:
 
 def test_d2_bar_g_appends_without_changing_bars_a_through_f() -> None:
     assert hashlib.sha256(_bar_a_through_f_text().encode()).hexdigest() == (
-        "92b3942a5b687c072988515f0b6ec6512a3969c5881d5fff342bb26ace778d0a"
+        "00247d90fe8dea85d5bcaf1ae7cd63258d663795052a9437a308d95c314ead2b"
     )
     assert _RUNNER_TEXT.index("# ============================ BAR G") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BARS A-F) PASS"'
@@ -5094,6 +5113,21 @@ def test_d3_bar_h_wire_rotation_ref_must_equal_the_chain_observation() -> None:
     assert '[ "$H_WIRE_REF2" != "$H_WIRE_REF1" ]' in bar
 
 
+def test_d3_bar_h_governed_rotation_query_follows_the_skill_first_persona() -> None:
+    helper = _extract_shell_function("governed_rotation_query")
+    skill_first = "First read the customer-data skill with read_skill."
+    natural_question = "How many active customers are there?"
+    exact_query = (
+        "SELECT COUNT(*) AS active_count FROM RETAIL_ANALYTICS.V_CUSTOMER_PROFILE "
+        "WHERE STATUS = 'ACTIVE'"
+    )
+
+    assert helper.count(skill_first) == 1
+    assert helper.count(natural_question) == 1
+    assert helper.count(exact_query) == 1
+    assert helper.index(skill_first) < helper.index(natural_question) < helper.index(exact_query)
+
+
 def test_d3_bar_h_malformed_model_rotation_ref_is_refused_value_free() -> None:
     helper = _extract_shell_function("governed_rotation_query")
     start_marker = "  parsed=\"$(printf '%s' \"$turn\" | python3 -c '\n"
@@ -5155,10 +5189,164 @@ def test_d3_bar_h_rotation_kills_the_old_password_and_keeps_db_backstop() -> Non
     assert '[ "$(probe_ledger_count)" = "$H_LEDGER0" ]' in bar
 
 
-def test_d3_bar_h_is_appended_after_locked_bars_and_owns_the_final_banner() -> None:
+def test_d3_bar_h_remains_locked_before_bar_i_owns_the_final_banner() -> None:
     assert _RUNNER_TEXT.index("# ============================ BAR H") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BAR G) PASS"'
     )
     assert 'echo "PROOF M8.5-C (BARS A-G) PASS"' not in _RUNNER_TEXT
-    assert 'echo "PROOF M8.5-C (BAR H) PASS"' in _bar_h_text()
-    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-C (BARS A-H) PASS"')
+    bar_h = _bar_h_text()
+    assert 'echo "PROOF M8.5-C (BAR H) PASS"' in bar_h
+    assert bar_h.endswith('echo "PROOF M8.5-C (BARS A-H) PASS"')
+    assert _RUNNER_TEXT.index("# ============================ BAR I") > _RUNNER_TEXT.index(
+        'echo "PROOF M8.5-C (BARS A-H) PASS"'
+    )
+    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-E (BARS A-I) PASS"')
+
+
+# --------------------------------------------------------------------------- #
+# BAR I live run — Keycloak must not pull from inside the kind node.          #
+# --------------------------------------------------------------------------- #
+
+
+def test_bar_i_keycloak_image_is_pre_pulled_and_kind_loaded_from_one_pin() -> None:
+    """Keep the IdP off the kind node's unreliable registry path.
+
+    The host-side retry helper is the proof's bounded network boundary. Every
+    ``IfNotPresent`` image must cross it before cluster creation and then be
+    loaded into kind. A live BAR I attempt exposed Keycloak as the lone
+    exception: the node hit Docker Hub directly and waited ten minutes in
+    ``ImagePullBackOff``.
+    """
+    documents = [doc for doc in yaml.safe_load_all(_KEYCLOAK_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    manifest_image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+
+    runner_match = re.search(r'^KC_IMAGE="([^"]+)"$', _RUNNER_TEXT, re.MULTILINE)
+    assert runner_match is not None
+    assert runner_match.group(1) == manifest_image
+
+    extra_images = _extract_shell_function("_extra_images")
+    assert '"$KC_IMAGE"' in extra_images
+    assert _RUNNER_TEXT.count("done < <(_backend_images; _extra_images)") == 2
+
+
+# --------------------------------------------------------------------------- #
+# BAR I live run — rotating a named-pod forward must be an atomic handoff.    #
+# --------------------------------------------------------------------------- #
+
+
+def test_bar_i_bff_port_forward_reaps_the_old_owner_before_binding_the_next() -> None:
+    """Drive the real handoff against a forward that lingers after ``TERM``.
+
+    Without ``wait``, the replacement observes the old process still owning the
+    port and exits, while the readiness curl can hit that dying old listener. The
+    next Chromium navigation then fails with ``ERR_NETWORK_CHANGED``. This fake
+    makes that overlap deterministic instead of relying on host timing.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        calls = tmp / "calls.log"
+        kubectl = bin_dir / "kubectl"
+        kubectl.write_text(
+            "#!/bin/bash\n"
+            "set -eu\n"
+            'if [ ! -f "$OLD_FORWARD_REAPED" ]; then\n'
+            '  echo overlap >> "$FAKE_CALL_LOG"\n'
+            "  exit 42\n"
+            "fi\n"
+            'echo replacement_started >> "$FAKE_CALL_LOG"\n'
+            "trap 'exit 0' TERM INT\n"
+            "while :; do /bin/sleep 0.05; done\n"
+        )
+        kubectl.chmod(0o755)
+        curl = bin_dir / "curl"
+        curl.write_text("#!/bin/sh\nexit 0\n")
+        curl.chmod(0o755)
+
+        function = _extract_shell_function("bff_pf_pod")
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                f'export PATH="{bin_dir}:$PATH"',
+                f'export FAKE_CALL_LOG="{calls}"',
+                f'export OLD_FORWARD_REAPED="{tmp / "old-reaped"}"',
+                (
+                    'wait() { builtin wait "$@"; local rc=$?; '
+                    ': > "$OLD_FORWARD_REAPED"; return "$rc"; }'
+                ),
+                "/bin/sleep 10 &",
+                'PF_BFF="$!"',
+                'export OLD_FORWARD_PID="$PF_BFF"',
+                'NS="proof-m85c"',
+                'HARNESS_PORT="8443"',
+                'HARNESS_BASE_URL="https://127.0.0.1:8444"',
+                'BFF_SERVING_PATH="/signin"',
+                'PROOF_CA="/tmp/proof-ca.pem"',
+                'BFF_CURRENT_POD=""',
+                'bar_fail() { echo "BAR_FAIL: $*" >&2; exit 91; }',
+                'bff_fail() { echo "BFF_FAIL: $*" >&2; exit 92; }',
+                function,
+                'bff_pf_pod "pod/replacement"',
+                'kill "$PF_BFF" 2>/dev/null || true',
+                'wait "$PF_BFF" 2>/dev/null || true',
+                'kill "$OLD_FORWARD_PID" 2>/dev/null || true',
+                'wait "$OLD_FORWARD_PID" 2>/dev/null || true',
+            ]
+        )
+        probe = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert probe.returncode == 0, f"stdout={probe.stdout!r} stderr={probe.stderr!r}"
+        assert calls.read_text().splitlines() == ["replacement_started"]
+
+        # A successful probe is not enough: prove the replacement process itself
+        # still owns the forward. The delayed fake curl gives an immediately exiting
+        # kubectl time to die; without the kill -0 conjunct this falsely returns green.
+        kubectl.write_text("#!/bin/sh\nexit 0\n")
+        curl.write_text("#!/bin/sh\n/bin/sleep 1\nexit 0\n")
+        dead_script = "\n".join(
+            [
+                "set -euo pipefail",
+                f'export PATH="{bin_dir}:$PATH"',
+                'PF_BFF=""',
+                'NS="proof-m85c"',
+                'HARNESS_PORT="8443"',
+                'HARNESS_BASE_URL="https://127.0.0.1:8444"',
+                'BFF_SERVING_PATH="/signin"',
+                'PROOF_CA="/tmp/proof-ca.pem"',
+                'BFF_CURRENT_POD=""',
+                "bar_fail() { exit 91; }",
+                "bff_fail() { exit 92; }",
+                function,
+                'bff_pf_pod "pod/dead-replacement"',
+            ]
+        )
+        dead_probe = subprocess.run(
+            ["bash", "-c", dead_script], capture_output=True, text=True, timeout=10
+        )
+        assert dead_probe.returncode == 92
+        assert 'kill -0 "$PF_BFF"' in function
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_bar_i_bff_port_forward_reap_is_watchdog_bounded_not_an_open_wait() -> None:
+    """A hang is worse than a red run: it leaves no record and no cleanup.
+
+    The reap must never depend on the forward honouring ``TERM``. A bare
+    ``wait`` blocks forever if it does not, stalling the proof silently with no
+    failure record, no torn-down cluster, and (under an unattended driver) no
+    strike or round-cap to trip — nothing ever *failed*. Pin the watchdog:
+    SIGKILL cannot be ignored, so ``wait`` is always guaranteed to return, and
+    the watchdog is cancelled on the normal path so a stale timer can never
+    SIGKILL a recycled PID.
+    """
+    function = _extract_shell_function("bff_pf_pod")
+    reap = function.split('kill "$PF_BFF"', 1)[1].split("kubectl", 1)[0]
+
+    assert 'sleep 5; kill -9 "$PF_BFF"' in reap, "reap has no SIGKILL watchdog"
+    assert "_reaper=$!" in reap, "watchdog pid is not captured"
+    assert 'wait "$PF_BFF"' in reap, "the old owner is never reaped"
+    assert 'kill "$_reaper"' in reap, "watchdog is not cancelled on the normal path"
+    assert 'wait "$_reaper"' in reap, "cancelled watchdog is not reaped"
+    assert "_reaper" in function.split("\n", 2)[1], "_reaper is not function-local"

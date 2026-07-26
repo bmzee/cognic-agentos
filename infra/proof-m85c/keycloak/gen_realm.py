@@ -261,7 +261,12 @@ _CONVERSATION_SCOPES: Final = [
 #: differ ONLY by subject — that is what makes Bar D.6 (originator isolation)
 #: load-bearing: sara's replay of amir's granted request cannot be explained
 #: away by a scope difference or by tenant invisibility.
-_ANALYST_SCOPES: Final = [*_CONVERSATION_SCOPES, "mcp.tool.list", "mcp.tool.invoke"]
+_ANALYST_SCOPES: Final = [
+    *_CONVERSATION_SCOPES,
+    "mcp.tool.list",
+    "mcp.tool.invoke",
+    "eval.judge.run",
+]
 #: The approval humans. ``tool.approve.high_risk_custom`` is the tier the
 #: probe pack declares (spec §6); ``tool.approve.observe`` is what renders the
 #: queue. dana, erin, and fiona are DISTINCT humans — ADR-014 assigned approval

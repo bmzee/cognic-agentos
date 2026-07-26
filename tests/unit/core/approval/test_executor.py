@@ -286,6 +286,63 @@ async def test_dispatch_failure_is_recorded_after_consumption_and_posts_failure_
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_level_error_cannot_be_recorded_as_executed() -> None:
+    """A transport-successful MCP ``isError`` result is still a failed action."""
+    service, _, _, replay, tool, completer = _service()
+
+    async def execute_error(*, prepare_arguments: Any, **_: Any) -> Any:
+        await prepare_arguments(_check())
+        return SimpleNamespace(
+            payload=SimpleNamespace(
+                isError=True,
+                model_dump=lambda **_: {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "SECRET-validation-body"}],
+                },
+            )
+        )
+
+    tool.execute_consumed_action = execute_error
+
+    assert (
+        await service.execute_granted(request_id=_REQUEST_ID, tenant_id=_TENANT)
+        == "dispatch_failed"
+    )
+    rendered = replay.recorded[-1] + completer.posts[-1]["text"].encode()
+    assert b"SECRET-validation-body" not in rendered
+    history = cast(Any, service._history)
+    assert history.records[-1].payload["execution"] == "dispatch_failed"
+
+
+@pytest.mark.asyncio
+async def test_dumped_mcp_tool_level_error_cannot_be_recorded_as_executed() -> None:
+    """The fail-closed check also covers an error exposed only after model_dump."""
+    service, _, _, replay, tool, completer = _service()
+
+    async def execute_error(*, prepare_arguments: Any, **_: Any) -> Any:
+        await prepare_arguments(_check())
+        return SimpleNamespace(
+            payload=SimpleNamespace(
+                model_dump=lambda **_: {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "SECRET-validation-body"}],
+                },
+            )
+        )
+
+    tool.execute_consumed_action = execute_error
+
+    assert (
+        await service.execute_granted(request_id=_REQUEST_ID, tenant_id=_TENANT)
+        == "dispatch_failed"
+    )
+    rendered = replay.recorded[-1] + completer.posts[-1]["text"].encode()
+    assert b"SECRET-validation-body" not in rendered
+    history = cast(Any, service._history)
+    assert history.records[-1].payload["execution"] == "dispatch_failed"
+
+
+@pytest.mark.asyncio
 async def test_sweep_redrives_only_supported_unconsumed_requests() -> None:
     service, events, engine, _, _, completer = _service()
     unsupported = uuid.UUID("b1b2c3d4-1111-4222-8333-444455556666")

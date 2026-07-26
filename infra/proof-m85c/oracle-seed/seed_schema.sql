@@ -444,4 +444,365 @@ CREATE AUDIT POLICY D3_GOVERNED_SELECTS
             SELECT ON fin.v_gl_balances;
 AUDIT POLICY D3_GOVERNED_SELECTS;
 
+-- ---------------------------------------------------------------------------
+-- 8. Oracle v23.3 sample-schema governed views (M8.5-E six-scope surface)
+-- ---------------------------------------------------------------------------
+-- The ordered 01/02/03 initdb scripts create and populate HR, CO, and SH from
+-- Oracle's digest-pinned db-sample-schemas v23.3 release before this script
+-- runs. These explicit column lists are the signed skill/corpus contracts.
+
+CREATE VIEW hr.v_employees (
+    employee_id,
+    first_name,
+    last_name,
+    hire_date,
+    salary,
+    commission_pct,
+    manager_id,
+    department_id,
+    department_name,
+    job_id,
+    job_title
+) AS
+SELECT e.employee_id,
+       e.first_name,
+       e.last_name,
+       e.hire_date,
+       e.salary,
+       e.commission_pct,
+       e.manager_id,
+       e.department_id,
+       d.department_name,
+       e.job_id,
+       j.job_title
+  FROM hr.employees e
+  LEFT JOIN hr.departments d
+    ON d.department_id = e.department_id
+  JOIN hr.jobs j
+    ON j.job_id = e.job_id;
+
+CREATE VIEW hr.v_department_headcount (
+    department_id,
+    department_name,
+    headcount
+) AS
+SELECT d.department_id,
+       d.department_name,
+       COUNT(e.employee_id) AS headcount
+  FROM hr.departments d
+  LEFT JOIN hr.employees e
+    ON e.department_id = d.department_id
+ GROUP BY d.department_id, d.department_name;
+
+CREATE VIEW hr.v_job_history (
+    employee_id,
+    start_date,
+    end_date,
+    job_id,
+    job_title,
+    department_id,
+    department_name
+) AS
+SELECT h.employee_id,
+       h.start_date,
+       h.end_date,
+       h.job_id,
+       j.job_title,
+       h.department_id,
+       d.department_name
+  FROM hr.job_history h
+  JOIN hr.jobs j
+    ON j.job_id = h.job_id
+  LEFT JOIN hr.departments d
+    ON d.department_id = h.department_id;
+
+CREATE VIEW co.v_orders_flat (
+    order_id,
+    order_tms,
+    order_status,
+    customer_id,
+    customer_name,
+    store_id,
+    store_name
+) AS
+SELECT o.order_id,
+       o.order_tms,
+       o.order_status,
+       c.customer_id,
+       c.full_name AS customer_name,
+       s.store_id,
+       s.store_name
+  FROM co.orders o
+  JOIN co.customers c
+    ON c.customer_id = o.customer_id
+  JOIN co.stores s
+    ON s.store_id = o.store_id;
+
+CREATE VIEW co.v_order_items (
+    order_id,
+    line_item_id,
+    product_id,
+    product_name,
+    unit_price,
+    quantity,
+    line_total,
+    product_details
+) AS
+SELECT i.order_id,
+       i.line_item_id,
+       p.product_id,
+       p.product_name,
+       i.unit_price,
+       i.quantity,
+       i.unit_price * i.quantity AS line_total,
+       p.product_details
+  FROM co.order_items i
+  JOIN co.products p
+    ON p.product_id = i.product_id;
+
+CREATE VIEW co.v_product_reviews_flat (
+    product_id,
+    product_name,
+    rating,
+    review_text
+) AS
+SELECT p.product_id,
+       p.product_name,
+       r.rating,
+       r.review_text
+  FROM co.products p,
+       JSON_TABLE(
+         p.product_details,
+         '$'
+         COLUMNS (
+           NESTED PATH '$.reviews[*]'
+           COLUMNS (
+             rating NUMBER PATH '$.rating',
+             review_text VARCHAR2(4000) PATH '$.review'
+           )
+         )
+       ) r;
+
+CREATE VIEW sh.v_sales_star (
+    prod_id,
+    cust_id,
+    time_id,
+    channel_id,
+    promo_id,
+    quantity_sold,
+    amount_sold
+) AS
+SELECT prod_id,
+       cust_id,
+       time_id,
+       channel_id,
+       promo_id,
+       quantity_sold,
+       amount_sold
+  FROM sh.sales;
+
+CREATE VIEW sh.v_calendar (
+    time_id,
+    day_name,
+    calendar_week_number,
+    calendar_month_number,
+    calendar_month_desc,
+    calendar_month_name,
+    calendar_quarter_number,
+    calendar_quarter_desc,
+    calendar_year,
+    fiscal_week_number,
+    fiscal_month_number,
+    fiscal_month_desc,
+    fiscal_month_name,
+    fiscal_quarter_number,
+    fiscal_quarter_desc,
+    fiscal_year
+) AS
+SELECT time_id,
+       day_name,
+       calendar_week_number,
+       calendar_month_number,
+       calendar_month_desc,
+       calendar_month_name,
+       calendar_quarter_number,
+       calendar_quarter_desc,
+       calendar_year,
+       fiscal_week_number,
+       fiscal_month_number,
+       fiscal_month_desc,
+       fiscal_month_name,
+       fiscal_quarter_number,
+       fiscal_quarter_desc,
+       fiscal_year
+  FROM sh.times;
+
+CREATE VIEW sh.v_promotions (
+    promo_id,
+    promo_name,
+    promo_subcategory,
+    promo_category,
+    promo_begin_date,
+    promo_end_date
+) AS
+SELECT promo_id,
+       promo_name,
+       promo_subcategory,
+       promo_category,
+       promo_begin_date,
+       promo_end_date
+  FROM sh.promotions;
+
+-- One row per channel x calendar month. Consumers aggregate these rows across
+-- months directly; joining this rollup back to the day-grain calendar fans out.
+CREATE VIEW sh.v_sales_by_channel (
+    channel_id,
+    channel_desc,
+    calendar_year,
+    calendar_month_number,
+    calendar_month_desc,
+    total_quantity_sold,
+    total_amount_sold
+) AS
+SELECT c.channel_id,
+       c.channel_desc,
+       t.calendar_year,
+       t.calendar_month_number,
+       t.calendar_month_desc,
+       SUM(s.quantity_sold) AS total_quantity_sold,
+       SUM(s.amount_sold) AS total_amount_sold
+  FROM sh.sales s
+  JOIN sh.channels c
+    ON c.channel_id = s.channel_id
+  JOIN sh.times t
+    ON t.time_id = s.time_id
+ GROUP BY c.channel_id,
+          c.channel_desc,
+          t.calendar_year,
+          t.calendar_month_number,
+          t.calendar_month_desc;
+
+-- ---------------------------------------------------------------------------
+-- 9. Scope-specific read identities (view-only DB backstop)
+-- ---------------------------------------------------------------------------
+
+CREATE USER an_hr NO AUTHENTICATION;
+CREATE USER an_orders NO AUTHENTICATION;
+CREATE USER an_warehouse NO AUTHENTICATION;
+GRANT CREATE SESSION TO an_hr;
+GRANT CREATE SESSION TO an_orders;
+GRANT CREATE SESSION TO an_warehouse;
+ALTER USER an_hr GRANT CONNECT THROUGH cognic;
+ALTER USER an_orders GRANT CONNECT THROUGH cognic;
+ALTER USER an_warehouse GRANT CONNECT THROUGH cognic;
+
+GRANT SELECT ON hr.v_employees TO an_hr;
+GRANT SELECT ON hr.v_department_headcount TO an_hr;
+GRANT SELECT ON hr.v_job_history TO an_hr;
+
+GRANT SELECT ON co.v_orders_flat TO an_orders;
+GRANT SELECT ON co.v_order_items TO an_orders;
+GRANT SELECT ON co.v_product_reviews_flat TO an_orders;
+
+GRANT SELECT ON sh.v_sales_by_channel TO an_warehouse;
+GRANT SELECT ON sh.v_sales_star TO an_warehouse;
+GRANT SELECT ON sh.v_promotions TO an_warehouse;
+GRANT SELECT ON sh.v_calendar TO an_warehouse;
+
+-- ---------------------------------------------------------------------------
+-- 10. A-005 procedure-mediated write surface (sample data remains pristine)
+-- ---------------------------------------------------------------------------
+
+CREATE USER hr_app NO AUTHENTICATION
+    DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;
+GRANT CREATE PROCEDURE, CREATE TABLE TO hr_app;
+GRANT REFERENCES ON hr.employees TO hr_app;
+
+CREATE TABLE hr_app.subject_employee (
+    subject_reference CHAR(64) NOT NULL,
+    employee_id       NUMBER NOT NULL,
+    CONSTRAINT pk_subject_employee PRIMARY KEY (subject_reference),
+    CONSTRAINT uq_subject_employee_employee UNIQUE (employee_id),
+    CONSTRAINT fk_subject_employee_employee
+        FOREIGN KEY (employee_id) REFERENCES hr.employees(employee_id),
+    CONSTRAINT ck_subject_employee_reference
+        CHECK (REGEXP_LIKE(subject_reference, '^[0-9a-f]{64}$'))
+);
+
+-- Proof persona mapping: employee 103 is a stable v23.3 HR row. The runner
+-- replaces the placeholder with SHA-256 of analyst.amir's bound OIDC subject.
+INSERT INTO hr_app.subject_employee (subject_reference, employee_id)
+VALUES ('__SUBJECT_ANALYST_AMIR_SHA256__', 103);
+
+CREATE TABLE hr_app.leave_requests (
+    request_id      VARCHAR2(64) PRIMARY KEY,
+    idempotency_key VARCHAR2(64) NOT NULL,
+    employee_id     NUMBER NOT NULL REFERENCES hr.employees(employee_id),
+    start_date      DATE NOT NULL,
+    end_date        DATE NOT NULL,
+    leave_type      VARCHAR2(30) NOT NULL,
+    reason          VARCHAR2(400),
+    requested_by    VARCHAR2(64) NOT NULL,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    CONSTRAINT uq_leave_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT ck_leave_dates CHECK (end_date >= start_date)
+);
+
+CREATE OR REPLACE PROCEDURE hr_app.apply_leave(
+    p_request_id      IN  VARCHAR2,
+    p_idempotency_key IN  VARCHAR2,
+    p_employee_id     IN  NUMBER,
+    p_start_date      IN  DATE,
+    p_end_date        IN  DATE,
+    p_leave_type      IN  VARCHAR2,
+    p_reason          IN  VARCHAR2,
+    p_requested_by    IN  VARCHAR2,
+    o_outcome         OUT VARCHAR2,
+    o_request_id      OUT VARCHAR2
+) AUTHID DEFINER AS
+BEGIN
+    INSERT INTO hr_app.leave_requests
+        (request_id, idempotency_key, employee_id, start_date, end_date,
+         leave_type, reason, requested_by)
+    VALUES
+        (p_request_id, p_idempotency_key, p_employee_id, p_start_date,
+         p_end_date, p_leave_type, p_reason, p_requested_by);
+    o_outcome := 'inserted';
+    o_request_id := p_request_id;
+EXCEPTION
+    WHEN DUP_VAL_ON_INDEX THEN
+        SELECT request_id
+          INTO o_request_id
+          FROM hr_app.leave_requests
+         WHERE idempotency_key = p_idempotency_key;
+        o_outcome := 'replayed';
+END;
+/
+
+CREATE USER an_hr_writer NO AUTHENTICATION;
+GRANT CREATE SESSION TO an_hr_writer;
+ALTER USER an_hr_writer GRANT CONNECT THROUGH cognic;
+GRANT EXECUTE ON hr_app.apply_leave TO an_hr_writer;
+GRANT SELECT ON hr.v_employees TO an_hr_writer;
+GRANT SELECT ON hr_app.subject_employee TO an_hr_writer;
+-- A-005: NO INSERT, UPDATE, or DELETE grant exists for any an_* identity.
+
+-- ---------------------------------------------------------------------------
+-- 11. Unified audit over the new governed reads + procedure-mediated write
+-- ---------------------------------------------------------------------------
+
+CREATE AUDIT POLICY E_SIX_SCOPE_GOVERNANCE
+    ACTIONS SELECT ON hr.v_employees,
+            SELECT ON hr.v_department_headcount,
+            SELECT ON hr.v_job_history,
+            SELECT ON co.v_orders_flat,
+            SELECT ON co.v_order_items,
+            SELECT ON co.v_product_reviews_flat,
+            SELECT ON sh.v_sales_by_channel,
+            SELECT ON sh.v_sales_star,
+            SELECT ON sh.v_promotions,
+            SELECT ON sh.v_calendar,
+            EXECUTE ON hr_app.apply_leave;
+AUDIT POLICY E_SIX_SCOPE_GOVERNANCE;
+
 EXIT

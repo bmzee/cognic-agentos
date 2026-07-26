@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "checks": [
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-005",
+      "kind": "golden",
+      "question_contains": "Neena Yang",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_employees e JOIN hr.v_employees m ON m.employee_id = e.manager_id WHERE e.employee_id = 101 AND e.first_name = 'Neena' AND e.last_name = 'Yang' AND m.first_name = 'Steven' AND m.last_name = 'King')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-102",
+      "kind": "adversarial",
+      "question_contains": "Shipping",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_department_headcount WHERE department_name = 'Shipping' AND headcount = 45)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-103",
+      "kind": "adversarial",
+      "question_contains": "stock clerk",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_employees WHERE job_title = 'Stock Clerk')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-105",
+      "kind": "adversarial",
+      "question_contains": "Grant",
+      "sql": "SELECT '1' FROM dual WHERE (SELECT COUNT(*) FROM hr.v_employees WHERE last_name = 'Grant') = 2",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-202",
+      "kind": "refusal",
+      "question_contains": "Marketing",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_department_headcount WHERE department_name = 'Marketing')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-203",
+      "kind": "refusal",
+      "question_contains": "Executive",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_department_headcount WHERE department_name = 'Executive')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-301",
+      "kind": "trigger_pos",
+      "question_contains": "IT team",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_department_headcount WHERE department_name = 'IT')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "hr-data",
+      "case_id": "hr-313",
+      "kind": "trigger_neg",
+      "question_contains": "sales revenue by region",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM hr.v_department_headcount WHERE department_name = 'Sales') AND EXISTS (SELECT 1 FROM hr.regions)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-004",
+      "kind": "golden",
+      "question_contains": "Boy's Coat (Blue)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_order_items WHERE product_name = 'Boy''s Coat (Blue)')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-005",
+      "kind": "golden",
+      "question_contains": "Women's Coat (Black)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_product_reviews_flat WHERE product_name = 'Women''s Coat (Black)')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-007",
+      "kind": "golden",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_orders_flat WHERE order_tms >= TIMESTAMP '2021-01-01 00:00:00' AND order_tms < TIMESTAMP '2022-01-01 00:00:00')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-009",
+      "kind": "golden",
+      "question_contains": "Kristina Livshits",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_orders_flat WHERE customer_name = 'Kristina Livshits')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-101",
+      "kind": "adversarial",
+      "question_contains": "Girl's Trousers (Red)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_order_items WHERE product_name = 'Girl''s Trousers (Red)' AND JSON_VALUE(product_details, '$.colour') = 'red')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-102",
+      "kind": "adversarial",
+      "question_contains": "Women's Trousers (Blue)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_order_items WHERE product_name = 'Women''s Trousers (Blue)')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-103",
+      "kind": "adversarial",
+      "question_contains": "Women's Coat (Black)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_order_items WHERE product_name = 'Women''s Coat (Black)')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-202",
+      "kind": "refusal",
+      "question_contains": "Girl's Hoodie (White)",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_order_items WHERE product_name = 'Girl''s Hoodie (White)')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "orders-data",
+      "case_id": "co-303",
+      "kind": "trigger_pos",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_orders_flat WHERE order_tms >= TIMESTAMP '2021-01-01 00:00:00' AND order_tms < TIMESTAMP '2022-01-01 00:00:00')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-001",
+      "kind": "golden",
+      "question_contains": "2020",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2020)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-002",
+      "kind": "golden",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE (SELECT COUNT(DISTINCT c.calendar_month_number) FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021) = 12",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-003",
+      "kind": "golden",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-004",
+      "kind": "golden",
+      "question_contains": "2022",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_promotions p ON p.promo_id = f.promo_id JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2022 AND UPPER(p.promo_category) = 'NO PROMOTION') AND EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_promotions p ON p.promo_id = f.promo_id JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2022 AND UPPER(p.promo_category) <> 'NO PROMOTION')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-005",
+      "kind": "golden",
+      "question_contains": "2019",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE channel_desc = 'Internet' AND calendar_year = 2019)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-006",
+      "kind": "golden",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE (SELECT COUNT(DISTINCT c.calendar_quarter_number) FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021) = 4",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-007",
+      "kind": "golden",
+      "question_contains": "2020",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE calendar_year = 2020)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-008",
+      "kind": "golden",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021 AND TRIM(c.day_name) IN ('Saturday', 'Sunday'))",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-009",
+      "kind": "golden",
+      "question_contains": "2019",
+      "sql": "SELECT '1' FROM dual WHERE (SELECT COUNT(DISTINCT p.promo_category) FROM sh.v_sales_star f JOIN sh.v_promotions p ON p.promo_id = f.promo_id JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2019) >= 2",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-010",
+      "kind": "golden",
+      "question_contains": "2020",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.fiscal_year = 2020)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-101",
+      "kind": "adversarial",
+      "question_contains": "2019",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_promotions p ON p.promo_id = f.promo_id JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2019 AND UPPER(p.promo_category) <> 'NO PROMOTION')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-102",
+      "kind": "adversarial",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE (SELECT SUM(f.amount_sold) FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021) <> (SELECT SUM(f.amount_sold) FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.fiscal_year = 2021)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-103",
+      "kind": "adversarial",
+      "question_contains": "calendar 2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE channel_desc = 'Internet' AND calendar_year = 2021)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-104",
+      "kind": "adversarial",
+      "question_contains": "calendar 2020",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star WHERE time_id >= DATE '2020-10-01' AND time_id < DATE '2021-01-01')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-105",
+      "kind": "adversarial",
+      "question_contains": "December 2020",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE calendar_year = 2020 AND calendar_month_number = 12)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-201",
+      "kind": "refusal",
+      "question_contains": "calendar 2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE channel_desc = 'Internet' AND calendar_year = 2021) AND NOT EXISTS (SELECT 1 FROM all_tab_columns WHERE owner = 'SH' AND table_name = 'V_PROMOTIONS' AND column_name = 'PROMO_COST')",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-204",
+      "kind": "refusal",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_star f JOIN sh.v_calendar c ON c.time_id = f.time_id WHERE c.calendar_year = 2021)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-302",
+      "kind": "trigger_pos",
+      "question_contains": "2021",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM sh.v_sales_by_channel WHERE calendar_year = 2021)",
+      "expected": ["1"]
+    },
+    {
+      "skill_id": "warehouse-data",
+      "case_id": "sh-313",
+      "kind": "trigger_neg",
+      "question_contains": "#447",
+      "sql": "SELECT '1' FROM dual WHERE EXISTS (SELECT 1 FROM co.v_orders_flat WHERE order_id = 447)",
+      "expected": ["1"]
+    }
+  ]
+}

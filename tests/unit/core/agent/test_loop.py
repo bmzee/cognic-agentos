@@ -253,6 +253,18 @@ class _StubAssignments:
         return self._granted
 
 
+class _StubActionToolSchemas:
+    def __init__(self, schemas: Mapping[str, Mapping[str, Any]] | None = None) -> None:
+        self._schemas = dict(schemas or {})
+        self.calls: list[dict[str, Any]] = []
+
+    async def load_action_schemas(
+        self, *, tenant_id: str, tool_refs: frozenset[str]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        self.calls.append({"tenant_id": tenant_id, "tool_refs": tool_refs})
+        return {ref: self._schemas[ref] for ref in tool_refs if ref in self._schemas}
+
+
 class _StubEntitlements:
     def __init__(
         self,
@@ -409,6 +421,7 @@ class _Harness:
     gateway: _FakeGateway
     loader: _StubRecordLoader
     assignments: _StubAssignments
+    action_schemas: _StubActionToolSchemas
     proxy: _SpyToolProxy
     reader: _SpySkillReader
     memory: Any
@@ -436,6 +449,7 @@ def _harness(
     clock: Callable[[], float] | None = None,
     tool_capability_classes: Mapping[str, str] | None = None,
     action_entitled: bool = False,
+    action_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
     proxy_exc: Exception | None = None,
 ) -> _Harness:
     rec = record if record is not None else _record()
@@ -472,6 +486,7 @@ def _harness(
         tool_capability_classes=capability_classes,
     )
     gateway = _FakeGateway(responses, exc=gateway_exc)
+    action_schemas = _StubActionToolSchemas(action_tool_schemas)
     kwargs: dict[str, Any] = {}
     if clock is not None:
         kwargs["clock"] = clock
@@ -481,6 +496,7 @@ def _harness(
         gateway=gateway,  # type: ignore[arg-type]
         dispatcher=dispatcher,
         tool_capability_classes=capability_classes,
+        action_tool_schema_provider=action_schemas,
         skill_reader=reader,
         memory_factory=memory,
         decision_history=dh,
@@ -494,6 +510,7 @@ def _harness(
         gateway=gateway,
         loader=loader,
         assignments=assignments,
+        action_schemas=action_schemas,
         proxy=proxy,
         reader=reader,
         memory=memory,
@@ -603,6 +620,39 @@ class TestHappyPath:
 
 
 class TestPendingApprovalTerminal:
+    async def test_live_action_schema_is_loaded_before_the_model_call(
+        self, db: AsyncEngine
+    ) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "leave_type": {"type": "string"},
+            },
+            "required": ["start_date", "end_date", "leave_type"],
+        }
+        h = _harness(
+            db,
+            responses=[_resp("No action requested.")],
+            granted=GrantedCapabilities(skills=frozenset(), tools=frozenset({_OTHER_REF})),
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_tool_schemas={_OTHER_REF: schema},
+        )
+
+        await _ask(h)
+
+        assert h.action_schemas.calls == [
+            {"tenant_id": _TENANT, "tool_refs": frozenset({_OTHER_REF})}
+        ]
+        by_name = {spec.name: spec for spec in h.gateway.calls[0]["tools"]}
+        assert by_name["other_tool"].parameters["required"] == [
+            "start_date",
+            "end_date",
+            "leave_type",
+        ]
+        assert by_name["other_tool"].parameters["additionalProperties"] is False
+
     async def test_pending_action_terminates_after_exactly_one_completion(
         self, db: AsyncEngine
     ) -> None:
@@ -618,6 +668,13 @@ class TestPendingApprovalTerminal:
                 _resp("a second completion would violate the pending terminal"),
             ],
             tool_capability_classes={_OTHER_REF: "action"},
+            action_tool_schemas={
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "required": ["amount"],
+                }
+            },
             action_entitled=True,
             proxy_exc=AgentToolApprovalPending(
                 approval_request_id=approval_id,
@@ -661,6 +718,13 @@ class TestPendingApprovalTerminal:
                 _resp("must not run"),
             ],
             tool_capability_classes={_OTHER_REF: "action"},
+            action_tool_schemas={
+                _OTHER_REF: {
+                    "type": "object",
+                    "properties": {"amount": {"type": "integer"}},
+                    "required": ["amount"],
+                }
+            },
             action_entitled=True,
             proxy_exc=AgentToolApprovalPending(
                 approval_request_id="",

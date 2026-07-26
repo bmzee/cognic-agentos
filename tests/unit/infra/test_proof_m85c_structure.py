@@ -77,6 +77,11 @@ _KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
 _ORACLE_DB_YAML = _PROOF / "manifests" / "oracle-db.yaml"
 _ORACLE_PACK_YAML = _PROOF / "manifests" / "oracle-pack.yaml"
 _ORACLE_SEED = _PROOF / "oracle-seed" / "seed_schema.sql"
+_ORACLE_SAMPLE_ADAPTER = _PROOF / "oracle-seed" / "adapt_sh_populate.py"
+_ORACLE_SAMPLE_LOADER = _PROOF / "oracle-seed" / "load_sh_csv.sh"
+_GOLDEN_SEED_VERIFIER = _PROOF / "oracle-seed" / "verify_golden_seed.py"
+_GOLDEN_FACTS = _PROOF / "oracle-seed" / "golden_fact_checks.json"
+_KERNEL_SEED = _PROOF / "kernel-seed.sql"
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -161,6 +166,334 @@ def test_runner_prepulls_and_applies_the_pinned_oracle_free_substrate() -> None:
     assert "create configmap oracle-db-seed" in text
     assert "manifests/oracle-db.yaml" in text
     assert "app=oracle-db" in text
+
+
+# --- Oracle sample schemas + six-scope governed surface (M8.5-E Task 1) ----------
+
+
+_SAMPLE_SCHEMA_URL = (
+    "https://github.com/oracle-samples/db-sample-schemas/archive/refs/tags/v23.3.tar.gz"
+)
+_SAMPLE_SCHEMA_SHA256 = "94d47c97fb71227f88bfc01100b07de4622d7db592dec74f2d581f4fb9cbe509"
+_SAMPLE_INIT_FILES = (
+    "01_oracle_samples_hr.sql",
+    "02_oracle_samples_co.sql",
+    "03_oracle_samples_sh.sql",
+    "10_seed_schema.sql",
+)
+_NEW_SCOPE_VIEWS = {
+    "hr": {
+        "HR.V_EMPLOYEES",
+        "HR.V_DEPARTMENT_HEADCOUNT",
+        "HR.V_JOB_HISTORY",
+    },
+    "orders": {
+        "CO.V_ORDERS_FLAT",
+        "CO.V_ORDER_ITEMS",
+        "CO.V_PRODUCT_REVIEWS_FLAT",
+    },
+    "warehouse": {
+        "SH.V_SALES_BY_CHANNEL",
+        "SH.V_SALES_STAR",
+        "SH.V_PROMOTIONS",
+        "SH.V_CALENDAR",
+    },
+}
+_NEW_SCOPE_PROXY = {
+    "hr": "AN_HR",
+    "orders": "AN_ORDERS",
+    "warehouse": "AN_WAREHOUSE",
+}
+_NEW_VIEW_COLUMNS = {
+    "hr.v_employees": (
+        "employee_id",
+        "first_name",
+        "last_name",
+        "hire_date",
+        "salary",
+        "commission_pct",
+        "manager_id",
+        "department_id",
+        "department_name",
+        "job_id",
+        "job_title",
+    ),
+    "hr.v_department_headcount": ("department_id", "department_name", "headcount"),
+    "hr.v_job_history": (
+        "employee_id",
+        "start_date",
+        "end_date",
+        "job_id",
+        "job_title",
+        "department_id",
+        "department_name",
+    ),
+    "co.v_orders_flat": (
+        "order_id",
+        "order_tms",
+        "order_status",
+        "customer_id",
+        "customer_name",
+        "store_id",
+        "store_name",
+    ),
+    "co.v_order_items": (
+        "order_id",
+        "line_item_id",
+        "product_id",
+        "product_name",
+        "unit_price",
+        "quantity",
+        "line_total",
+        "product_details",
+    ),
+    "co.v_product_reviews_flat": (
+        "product_id",
+        "product_name",
+        "rating",
+        "review_text",
+    ),
+    "sh.v_sales_by_channel": (
+        "channel_id",
+        "channel_desc",
+        "calendar_year",
+        "calendar_month_number",
+        "calendar_month_desc",
+        "total_quantity_sold",
+        "total_amount_sold",
+    ),
+    "sh.v_sales_star": (
+        "prod_id",
+        "cust_id",
+        "time_id",
+        "channel_id",
+        "promo_id",
+        "quantity_sold",
+        "amount_sold",
+    ),
+    "sh.v_promotions": (
+        "promo_id",
+        "promo_name",
+        "promo_subcategory",
+        "promo_category",
+        "promo_begin_date",
+        "promo_end_date",
+    ),
+    "sh.v_calendar": (
+        "time_id",
+        "day_name",
+        "calendar_week_number",
+        "calendar_month_number",
+        "calendar_month_desc",
+        "calendar_month_name",
+        "calendar_quarter_number",
+        "calendar_quarter_desc",
+        "calendar_year",
+        "fiscal_week_number",
+        "fiscal_month_number",
+        "fiscal_month_desc",
+        "fiscal_month_name",
+        "fiscal_quarter_number",
+        "fiscal_quarter_desc",
+        "fiscal_year",
+    ),
+}
+
+
+def _declared_view_columns(seed: str, qualified_name: str) -> tuple[str, ...]:
+    match = re.search(
+        rf"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+{re.escape(qualified_name)}\s*"
+        r"\((?P<columns>.*?)\)\s+AS\b",
+        seed,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert match is not None, f"missing explicit column contract for {qualified_name}"
+    return tuple(column.strip().lower() for column in match.group("columns").split(","))
+
+
+def _new_kernel_scope_rows() -> dict[str, tuple[set[str], str]]:
+    text = _KERNEL_SEED.read_text()
+    rows: dict[str, tuple[set[str], str]] = {}
+    pattern = re.compile(
+        r"\('proof-m85c',\s*'(?P<scope>hr|orders|warehouse)',\s*'[^']+',\s*"
+        r"'(?P<objects>\[[^']+\])'::json,\s*'(?P<proxy>AN_[A-Z_]+)'",
+        flags=re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        objects = json.loads(match.group("objects"))
+        rows[match.group("scope")] = (set(objects), match.group("proxy"))
+    return rows
+
+
+def test_runner_pins_and_stages_official_v233_sample_assets_in_two_phases() -> None:
+    text = _RUNNER.read_text()
+    assert _SAMPLE_SCHEMA_URL in text
+    assert _SAMPLE_SCHEMA_SHA256 in text
+    assert "db-sample-schemas-23.3.tar.gz" in text
+    assert "oracle-samples-23.3-sql.tar.gz" in text
+    for source in (
+        "human_resources/hr_create.sql",
+        "human_resources/hr_populate.sql",
+        "human_resources/hr_code.sql",
+        "customer_orders/co_create.sql",
+        "customer_orders/co_populate.sql",
+        "sales_history/sh_create.sql",
+        "sales_history/sh_populate.sql",
+    ):
+        assert source in text, f"official sample source not staged: {source}"
+    for source in (
+        "sales_history/costs.csv",
+        "sales_history/customers.csv",
+        "sales_history/promotions.csv",
+        "sales_history/sales.csv",
+        "sales_history/times.csv",
+        "sales_history/supplementary_demographics.csv",
+    ):
+        assert source in text, f"official sample CSV not staged: {source}"
+    positions = [text.index(f"--from-file={name}=") for name in _SAMPLE_INIT_FILES]
+    assert positions == sorted(positions), "initdb scripts must be staged lexicographically"
+    executable = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert str(_ORACLE_SAMPLE_ADAPTER.relative_to(_PROOF)) in executable
+    assert "oracle-samples-23.3-sh-csv.tar.gz" in executable
+    assert str(_ORACLE_SAMPLE_LOADER.relative_to(_PROOF)) in executable
+    assert "kubectl cp" in executable
+    assert executable.count("tar --no-xattrs -czf") == 2
+
+
+def test_sh_csv_loader_is_pdb_explicit_fail_loud_and_row_count_pinned() -> None:
+    text = _ORACLE_SAMPLE_LOADER.read_text()
+
+    assert "/opt/oracle/product/26ai/dbhomeFree/bin/sqlldr" in text
+    assert "@//localhost:1521/FREEPDB1 AS SYSDBA" in text
+    assert "USERID='sys/${ORACLE_PASSWORD}" in text
+    assert "/dev/shm/cognic-sh-sqlldr.XXXXXX.par" in text
+    assert '"$SQLLDR" parfile="$CREDENTIAL_PARFILE"' in text
+    assert '"$SQLLDR" "$PDB_CONNECT"' not in text
+    assert "trap cleanup_credential_parfile EXIT" in text
+    assert 'local table="$1" mode="$2"\n  local bad="$WORK_DIR/$table.bad"' in text
+    assert "all_tab_columns" in text.lower()
+    assert 'DATE "YYYY-MM-DD"' in text
+    assert "CHAR(4000)" in text
+    assert "DIRECT=TRUE" in text
+    assert "ROWS=5000" in text
+    for conventional in ("customers", "costs", "sales"):
+        assert conventional in text
+    assert 'bad="$WORK_DIR/$table.bad"' in text
+    assert '[ ! -e "$bad" ]' in text
+    for table, count in {
+        "sales": 918843,
+        "customers": 55500,
+        "times": 1826,
+        "costs": 82112,
+        "promotions": 503,
+        "supplementary_demographics": 4500,
+    }.items():
+        assert f"{table}:{count}" in text
+
+
+def test_live_golden_seed_verifier_and_fact_contract_are_staged() -> None:
+    assert _GOLDEN_SEED_VERIFIER.is_file()
+    facts = json.loads(_GOLDEN_FACTS.read_text())
+    assert facts["schema_version"] == 1
+    assert {row["kind"] for row in facts["checks"]} == {
+        "golden",
+        "adversarial",
+        "refusal",
+        "trigger_pos",
+        "trigger_neg",
+    }
+
+
+def test_new_governed_views_match_the_corpus_pinned_column_contracts() -> None:
+    seed = _ORACLE_SEED.read_text()
+    for view_name, expected in _NEW_VIEW_COLUMNS.items():
+        assert _declared_view_columns(seed, view_name) == expected
+
+    employees = re.search(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+hr\.v_employees\b.*?;",
+        seed,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert employees is not None
+    assert "LEFT JOIN hr.departments" in employees.group(0), (
+        "v_employees must retain the department-less employee (107-row canary)"
+    )
+
+    orders = _declared_view_columns(seed, "co.v_orders_flat")
+    items = _declared_view_columns(seed, "co.v_order_items")
+    promotions = _declared_view_columns(seed, "sh.v_promotions")
+    assert "email_address" not in orders and "email" not in orders
+    assert "product_details" in items and "shipment_id" not in items
+    assert "promo_cost" not in promotions
+    reviews = re.search(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+co\.v_product_reviews_flat\b.*?;",
+        seed,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert reviews is not None
+    assert "JSON_TABLE" in reviews.group(0) and "NESTED PATH '$.reviews[*]'" in reviews.group(0)
+
+
+def test_new_scope_rows_and_oracle_grants_are_exactly_lockstep() -> None:
+    rows = _new_kernel_scope_rows()
+    assert set(rows) == set(_NEW_SCOPE_VIEWS)
+    seed = _ORACLE_SEED.read_text()
+    grants: dict[str, set[str]] = {scope: set() for scope in _NEW_SCOPE_VIEWS}
+    proxy_to_scope = {proxy.lower(): scope for scope, proxy in _NEW_SCOPE_PROXY.items()}
+    for view, proxy in re.findall(
+        r"GRANT\s+SELECT\s+ON\s+([a-z_]+\.[a-z_]+)\s+TO\s+(an_[a-z_]+)\s*;",
+        seed,
+        flags=re.IGNORECASE,
+    ):
+        scope = proxy_to_scope.get(proxy.lower())
+        if scope is not None:
+            grants[scope].add(view.upper())
+
+    for scope, expected_views in _NEW_SCOPE_VIEWS.items():
+        objects, proxy = rows[scope]
+        assert objects == expected_views
+        assert proxy == _NEW_SCOPE_PROXY[scope]
+        assert grants[scope] == expected_views
+
+
+def test_a005_writer_has_execute_only_and_subject_mapping_is_hash_keyed() -> None:
+    seed = _ORACLE_SEED.read_text()
+    assert "CREATE TABLE hr_app.subject_employee" in seed
+    assert "subject_ref" in seed and "employee_id" in seed
+    assert "__SUBJECT_ANALYST_AMIR_SHA256__" in seed
+    assert "CREATE OR REPLACE PROCEDURE hr_app.apply_leave" in seed
+    assert "GRANT EXECUTE ON hr_app.apply_leave TO an_hr_writer;" in seed
+    assert "GRANT SELECT ON hr.v_employees TO an_hr_writer;" in seed
+    assert (
+        re.search(
+            r"GRANT\s+(?:INSERT|UPDATE|DELETE)\b.*?\bTO\s+an_[a-z_]+\b",
+            seed,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        is None
+    ), "A-005 forbids table DML grants to every agent-lane identity"
+
+
+def test_only_amir_receives_the_three_new_entitlements_and_skills() -> None:
+    text = _KERNEL_SEED.read_text()
+    amir_scopes = set(
+        re.findall(
+            r"'__SUBJECT_ANALYST_AMIR__',\s*'(hr|orders|warehouse)'",
+            text,
+        )
+    )
+    sara_scopes = set(
+        re.findall(
+            r"'__SUBJECT_ANALYST_SARA__',\s*'(hr|orders|warehouse)'",
+            text,
+        )
+    )
+    assert amir_scopes == {"hr", "orders", "warehouse"}
+    assert sara_scopes == set()
+    for skill in ("hr-data", "orders-data", "warehouse-data"):
+        assert f"'bank-analyst', 'skill', '{skill}'" in text, (
+            f"missing bank-analyst assignment for {skill}"
+        )
 
 
 # --- no fallback (spec §4) ---------------------------------------------------------
@@ -551,7 +884,7 @@ _GOOD_HDR = {"alg": "RS256", "typ": "at+jwt", "kid": "k1"}
 _ISS = "https://cognic-proof-keycloak:8443/realms/proof-m85c"
 _SCOPES_CSV = (
     "conversation.create,conversation.read,conversation.post_turn,"
-    "conversation.close,mcp.tool.list,mcp.tool.invoke"
+    "conversation.close,mcp.tool.list,mcp.tool.invoke,eval.judge.run"
 )
 _GOOD_CLAIMS = {
     "iss": _ISS,

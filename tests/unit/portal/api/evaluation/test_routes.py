@@ -120,7 +120,13 @@ def _build_app(*, actor: Actor, gateway: Any, store: Any = None, runtime: Any = 
     app.state.llm_gateway = gateway
     app.state.decision_history_store = store
     app.state.runtime = runtime
-    app.include_router(build_eval_routes(eval_judge_tier="tier1"), prefix="/api/v1/eval")
+    app.include_router(
+        build_eval_routes(
+            eval_judge_tier="tier1",
+            eval_judge_model_alias="cognic-tier1-proof-m85e",
+        ),
+        prefix="/api/v1/eval",
+    )
     return app
 
 
@@ -137,10 +143,14 @@ def test_succeeded_200_and_value_free_chain() -> None:
     resp = TestClient(app).post("/api/v1/eval/judge", json=_body())
     assert resp.status_code == 200
     assert resp.json()["verdict"] == "pass"
+    assert resp.json()["model"] == "m"
+    assert resp.json()["model_alias"] == "cognic-tier1-proof-m85e"
     assert len(store.records) == 1
     rec = store.records[0]
     assert rec.decision_type == "eval.judge_verdict"
     assert rec.payload["status"] == "succeeded"
+    assert rec.payload["model"] == "m"
+    assert rec.payload["model_alias"] == "cognic-tier1-proof-m85e"
     # value-free: the raw candidate output must NOT appear; the digest must.
     assert "2+2=4" not in json.dumps(rec.payload)
     assert rec.payload["output_digest"] is not None

@@ -133,7 +133,13 @@ async def test_live_eval_judge_emits_gateway_span_and_chain_row(
         app.state.llm_gateway = runtime.llm_gateway
         app.state.decision_history_store = None  # resolved runtime-first from app.state.runtime
         app.state.runtime = runtime
-        app.include_router(build_eval_routes(eval_judge_tier="tier1"), prefix="/api/v1/eval")
+        app.include_router(
+            build_eval_routes(
+                eval_judge_tier="tier1",
+                eval_judge_model_alias="cognic-tier1-dev",
+            ),
+            prefix="/api/v1/eval",
+        )
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:

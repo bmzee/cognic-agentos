@@ -518,6 +518,7 @@ async def test_build_agent_loop_threads_signed_tool_capability_classes(
     assert calls == [registry]
     assert loop._tool_capability_classes == capability_classes
     assert loop._dispatcher._tool_capability_classes == capability_classes
+    assert loop._action_tool_schema_provider._host == "MCP_HOST"
 
 
 async def test_build_agent_loop_some_missing_returns_none_plus_single_warning() -> None:
@@ -676,6 +677,77 @@ async def test_mcp_host_agent_tool_proxy_threads_and_projects() -> None:
     assert call["tenant_id"] == "tenant-a"
     assert call["originator_subject"] == "analyst@bank"
     assert call["approval_request_id"] is None
+
+
+async def test_mcp_action_schema_provider_reads_only_requested_live_schemas() -> None:
+    class _Tool:
+        def __init__(self, name: str, schema: dict[str, Any]) -> None:
+            self.name = name
+            self.inputSchema = schema
+
+    class _StubHost:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def list_tools(self, **kwargs: Any) -> list[Any]:
+            self.calls.append(kwargs)
+            if kwargs["server_id"] == "leave":
+                return [
+                    _Tool(
+                        "apply_leave",
+                        {
+                            "type": "object",
+                            "properties": {"start_date": {"type": "string"}},
+                            "required": ["start_date"],
+                        },
+                    ),
+                    _Tool("not_granted", {"type": "object", "properties": {}}),
+                ]
+            return [
+                {
+                    "name": "probe_write",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"nonce": {"type": "string"}},
+                        "required": ["nonce"],
+                    },
+                }
+            ]
+
+    host = _StubHost()
+    provider = agent_host._MCPHostActionToolSchemaProvider(host)
+
+    schemas = await provider.load_action_schemas(
+        tenant_id="tenant-a",
+        tool_refs=frozenset({"leave/apply_leave", "probe/probe_write"}),
+    )
+
+    assert set(schemas) == {"leave/apply_leave", "probe/probe_write"}
+    assert schemas["leave/apply_leave"]["required"] == ["start_date"]
+    assert schemas["probe/probe_write"]["required"] == ["nonce"]
+    assert [call["server_id"] for call in host.calls] == ["leave", "probe"]
+    assert all(call["tenant_id"] == "tenant-a" for call in host.calls)
+    assert all(call["request_id"].startswith("agent-schema-") for call in host.calls)
+
+
+async def test_mcp_action_schema_provider_omits_duplicate_descriptors() -> None:
+    class _StubHost:
+        async def list_tools(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            descriptor = {
+                "name": "apply_leave",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+            return [descriptor, descriptor]
+
+    provider = agent_host._MCPHostActionToolSchemaProvider(_StubHost())
+
+    assert (
+        await provider.load_action_schemas(
+            tenant_id="tenant-a",
+            tool_refs=frozenset({"leave/apply_leave"}),
+        )
+        == {}
+    )
 
 
 async def test_mcp_host_agent_tool_proxy_translates_pending_approval() -> None:

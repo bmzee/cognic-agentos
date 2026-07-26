@@ -40,11 +40,11 @@ spec:
         - { name: COGNIC_ORACLE_DSN, value: "oracle-db:1521/FREEPDB1" }
         - { name: COGNIC_ORACLE_USER, value: "cognic" }
         - { name: COGNIC_ORACLE_PASSWORD_FILE, value: "/var/run/cognic/oracle/password" }
-        # The metadata tools' owner allow-list now names the THREE analytics
+        # The metadata tools' owner allow-list names all SIX analytics
         # schemas (list_tables/describe_table serve the model's schema
         # exploration); run_readonly_query authority comes ONLY from the
         # kernel-signed query-context token's object allow-set, never this.
-        - { name: COGNIC_ORACLE_ALLOWED_OWNERS, value: "RETAIL_ANALYTICS,FIN,CARDS" }
+        - { name: COGNIC_ORACLE_ALLOWED_OWNERS, value: "RETAIL_ANALYTICS,FIN,CARDS,HR,CO,SH" }
         volumeMounts:
         - name: oracle-credential
           mountPath: /var/run/cognic/oracle

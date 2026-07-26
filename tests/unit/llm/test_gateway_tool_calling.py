@@ -27,6 +27,8 @@ import httpx
 import pytest
 import respx
 
+import cognic_agentos.llm.gateway as gateway_module
+import cognic_agentos.protocol.supply_chain as supply_chain_module
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.guardrails import GuardrailPipeline
@@ -123,6 +125,42 @@ def _tool_call_response(
             "model": model,
             "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         },
+    )
+
+
+def _permissive_tool_call_response(
+    *,
+    content: Any,
+    tool_calls: list[dict[str, Any]],
+    model: str = "ollama/qwen3:8b",
+) -> httpx.Response:
+    """Raw provider bytes containing Python's non-standard JSON floats.
+
+    ``httpx.Response(json=...)`` deliberately refuses these values before the
+    gateway can see them.  Real provider/SDK decoders may already have turned
+    them into ``float`` objects, so this fixture supplies the corresponding
+    wire bytes and lets the production response decoder construct that dict.
+    """
+    payload = {
+        "id": "resp-test",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+    return httpx.Response(
+        200,
+        content=json.dumps(payload, allow_nan=True).encode(),
+        headers={"content-type": "application/json"},
     )
 
 
@@ -373,6 +411,317 @@ class TestToolCallParse:
 
 
 class TestFailClosed:
+    @pytest.mark.parametrize(
+        "constant",
+        [
+            pytest.param("NaN", id="nan"),
+            pytest.param("Infinity", id="positive-infinity"),
+            pytest.param("-Infinity", id="negative-infinity"),
+            pytest.param("1e999", id="overflow-to-infinity"),
+        ],
+    )
+    @respx.mock
+    async def test_non_finite_string_arguments_fail_closed(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+        constant: str,
+    ) -> None:
+        """Python's permissive JSON extensions never enter GatewayToolCall."""
+        respx.post(_LITELLM_URL).mock(
+            return_value=_tool_call_response(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_non_finite",
+                        "type": "function",
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": f'{{"value": {constant}}}',
+                        },
+                    }
+                ],
+            )
+        )
+        rec = _RecordingObservability()
+        gw = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+            observability=rec,
+        )
+
+        with pytest.raises(_MalformedToolCall):
+            await gw.completion(
+                tier="tier1",
+                messages=list(_USER_MESSAGES),
+                request_id=f"req-non-finite-{constant}",
+            )
+
+        rows = await gateway_ledger.read_recent_calls(window_minutes=60)
+        assert len(rows) == 1
+        assert rows[0].outcome == "upstream_error"
+        assert rows[0].provenance == "resolved"
+        assert len(rec.captured) == 1
+        assert rec.captured[0][1]["llm.gateway.outcome"] == "malformed_tool_call"
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param({"outer": [float("nan")]}, id="nested-list"),
+            pytest.param({"outer": {"value": float("inf")}}, id="nested-object"),
+        ],
+    )
+    @respx.mock
+    async def test_non_finite_dict_arguments_fail_closed(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Provider-SDK-decoded dicts receive the same recursive guard."""
+        respx.post(_LITELLM_URL).mock(
+            return_value=_permissive_tool_call_response(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_non_finite",
+                        "type": "function",
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
+        )
+        rec = _RecordingObservability()
+        gw = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+            observability=rec,
+        )
+
+        with pytest.raises(_MalformedToolCall):
+            await gw.completion(
+                tier="tier1",
+                messages=list(_USER_MESSAGES),
+                request_id="req-non-finite-dict",
+            )
+
+        rows = await gateway_ledger.read_recent_calls(window_minutes=60)
+        assert len(rows) == 1
+        assert rows[0].outcome == "upstream_error"
+        assert len(rec.captured) == 1
+        assert rec.captured[0][1]["llm.gateway.outcome"] == "malformed_tool_call"
+
+    @respx.mock
+    async def test_finite_nested_dict_arguments_remain_accepted(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+    ) -> None:
+        arguments = {
+            "outer": [-1.5, 0.0, 1e308],
+            "object": {"value": -2.25},
+        }
+        respx.post(_LITELLM_URL).mock(
+            return_value=_tool_call_response(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_finite",
+                        "type": "function",
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            )
+        )
+        gw = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+        )
+
+        response = await gw.completion(
+            tier="tier1",
+            messages=list(_USER_MESSAGES),
+            request_id="req-finite-dict",
+        )
+
+        assert response.tool_calls == (
+            GatewayToolCall(
+                id="call_finite",
+                name="run_readonly_query",
+                arguments=arguments,
+            ),
+        )
+
+    @respx.mock
+    async def test_finite_numeric_string_arguments_remain_accepted(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+    ) -> None:
+        respx.post(_LITELLM_URL).mock(
+            return_value=_tool_call_response(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_finite_string",
+                        "type": "function",
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": '{"value":1.25,"nested":[-2.0,0.0]}',
+                        },
+                    }
+                ],
+            )
+        )
+        gw = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+        )
+
+        response = await gw.completion(
+            tier="tier1",
+            messages=list(_USER_MESSAGES),
+            request_id="req-finite-string",
+        )
+
+        assert response.tool_calls == (
+            GatewayToolCall(
+                id="call_finite_string",
+                name="run_readonly_query",
+                arguments={"value": 1.25, "nested": [-2.0, 0.0]},
+            ),
+        )
+
+    def test_non_finite_decoded_dict_key_fails_closed(self) -> None:
+        """The recursive walk covers the complete decoded mapping, including
+        a programmatic SDK mapping key that ordinary JSON cannot express."""
+        with pytest.raises(_MalformedToolCall):
+            gateway_module._parse_tool_calls(
+                [
+                    {
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": {float("nan"): "value"},
+                        }
+                    }
+                ]
+            )
+
+    @respx.mock
+    async def test_string_parse_constant_guard_is_independent_of_recursive_walk(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Removing parse_constant must fail even if the shared walk survives."""
+        calls: list[str] = []
+        reject_constant = gateway_module._reject_non_finite_json_constant
+
+        def _recording_rejector(value: str) -> Any:
+            calls.append(value)
+            return reject_constant(value)
+
+        monkeypatch.setattr(
+            gateway_module,
+            "_reject_non_finite_json_constant",
+            _recording_rejector,
+        )
+        respx.post(_LITELLM_URL).mock(
+            return_value=_tool_call_response(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_non_finite",
+                        "type": "function",
+                        "function": {
+                            "name": "run_readonly_query",
+                            "arguments": '{"value": NaN}',
+                        },
+                    }
+                ],
+            )
+        )
+        gw = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+        )
+
+        with pytest.raises(_MalformedToolCall):
+            await gw.completion(
+                tier="tier1",
+                messages=list(_USER_MESSAGES),
+                request_id="req-parse-constant-independent",
+            )
+        assert calls == ["NaN"]
+
+    @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_constant_rejector_matches_supply_chain_copy(self, constant: str) -> None:
+        gateway_rejector = gateway_module._reject_non_finite_json_constant
+        supply_chain_rejector = supply_chain_module._reject_non_finite_json_constant
+
+        def _fingerprint(function: Any) -> tuple[Any, ...]:
+            code = function.__code__
+            return (
+                code.co_argcount,
+                code.co_code,
+                code.co_names,
+                code.co_consts[1:],
+            )
+
+        assert _fingerprint(gateway_rejector) == _fingerprint(supply_chain_rejector)
+        with pytest.raises(ValueError) as gateway_exc:
+            gateway_rejector(constant)
+        with pytest.raises(ValueError) as supply_chain_exc:
+            supply_chain_rejector(constant)
+        assert gateway_exc.value.args == supply_chain_exc.value.args
+
     @respx.mock
     async def test_malformed_arguments_json_fails_closed(
         self,

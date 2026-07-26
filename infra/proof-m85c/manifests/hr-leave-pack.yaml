@@ -1,0 +1,66 @@
+# infra/proof-m85c/manifests/hr-leave-pack.yaml — the released v0.1.0
+# high_risk_custom governed-write pack. The kernel auto-executor calls this
+# service only after the assigned approval reaches its final grant and binds a
+# per-run, single-use action-context token to the exact approved arguments.
+#
+# Static private ClusterIP 10.96.0.53 completes the proof's closed MCP service
+# inventory (.51 oracle read, .52 approval probe, .53 HR leave). The Oracle
+# credential arrives only as the ESO-materialized file mount; no password value
+# is carried in an env var. The action-context PRIVATE key never enters this
+# pod: the image contains the per-run PUBLIC key only.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: proof-hr-leave-pack, labels: { app: proof-hr-leave-pack } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: proof-hr-leave-pack } }
+  template:
+    metadata: { labels: { app: proof-hr-leave-pack } }
+    spec:
+      initContainers:
+      - name: wait-for-oracle-db
+        image: busybox:1.36
+        command: ["sh", "-c", "until nc -z oracle-db 1521; do echo waiting for oracle-db; sleep 5; done"]
+      containers:
+      - name: hr-leave-pack
+        image: cognic-proof-hr-leave-pack:m85e
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 8767 }]
+        env:
+        - { name: COGNIC_MCP_HOST, value: "0.0.0.0" }
+        - { name: COGNIC_MCP_PORT, value: "8767" }
+        - { name: COGNIC_MCP_SERVER_URL, value: "http://10.96.0.53:8767/mcp" }
+        - { name: COGNIC_MCP_AS_ISSUER, value: "http://192.88.99.9:9000" }
+        - { name: COGNIC_AUTH_MODE, value: "jwt" }
+        - { name: COGNIC_OAUTH_ISSUER, value: "http://192.88.99.9:9000" }
+        - { name: COGNIC_OAUTH_JWKS_URI, value: "http://192.88.99.9:9000/.well-known/jwks.json" }
+        - { name: COGNIC_OAUTH_AUDIENCE, value: "http://10.96.0.53:8767/mcp" }
+        - { name: COGNIC_REQUIRED_SCOPES, value: "hr_leave.write" }
+        - { name: COGNIC_ORACLE_DSN, value: "oracle-db:1521/FREEPDB1" }
+        - { name: COGNIC_ORACLE_USER, value: "cognic" }
+        - { name: COGNIC_ORACLE_PASSWORD_FILE, value: "/var/run/cognic/oracle/password" }
+        - { name: COGNIC_ACTION_CONTEXT_PUBLIC_KEYS, value: "/opt/cognic/action-context/action-context-public.pem" }
+        - { name: COGNIC_ACTION_REPLAY_DB, value: "/var/lib/cognic/hr-leave/replay.sqlite3" }
+        volumeMounts:
+        - name: oracle-credential
+          mountPath: /var/run/cognic/oracle
+          readOnly: true
+        - name: action-replay
+          mountPath: /var/lib/cognic/hr-leave
+      volumes:
+      - name: oracle-credential
+        secret:
+          secretName: oracle-app-credential
+          defaultMode: 0400
+          items:
+          - { key: password, path: password }
+      - name: action-replay
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata: { name: proof-hr-leave-pack }
+spec:
+  clusterIP: 10.96.0.53
+  selector: { app: proof-hr-leave-pack }
+  ports: [{ port: 8767, targetPort: 8767 }]
