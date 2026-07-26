@@ -7,26 +7,26 @@ in a conformance run is attributable to the KERNEL and never to pack quality.
 
 REAL here (versus the unit suite's stubs):
 
-* the manifest and ``AGENT.md`` are real bytes on disk, read by the real
-  ``extract_pack_manifest`` / ``extract_agent_md`` through the real
-  ``Distribution.locate_file`` — the deferred-load invariant is exercised,
-  not bypassed;
+* the manifest and ``AGENT.md`` are real bytes on disk, parsed by the real
+  ``extract_pack_manifest`` / ``extract_agent_md`` — their RECORD walk,
+  identifier guards and validation run for real, and no pack code is imported;
 * the record loader is the real :func:`_build_agent_records` walk;
-* :func:`candidate` builds the REAL ``RegisteredPackCandidate``.
+* :func:`candidate` constructs the REAL ``RegisteredPackCandidate`` type.
 
 SUBSTITUTED — every seam, named:
 
 * **distribution lookup** — ``importlib.metadata.distribution`` is redirected;
-  ``locate_file`` still reads real files;
-* **the registry** — :class:`Registry` yields candidates directly. The real
-  ``PluginRegistry`` and ``registry_boot`` trust registration are NOT exercised
-  by this module;
-* **the model and the MCP tool proxy** — no LLM and no MCP server in CI. Both
-  are *inputs* to the governed decisions under test, never the decisions.
+* **``locate_file``** — :meth:`FakeDist.locate_file` is a two-line
+  ``root / relative`` join. The stdlib implementation is NOT exercised;
+* **the registry** — :class:`Registry` yields hand-built candidates, proving the
+  candidate SHAPE and not ``PluginRegistry``'s projection SEMANTICS. The real
+  registry and ``registry_boot`` trust registration are NOT exercised here;
+* **the model and the MCP tool proxy** — absent, and NOT YET REACHED: no
+  dispatch occurs in this package today. They become inputs to the governed
+  decisions when the dispatch-conformance packet lands.
 
-Do not describe this module as "only distribution lookup is redirected": the
-registry is a seam too, and understating it would let the suite be cited for
-more than it proves.
+Do not narrow this list when describing the module. Understating a seam is how
+a suite gets cited for more than it proves.
 """
 
 from __future__ import annotations

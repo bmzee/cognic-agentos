@@ -16,22 +16,27 @@ WHAT THIS FILE PROVES TODAY — and what it does NOT
 --------------------------------------------------
 PROVEN (real code, not stubs):
 
-* manifest and ``AGENT.md`` resolution through the real ``extract_pack_manifest``
-  / ``extract_agent_md`` and the real ``Distribution.locate_file``, against real
-  bytes on disk — so the deferred-load invariant is exercised, not bypassed;
+* the real ``extract_pack_manifest`` / ``extract_agent_md`` — their RECORD walk,
+  identifier guards, TOML parse and frontmatter validation run against real
+  bytes on disk, and no pack code is imported (the deferred-load invariant);
 * the real ``agent_host._build_agent_records`` admission walk, including its
   per-pack fail-closed warn-skip arm;
-* the real ``RegisteredPackCandidate`` projection (built, not imitated, so a
-  field change fails this suite instead of passing against a stale shape).
+* the real ``RegisteredPackCandidate`` TYPE (constructed, not imitated, so a
+  field rename fails this suite instead of passing against a stale shape).
 
 DELIBERATELY SUBSTITUTED — these are seams, and naming them is the point:
 
 * **distribution lookup** — ``importlib.metadata.distribution`` is redirected to
-  a fake list; ``locate_file`` still reads real files;
-* **the registry** — ``Registry`` / ``candidate()`` supply candidates directly.
-  The real ``PluginRegistry`` and ``registry_boot`` trust registration are NOT
-  exercised here (that path is cosign-gated and proven by
-  ``tests/integration/pack_loop/test_proof_1a_inprocess.py``).
+  a fake list;
+* **``locate_file``** — supplied by ``FakeDist``, a two-line ``root / relative``
+  join. The stdlib ``Distribution.locate_file`` is NOT exercised; what is real
+  is the extractors' logic around it and the bytes it lands on;
+* **the registry** — ``Registry`` / ``candidate()`` hand-construct candidates.
+  This proves the candidate SHAPE, not ``PluginRegistry``'s projection
+  SEMANTICS (which derives ``package_name`` from ``record.entry_point_value``
+  at ``plugin_registry.py:867``). The real registry and ``registry_boot`` trust
+  registration are NOT exercised here — that path is cosign-gated and proven by
+  ``tests/integration/pack_loop/test_proof_1a_inprocess.py``.
 
 NOT YET PROVEN — do not cite this file for any of it:
 
@@ -184,10 +189,17 @@ class TestSyntheticPackIsAdmissible:
             )
 
         assert records == {}
-        warnings = [
+
+        # Assert on EVERY agent-host warning, not merely the matching one.
+        # Filtering by message before counting would hide any additional
+        # warn-skip — a pack failing for several reasons must not be
+        # indistinguishable from one skipping cleanly for the named reason.
+        emitted = [
             rec
             for rec in caplog.records
-            if rec.levelno >= logging.WARNING and rec.message == "agent.agent_md_not_found"
+            if rec.name == "cognic_agentos.harness.agent_host" and rec.levelno >= logging.WARNING
         ]
-        assert len(warnings) == 1, f"expected exactly one warn-skip, saw {caplog.messages}"
-        assert getattr(warnings[0], "distribution_name", None) == DEFAULT_DIST
+        assert [rec.message for rec in emitted] == ["agent.agent_md_not_found"], (
+            f"expected exactly one loader warning, saw {[r.message for r in emitted]}"
+        )
+        assert getattr(emitted[0], "distribution_name", None) == DEFAULT_DIST
