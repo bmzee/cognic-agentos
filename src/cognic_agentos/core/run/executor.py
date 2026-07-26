@@ -199,11 +199,14 @@ class RunResult:
 def _validate_pack_record(
     record: LoadedPackRecord | None, request: RunRequest
 ) -> RunRefusalReason | None:
-    """Six fail-closed pre-submit checks. Returns the closed refusal reason or
-    None when the record is valid. Check 4 (installed) is executor-side defense
-    in depth — it intentionally duplicates the scheduler's
-    ``pack_state_interrogator`` gate before sandbox-context construction. Checks
-    5-6 are the Sprint 14A-A4b manifest tier + data_classes shape gate."""
+    """Six fail-closed pack checks used before submit and immediately pre-wake.
+
+    Returns the closed refusal reason or None when the record is valid. Check 4
+    (installed) is executor-side defense in depth — it intentionally duplicates
+    the scheduler's ``pack_state_interrogator`` gate before sandbox-context
+    construction. Checks 5-6 are the Sprint 14A-A4b manifest tier +
+    data_classes shape gate.
+    """
     if record is None:
         return "pack_record_not_found"
     if record.tenant_id != request.tenant_id:
@@ -273,11 +276,12 @@ class RunResumeApprovalMismatch(Exception):
 
 
 def _resume_req(actor: Actor, record: RunRecord) -> RunRequest:
-    """Minimal :class:`RunRequest` shim built from a loaded run record purely so
-    the value-free ``_emit_*`` emitters can read ``actor.subject`` /
-    ``tenant_id`` / ``pack_id``. resume() has no real RunRequest (no pack-
-    admission context); ``argv`` is intentionally empty (the emitters never read
-    it). NOT a managed-run submit — only an emitter-payload carrier."""
+    """Build the minimal :class:`RunRequest` view of a loaded run record.
+
+    ``resume()`` uses it for the shared pack validator and the value-free
+    ``_emit_*`` emitters. ``argv`` is intentionally empty because neither
+    consumer reads it. This is NOT a managed-run submit.
+    """
     return RunRequest(
         tenant_id=record.tenant_id,
         pack_id=record.pack_id,
@@ -758,6 +762,12 @@ class ManagedRunExecutor:
         pending_approval`` is not a legal pair, so NO transition is emitted (no
         self-loop evidence).
 
+        Pack revalidation runs after those no-re-mint guards preserve their
+        existing 409 precedence, but before ``wake()``. It reuses the exact
+        ``load_for_run`` + ``_validate_pack_record`` pair used by ``run()``.
+        A lifecycle-invalid pack transitions ``from_state -> refused`` and emits
+        ``run.refused`` without waking or destroying the suspended session.
+
         NO scheduler calls: the scheduler slot was freed at suspend (the run()
         suspend branch calls ``scheduler.complete``). ``task_id`` is therefore
         ALWAYS None on resume results + events (no scheduler task). Quota-on-
@@ -807,6 +817,42 @@ class ManagedRunExecutor:
                 or approval_request_id != record.approval_request_id
             ):
                 raise RunResumeApprovalMismatch(run_id)
+
+        # M8.5-G / A-009 — revalidate the pack immediately before wake. Preserve
+        # the A3c no-re-mint guards above as the first authority on a
+        # pending-approval re-resume; once their correlator is valid, the same
+        # loader + validator pair as run() decides whether this pack is still
+        # admissible. A refusal terminalises the run under the existing resume
+        # refusal semantics, but never wakes or destroys its suspended session.
+        resume_request = _resume_req(actor, record)
+        pack_record = await self._pack_loader.load_for_run(pack_uuid=record.pack_uuid)
+        refusal = _validate_pack_record(pack_record, resume_request)
+        if refusal is not None:
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=actor.tenant_id,
+                from_state=from_state,
+                to_state="refused",
+                actor_id=actor.subject,
+                request_id=request_id,
+            )
+            await self._emit_refused(
+                resume_request,
+                request_id,
+                run_id=str(run_id),
+                task_id=None,
+                reason=refusal,
+            )
+            return RunResult(
+                run_id=str(run_id),
+                task_id=None,
+                terminal_state="refused",
+                exit_code=None,
+                stdout=b"",
+                stderr=b"",
+                refusal_reason=refusal,
+            )
+
         rid = str(run_id)
         # Function-local import: the except clause needs SandboxLifecycleRefused at
         # runtime; a module-level sandbox import would pull hvac (sandbox.protocol

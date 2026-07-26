@@ -922,6 +922,104 @@ async def test_resume_happy_path_wakes_execs_completes(db: AsyncEngine, settings
     assert payload["task_id"] is None
 
 
+async def _assert_resume_revalidates_noninstalled_pack(
+    db: AsyncEngine,
+    settings: Settings,
+    *,
+    state: str,
+) -> None:
+    """Suspend under an installed pack, change its lifecycle state, then resume."""
+    from dataclasses import replace
+
+    loader = _StubLoader(_record())
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex = _executor(db, backend=backend, loader=loader, settings=settings)
+    suspended = await ex.run(replace(_request(), suspend_after_exec=True))
+    assert suspended.terminal_state == "suspended"
+    assert backend.created[0].destroy_calls == 0
+
+    loader._record = _record(state=state)
+    result = await ex.resume(
+        run_id=uuid.UUID(suspended.run_id),
+        actor=_actor(),
+        argv=("echo", "must-not-run"),
+    )
+
+    assert result.terminal_state == "refused"
+    assert result.refusal_reason == "pack_record_not_installed"
+    assert backend.wake_calls == 0
+    assert backend.created[0].destroy_calls == 0
+    record = await RunRecordStore(db).load(
+        uuid.UUID(suspended.run_id),
+        tenant_id="tenant-a",
+    )
+    assert record is not None and record.state == "refused"
+    assert await _count_lifecycle(db, suspended.run_id, "run.lifecycle.refused") == 1
+    payload = await _latest_payload(db, "run.refused")
+    assert payload["run_id"] == suspended.run_id
+    assert payload["task_id"] is None
+    assert payload["reason"] == "pack_record_not_installed"
+
+
+async def test_resume_revalidates_pack_revoked_after_suspend(
+    db: AsyncEngine,
+    settings: Settings,
+) -> None:
+    await _assert_resume_revalidates_noninstalled_pack(db, settings, state="revoked")
+
+
+async def test_resume_revalidates_pack_disabled_after_suspend(
+    db: AsyncEngine,
+    settings: Settings,
+) -> None:
+    """The pack-lifecycle disable (operator brake) must prevent wake."""
+    await _assert_resume_revalidates_noninstalled_pack(db, settings, state="disabled")
+
+
+async def test_resume_pending_approval_guard_precedes_pack_revalidation(
+    db: AsyncEngine,
+    settings: Settings,
+) -> None:
+    """A missing approval correlator keeps its existing 409 precedence."""
+    from dataclasses import replace
+
+    from cognic_agentos.core.run.executor import RunResumePendingApprovalRequired
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    loader = _StubLoader(_record())
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex = _executor(db, backend=backend, loader=loader, settings=settings)
+    suspended = await ex.run(replace(_request(), suspend_after_exec=True))
+    approval_request_id = uuid.uuid4()
+    backend.wake_raises = SandboxLifecycleRefused(
+        "sandbox_approval_pending",
+        approval_request_id=str(approval_request_id),
+    )
+    pending = await ex.resume(
+        run_id=uuid.UUID(suspended.run_id),
+        actor=_actor(),
+        argv=("first-resume",),
+    )
+    assert pending.terminal_state == "pending_approval"
+
+    loader._record = _record(state="revoked")
+    wake_calls_before = backend.wake_calls
+    with pytest.raises(RunResumePendingApprovalRequired):
+        await ex.resume(
+            run_id=uuid.UUID(suspended.run_id),
+            actor=_actor(),
+            argv=("must-not-run",),
+        )
+
+    assert backend.wake_calls == wake_calls_before
+    record = await RunRecordStore(db).load(
+        uuid.UUID(suspended.run_id),
+        tenant_id="tenant-a",
+    )
+    assert record is not None and record.state == "pending_approval"
+    assert record.approval_request_id == approval_request_id
+
+
 async def test_resume_wake_refused_transitions_suspended_to_refused(
     db: AsyncEngine, settings: Settings
 ) -> None:
