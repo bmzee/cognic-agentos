@@ -4751,10 +4751,10 @@ def test_attempt18_expiry_wait_budget_crosses_exp_plus_skew() -> None:
 
 
 def _json_assert_predicates() -> dict[str, str]:
-    """Extract the exact shell-embedded Python programs from every json_assert call."""
+    """Extract programs from every KERNEL or PACK JSON assertion call."""
     lines = _RUNNER_TEXT.splitlines()
     predicates: dict[str, str] = {}
-    start_pattern = re.compile(r'^json_assert "([^"]+)" \'$')
+    start_pattern = re.compile(r'^json(?:_pack)?_assert "([^"]+)" \'$')
     end_pattern = re.compile(r'^\' "\$')
     for index, line in enumerate(lines):
         match = start_pattern.match(line)
@@ -4790,7 +4790,8 @@ def test_attempt19_every_json_assert_predicate_compiles_and_has_value_free_messa
         "BAR D.8 foreign observer sees an empty own-queue",
         "BAR E rendered chain shape",
         "BAR I.3 Amir's answer leaked the entitled cards spend value",
-        "BAR I.4 Oracle row does not match the digest-verified approved arguments",
+        "BAR I.4 approved replay and Oracle execution are not custody-bound",
+        "BAR I.4 Oracle row does not match the chat-request content",
     }
     for label, source in predicates.items():
         tree = ast.parse(source, filename=f"json_assert:{label}", mode="exec")
@@ -5200,7 +5201,9 @@ def test_d3_bar_h_remains_locked_before_bar_i_owns_the_final_banner() -> None:
     assert _RUNNER_TEXT.index("# ============================ BAR I") > _RUNNER_TEXT.index(
         'echo "PROOF M8.5-C (BARS A-H) PASS"'
     )
-    assert _RUNNER_TEXT.rstrip().endswith('echo "PROOF M8.5-E (BARS A-I) PASS"')
+    assert _RUNNER_TEXT.rstrip().endswith("finish_bar_i")
+    assert "KERNEL VERDICT:" in _RUNNER_TEXT
+    assert "PACK VERDICT:" in _RUNNER_TEXT
 
 
 # --------------------------------------------------------------------------- #
