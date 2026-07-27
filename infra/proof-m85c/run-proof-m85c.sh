@@ -7753,17 +7753,43 @@ run_skill_gate() {
   ensure_token amir
   verify_eval_pack_census "$pack_dir" "$census" "$census_sha" \
     || bar_fail "BAR I.6 $label extracted corpus changed before evaluator load"
+  local eval_err eval_message
+  eval_err="$(mktemp)"
   set +e
   report="$(COGNIC_SKILL_EVAL_TOKEN="${ROLE_TOKEN[amir]}" SSL_CERT_FILE="$PROOF_CA" \
     uv run --offline agentos skill-eval \
       --pack "$pack_dir" --target "$BASE_URL" \
       --agent-id "$AGENT_ID" --ablation-agent-id "$ABLATION_AGENT_ID" \
-      --reference-results "$references")"
+      --reference-results "$references" 2>"$eval_err")"
   rc=$?
   set -e
+  eval_message="$(tr -d '\r' <"$eval_err")"
+  rm -f "$eval_err"
+  # Exit 2 is the evaluator's DOCUMENTED pack-contract code (cli/skill_eval.py:
+  # SkillCorpusLoadError / SkillEvalContractError). Reaching it means the
+  # evaluator WORKED and rendered a verdict about the PACK — an invalid corpus,
+  # or an authored golden that drifted from the live reference. That is
+  # pack-authoring quality, never a kernel defect and never harness breakage, so
+  # it marks PACK red and abandons this pack's gate WITHOUT ending the run.
+  # Matching on the message, not the bare code, keeps an unexpected ValueError
+  # from being quietly filed as a pack problem — anything else still aborts.
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
-    harness_abort "BAR I.6 $label A-007 evaluator failed (exit $rc)"
+    case "$eval_message" in
+      *"corpus invalid"*|*"live reference drift"*)
+        printf '  BAR I.6 %s pack-contract detail: %s\n' "$label" "$eval_message" >&2
+        pack_verdict_fail "BAR I.6 $label pack corpus/reference contract failed; detail=$eval_message" || true
+        # MUST return 0: the runner is `set -e` and the call sites invoke this
+        # function bare, so a non-zero return would kill the run instead of
+        # abandoning one pack's gate.
+        return 0
+        ;;
+      *)
+        printf '%s\n' "$eval_message" >&2
+        harness_abort "BAR I.6 $label A-007 evaluator failed (exit $rc)"
+        ;;
+    esac
   fi
+  [ -z "$eval_message" ] || printf '%s\n' "$eval_message" >&2
   set +e
   gate_summary="$(
     printf '%s' "$report" \
