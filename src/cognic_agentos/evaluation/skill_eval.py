@@ -157,6 +157,9 @@ class SkillGateReport:
     performance_conformance: PerformanceConformanceMetric
     class_metrics: tuple[SkillClassMetric, ...]
     failure_case_ids: tuple[str, ...]
+    ablation_without_skill_total: int = 0
+    ablation_without_skill_passed: int = 0
+    ablation_without_skill_errored: int = 0
 
 
 def wilson_interval(passed: int, total: int, *, z: float = 1.959963984540054) -> WilsonInterval:
@@ -266,11 +269,19 @@ def compute_skill_gate(
             for key, row in index.items()
             if key[2] == "without_skill" and row.case_id in non_trigger_ids
         ]
+        ablation_without_skill_total = len(without_ablation)
+        ablation_without_skill_passed = sum(
+            row.passed and not row.errored for row in without_ablation
+        )
+        ablation_without_skill_errored = sum(row.errored for row in without_ablation)
         ablation_uplift = _rate(with_ablation) - _rate(without_ablation)
         ablation_passed = ablation_uplift >= corpus.manifest.ablation.minimum_uplift and not any(
             row.errored for row in without_ablation
         )
     else:
+        ablation_without_skill_total = 0
+        ablation_without_skill_passed = 0
+        ablation_without_skill_errored = 0
         ablation_uplift = 0.0
         ablation_passed = True
 
@@ -319,6 +330,9 @@ def compute_skill_gate(
         performance_conformance=performance_conformance,
         class_metrics=tuple(class_metrics),
         failure_case_ids=failure_case_ids,
+        ablation_without_skill_total=ablation_without_skill_total,
+        ablation_without_skill_passed=ablation_without_skill_passed,
+        ablation_without_skill_errored=ablation_without_skill_errored,
     )
 
 
@@ -1114,6 +1128,9 @@ def skill_gate_report_payload(report: SkillGateReport) -> dict[str, object]:
         "golden_failure_case_ids": list(report.golden_failure_case_ids),
         "ablation_uplift": report.ablation_uplift,
         "ablation_passed": report.ablation_passed,
+        "ablation_without_skill_total": report.ablation_without_skill_total,
+        "ablation_without_skill_passed": report.ablation_without_skill_passed,
+        "ablation_without_skill_errored": report.ablation_without_skill_errored,
         "performance_conformance": dataclasses.asdict(report.performance_conformance),
         "class_metrics": [dataclasses.asdict(metric) for metric in report.class_metrics],
         "failure_case_ids": list(report.failure_case_ids),
