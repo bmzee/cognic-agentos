@@ -2574,6 +2574,16 @@ seed_pin_abort() {
   exit 2
 }
 
+# The proof's OWN machinery could not produce a readable measurement. That is
+# neither a kernel governance defect nor a pack-quality miss, so it must not
+# assert either verdict — the 2026-07-27 live run showed this path claiming
+# KERNEL RED for a report the summariser could not parse. Exit 2, no verdict.
+harness_abort() {
+  echo "ABORT (exit 2, no verdict): $*" >&2
+  echo "The proof harness could not evaluate this bar; no KERNEL or PACK verdict is asserted." >&2
+  exit 2
+}
+
 kernel_incomplete() {
   KERNEL_VERDICT="INCOMPLETE"
   KERNEL_INCOMPLETE_REASON="$1"
@@ -7752,7 +7762,7 @@ run_skill_gate() {
   rc=$?
   set -e
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
-    bar_fail "BAR I.6 $label A-007 evaluator failed (exit $rc)"
+    harness_abort "BAR I.6 $label A-007 evaluator failed (exit $rc)"
   fi
   set +e
   gate_summary="$(
@@ -7765,7 +7775,7 @@ run_skill_gate() {
     0)
       ;;
     *)
-      bar_fail "BAR I.6 $label A-007 evaluator returned an unreadable report (exit $rc)"
+      harness_abort "BAR I.6 $label A-007 evaluator returned an unreadable report (exit $rc)"
       ;;
   esac
   set +e

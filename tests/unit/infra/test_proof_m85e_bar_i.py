@@ -987,6 +987,22 @@ def test_bar_i_task_e_conversion_and_note_sets_are_closed() -> None:
     assert actual_advisories == expected_advisories
     assert 'echo "NOTE (non-fatal): BAR I.' not in runner
 
+    # The proof's OWN machinery failing is neither verdict. The 2026-07-27 live
+    # run had the unreadable-report path assert KERNEL RED for a summariser it
+    # could not parse; both evaluator-machinery sites now abort with no verdict.
+    # Closed set: a future bar_fail added here would silently reintroduce a
+    # false kernel defect.
+    expected_harness_aborts = {
+        "BAR I.6 $label A-007 evaluator failed (exit $rc)",
+        "BAR I.6 $label A-007 evaluator returned an unreadable report (exit $rc)",
+    }
+    actual_harness_aborts = set(
+        re.findall(r'^\s*.*harness_abort "(BAR I\.[^"]+)"', runner, re.MULTILINE)
+    )
+    assert actual_harness_aborts == expected_harness_aborts
+    for label in expected_harness_aborts:
+        assert f'bar_fail "{label}"' not in runner
+
 
 def test_bar_i_only_i4_state_crosses_into_later_bars_and_is_explicitly_guarded() -> None:
     """The one ruled cross-bar dependency remains visible and fail-closed."""
