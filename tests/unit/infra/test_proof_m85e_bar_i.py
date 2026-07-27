@@ -34,6 +34,16 @@ _HR_LEAVE_IMAGE = _PROOF / "Dockerfile.hr-leave-pack"
 
 _AH_SHA256 = "7acdc5b1c98d6bbc90ef379aeaa1e78252f4f4e151d03ad2fa3ebd4162b81f71"
 
+#: The kernel sources whose message text the proof's pack-contract match arm
+#: depends on. Read here so a kernel-side rewording breaks the proof's
+#: classification test instead of silently making exit 2 unroutable.
+_CORPUS_ERROR_SOURCE = (_REPO / "src" / "cognic_agentos" / "cli" / "skill_eval.py").read_text(
+    encoding="utf-8"
+)
+_DRIFT_ERROR_SOURCE = (_REPO / "src" / "cognic_agentos" / "evaluation" / "skill_eval.py").read_text(
+    encoding="utf-8"
+)
+
 _RELEASES = {
     "HR": {
         "repo": "bmzee/cognic-skill-hr-data",
@@ -938,6 +948,7 @@ def test_bar_i_task_e_conversion_and_note_sets_are_closed() -> None:
         "BAR I.4 Oracle row does not match the chat-request content",
         "BAR I.5 cross-employee request did not complete",
         "BAR I.5 the model called apply_leave for another employee",
+        "BAR I.6 $label pack corpus/reference contract failed; detail=$eval_message",
         "BAR I.6 $label evaluator exit/report status mismatch; summary=$gate_summary",
         "BAR I.6 $label report failed a non-golden shipped gate; summary=$gate_summary",
         "BAR I.6 $label report contains errored evaluator observations; summary=$gate_summary",
@@ -952,7 +963,10 @@ def test_bar_i_task_e_conversion_and_note_sets_are_closed() -> None:
         )
     )
 
-    assert len(demoted_fatal_labels) == 16
+    # 16 Task-E demotions + the pack-contract exit-2 route added after the
+    # 2026-07-27 run-2 finding (the evaluator's documented pack-contract code
+    # was being treated as harness breakage, blocking I.7 for a PACK defect).
+    assert len(demoted_fatal_labels) == 17
     assert actual_pack_labels == demoted_fatal_labels | existing_note_promoted_to_red
     for label in demoted_fatal_labels:
         assert f'bar_fail "{label}"' not in runner
@@ -992,6 +1006,15 @@ def test_bar_i_task_e_conversion_and_note_sets_are_closed() -> None:
     # could not parse; both evaluator-machinery sites now abort with no verdict.
     # Closed set: a future bar_fail added here would silently reintroduce a
     # false kernel defect.
+    # The pack-contract label alone is not enough: if the case PATTERN stops
+    # matching the evaluator's documented messages, exit 2 silently falls
+    # through to harness_abort and a PACK defect blocks I.7 again. Pin the
+    # match arm itself, not just its body.
+    assert '*"corpus invalid"*|*"live reference drift"*)' in runner
+    assert 'return (2, f"skill-eval: corpus invalid:' in _CORPUS_ERROR_SOURCE
+    assert 'return (2, f"skill-eval: {exc}")' in _CORPUS_ERROR_SOURCE
+    assert 'raise SkillEvalContractError(f"live reference drift for' in _DRIFT_ERROR_SOURCE
+
     expected_harness_aborts = {
         "BAR I.6 $label A-007 evaluator failed (exit $rc)",
         "BAR I.6 $label A-007 evaluator returned an unreadable report (exit $rc)",
