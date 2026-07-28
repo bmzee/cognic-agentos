@@ -1,9 +1,18 @@
 """Erasable custody for the exact bytes approved for replay (D2 phase B).
 
 The approval envelope and decision-history rows remain value-free. This
-separate table is the only durable copy of canonical arguments and terminal
-results. Both write and read paths recompute their SHA-256 digests, while
-erasure removes values but retains the row and digests as evidence.
+separate table is the only durable copy of canonical arguments and stored
+terminal-outcome envelopes. Both write and read paths recompute their SHA-256
+digests, while erasure removes values but retains the row and digests as
+evidence.
+
+Since ADR-028 F-S2a, new result rows are opaque canonical arrays of
+``[marker, execution_outcome, result_object]``. The structural tag lets the
+execution service distinguish success from dispatch failure on a consumed
+retry. Pre-F-S2a bare-object rows are retained byte-for-byte but are
+outcome-ambiguous; the execution service fails those retries closed without
+redispatch or redelivery. This custody module verifies bytes and deliberately
+does not interpret either profile.
 """
 
 from __future__ import annotations
@@ -139,6 +148,7 @@ class ApprovalReplayStore:
         result_canonical: bytes,
         executed_at: datetime,
     ) -> None:
+        """Persist opaque canonical terminal-outcome-envelope bytes."""
         async with self._engine.begin() as conn:
             result = await conn.execute(
                 update(_approval_replay_payloads)
@@ -168,6 +178,7 @@ class ApprovalReplayStore:
         raise ApprovalReplayUnavailable("replay_erased")
 
     async def load_result(self, *, request_id: uuid.UUID, tenant_id: str) -> bytes | None:
+        """Return verified opaque outcome bytes, or ``None`` when never stored."""
         row = await self._load_row(request_id=request_id, tenant_id=tenant_id)
         if row is None:
             raise ApprovalReplayUnavailable("replay_not_persisted")

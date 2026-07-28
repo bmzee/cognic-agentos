@@ -38,8 +38,9 @@ Every edit is halt-before-commit per [[feedback_strict_review_off_gate]].
   6. **Terminate**: a no-tool-calls response is the final answer
      (``completed``). Every terminal state emits exactly ONE digest-only
      ``agent.run.<state>`` row — question/answer plaintext appears in NO
-     payload (ADR-027 §f); the plaintext returns ONLY on
-     :class:`AgentAskResult`. Then the best-effort task-tier memory digest
+     agent-run evidence payload (ADR-027 §f); the loop returns the plaintext
+     through :class:`AgentAskResult` for downstream governed screening and
+     storage. Then the best-effort task-tier memory digest
      is written through the governed ``remember`` built-in (a failure warns
      and leaves the run result unaffected).
 
@@ -531,8 +532,9 @@ class AgentLoop:
         approval_request_id: str | None = None,
     ) -> AgentAskResult:
         """One terminal arm: emit exactly ONE digest-only ``agent.run.<state>``
-        row, then the best-effort memory digest, then return the result —
-        the ONLY surface carrying the answer plaintext (ADR-027 §f)."""
+        row, then the best-effort memory digest, then return the result. The
+        result is the only agent-run return surface carrying the answer
+        plaintext; downstream governed screening/storage is separate."""
         answer_encoded = answer.encode("utf-8")
         payload: dict[str, Any] = {
             "run_id": run.run_id,

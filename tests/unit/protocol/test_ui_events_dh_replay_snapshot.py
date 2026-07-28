@@ -154,21 +154,25 @@ def _collect_snapshot_attr_accesses(source: str, function_names: frozenset[str])
 def _build_replay_snapshot(decision_type: str) -> _DHReplaySnapshot:
     """Construct a syntactically-valid ``_DHReplaySnapshot`` instance
     with the requested ``decision_type``. Payload shape is the
-    intersection of what the per-type projectors might read; the
-    current projectors pass ``payload`` through as ``data`` without
-    inspecting keys, so a minimal dict suffices."""
+    intersection of what the per-type projectors read. Most projectors pass
+    ``payload`` through as ``data``; ``approval.executed`` additionally
+    requires the execution discriminator so failure observations are not
+    projected as successful user events."""
+    payload = {
+        "request_id": "portal-req-1",
+        "tenant_id": "t1",
+        "actor_subject": "u1",
+        "decision_type": decision_type,
+    }
+    if decision_type == "approval.executed":
+        payload["execution"] = "executed"
     return _DHReplaySnapshot(
         sequence=1,
         decision_type=decision_type,
         tenant_id="t1",
         trace_id=None,
         request_id="portal-req-1",
-        payload={
-            "request_id": "portal-req-1",
-            "tenant_id": "t1",
-            "actor_subject": "u1",
-            "decision_type": decision_type,
-        },
+        payload=payload,
         new_hash=b"\x00" * 32,
         chain_id="decision_history",
         created_at=datetime.now(UTC),

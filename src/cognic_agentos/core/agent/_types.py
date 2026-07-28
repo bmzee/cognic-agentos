@@ -65,6 +65,12 @@ class LoadedAgentRecord:
     pack_version: str
     signed_artefact_digest: str | None
     registered: bool
+    # F-S2a: immutable projection from the admitted installed manifest.
+    # Empty defaults preserve non-conversation legacy constructors; the
+    # conversation hook adapter refuses records without a complete projection.
+    pack_id: str = ""
+    manifest_data_classes: tuple[str, ...] = ()
+    manifest_purpose: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +98,10 @@ class PriorTurn:
 
 @dataclass(frozen=True, slots=True)
 class AgentAskResult:
-    """Terminal result of one governed agent run — the ONLY surface carrying
-    the answer plaintext (chain rows are digest-only per ADR-027 §f).
+    """Terminal result of one governed agent run — the only agent-run return
+    surface carrying answer plaintext (chain rows are digest-only per ADR-027
+    §f). Downstream conversation screening and erasable transcript storage may
+    receive that value under their own governance contracts.
 
     ``prompt_tokens`` / ``completion_tokens`` are REQUIRED, never defaulted:
     ADR-028's conversation-level cumulative budget is fed from them, and a

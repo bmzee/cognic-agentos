@@ -784,6 +784,32 @@ def create_app(
                     # stay None below → their routes 503.
                     logger.error("protocol.registry_boot_failed_surfaces_unavailable")
 
+                # F-S2a (ADR-028): hook admission + deterministic dispatch are
+                # kernel composition, not an optional MCP-SDK capability.
+                # Build one shared dispatcher whenever the trusted registry is
+                # available, wire mandatory dual-chain evidence, and expose the
+                # same dispatcher through the MCP DLP adapter below. A
+                # construction failure leaves both seams None: hooked MCP calls
+                # then refuse via dlp_pre_guard_unavailable, while conversation
+                # construction can independently remain unavailable.
+                if registry is not None:
+                    from cognic_agentos.harness.hook_registry import build_hook_runtime
+
+                    try:
+                        hook_runtime = build_hook_runtime(
+                            registry=registry,
+                            settings=settings,
+                            audit_store=runtime.audit_store,
+                            decision_history_store=runtime.decision_history_store,
+                        )
+                    except Exception:
+                        logger.error("hook.runtime_construction_failed", exc_info=True)
+                        app.state.hook_dispatcher = None
+                        app.state.dlp_guard = None
+                    else:
+                        app.state.hook_dispatcher = hook_runtime.dispatcher
+                        app.state.dlp_guard = hook_runtime.dlp_guard
+
                 # Sprint 13.8 (ADR-002) — MCP host production construction,
                 # SDK-gated (the mcp SDK is an optional `adapters` extra; the
                 # kernel image lacks it). Constructed HERE in the lifespan (NOT
@@ -793,26 +819,14 @@ def create_app(
                 # a construction failure leaves app.state.mcp_host None + ERROR
                 # log + the app still boots. mcp_http_client is predeclared above.
                 if registry is not None and is_mcp_available():
-                    from cognic_agentos.harness.hook_registry import build_dlp_guard
                     from cognic_agentos.harness.mcp_host import build_mcp_host
 
                     mcp_http_client = httpx.AsyncClient()
                     try:
-                        # M5 (ADR-017): fail-soft DLPGuard construction over the
-                        # SAME trusted registry. A guard build failure leaves
-                        # dlp_guard None (ERROR log) and the host still builds —
-                        # packs declaring dlp_pre_hooks then fail CLOSED per-call
-                        # (dlp_pre_guard_unavailable) rather than the app
-                        # failing to boot.
-                        try:
-                            dlp_guard = build_dlp_guard(registry=registry, settings=settings)
-                        except Exception:
-                            logger.error("mcp.dlp_guard_construction_failed", exc_info=True)
-                            dlp_guard = None
-                        app.state.dlp_guard = dlp_guard
                         # Sprint 4: thread the SHARED registry (the same object
                         # the A2A endpoint receives below) — no per-surface empty
-                        # PluginRegistry() fallback.
+                        # PluginRegistry() fallback. F-S2a threads the shared,
+                        # SDK-independent DLP adapter built above.
                         app.state.mcp_host = build_mcp_host(
                             registry=registry,
                             runtime=runtime,
@@ -820,7 +834,7 @@ def create_app(
                             http_client=mcp_http_client,
                             vault_client=adapters.secret,
                             discovery_status_recorder=discovery_status_recorder,
-                            dlp_guard=dlp_guard,
+                            dlp_guard=app.state.dlp_guard,
                         )
                     except Exception:
                         logger.error("mcp.host_construction_failed", exc_info=True)
@@ -1010,14 +1024,15 @@ def create_app(
                 # route 503s) + the app still boots (the skills posture above).
                 # hosted_agents rows land together with the loop (the M6
                 # hosted_skills posture) — /system/plugins reads them.
-                from cognic_agentos.harness.agent_host import build_agent_loop
+                from cognic_agentos.harness.agent_host import build_agent_loop_with_records
 
                 try:
                     (
                         agent_loop,
                         agent_loop_warnings,
                         hosted_agents,
-                    ) = await build_agent_loop(
+                        agent_records,
+                    ) = await build_agent_loop_with_records(
                         runtime=runtime,
                         settings=settings,
                         registry=registry,
@@ -1031,10 +1046,12 @@ def create_app(
                         )
                     app.state.agent_loop = agent_loop
                     app.state.hosted_agents = hosted_agents
+                    app.state.agent_records = agent_records
                 except Exception:
                     logger.error("agent.loop_construction_failed", exc_info=True)
                     app.state.agent_loop = None
                     app.state.hosted_agents = []
+                    app.state.agent_records = {}
 
                 # ADR-028 M8.5-C — conversation substrate. State only; the router
                 # is mounted at construction. Read app.state.agent_loop, NOT the
@@ -1062,19 +1079,42 @@ def create_app(
                     )
 
                     built_agent_loop = getattr(app.state, "agent_loop", None)
-                    if built_agent_loop is not None:
-                        app.state.conversation_executor = ConversationTurnExecutor(
-                            store=conversation_store,
-                            loop=built_agent_loop,
-                            max_turns=settings.conversation_max_turns,
-                            cumulative_token_budget=(
-                                settings.agent_run_token_budget * settings.conversation_max_turns
-                            ),
-                            replay_last_n=settings.conversation_replay_last_n,
-                            replay_token_ceiling=settings.conversation_replay_token_ceiling,
-                            claim_ttl_s=settings.conversation_claim_ttl_s,
-                            agent_run_wall_clock_s=settings.agent_run_wall_clock_s,
+                    built_hook_dispatcher = getattr(app.state, "hook_dispatcher", None)
+                    if built_agent_loop is not None and built_hook_dispatcher is not None:
+                        from cognic_agentos.harness.hook_registry import (
+                            ConversationHookGuardAdapter,
                         )
+
+                        try:
+                            conversation_hook_guard = ConversationHookGuardAdapter(
+                                dispatcher=built_hook_dispatcher,
+                                agent_records=app.state.agent_records,
+                            )
+                        except ValueError:
+                            # ADR-028 makes both boundaries mandatory. A
+                            # missing/malformed/unverified hook pack leaves
+                            # POST-turn unavailable while read-only
+                            # conversation surfaces remain usable.
+                            logger.error(
+                                "conversation.required_hook_phases_unavailable",
+                                exc_info=True,
+                            )
+                        else:
+                            app.state.conversation_hook_guard = conversation_hook_guard
+                            app.state.conversation_executor = ConversationTurnExecutor(
+                                store=conversation_store,
+                                loop=built_agent_loop,
+                                hook_guard=conversation_hook_guard,
+                                max_turns=settings.conversation_max_turns,
+                                cumulative_token_budget=(
+                                    settings.agent_run_token_budget
+                                    * settings.conversation_max_turns
+                                ),
+                                replay_last_n=settings.conversation_replay_last_n,
+                                replay_token_ceiling=settings.conversation_replay_token_ceiling,
+                                claim_ttl_s=settings.conversation_claim_ttl_s,
+                                agent_run_wall_clock_s=settings.agent_run_wall_clock_s,
+                            )
                 except Exception:
                     logger.error("conversation.composition_failed", exc_info=True)
                     app.state.conversation_store = None
@@ -1325,9 +1365,12 @@ def create_app(
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
     app.state.approval_executor = approval_executor
     # M5 (ADR-017) — the boot-constructed DLPGuard the lifespan threads into the
-    # MCP host. Pre-seeded None (mirrors mcp_host); stays None when the SDK is
-    # absent or guard construction fail-softs.
+    # MCP host. F-S2a builds it independently of the optional MCP SDK.
     app.state.dlp_guard = None
+    # F-S2a (ADR-028) — SDK-independent deterministic hook dispatcher shared
+    # by every runtime hook surface. Populated from the trusted registry in
+    # the lifespan; None is the fail-closed construction-failure posture.
+    app.state.hook_dispatcher = None
     # PR-1 Slice 2 (ADR-002) — OBSERVATIONAL discovery-status recorder. Pre-seeded
     # None so pre-startup / lifespan-skipping introspection sees a defined attribute;
     # the lifespan builds the real InMemoryDiscoveryStatusRecorder unconditionally.
@@ -1339,6 +1382,8 @@ def create_app(
     app.state.hosted_skills = []  # M6 (ADR-025) — /system/plugins surface; lifespan populates.
     app.state.agent_loop = None  # M8 A13 (ADR-027) — lifespan populates via build_agent_loop.
     app.state.hosted_agents = []  # M8 A13 (ADR-027) — /system/plugins surface; lifespan populates.
+    app.state.agent_records = {}  # F-S2a — immutable admitted governance projections.
+    app.state.conversation_hook_guard = None  # F-S2a — shared-dispatcher adapter.
     # Amendment A-015: disabled until N9 wires the sibling-budget ledger.
     app.state.subagent_spawner = None
     app.state.run_record_store = None  # 2026-06-20 (ADR-005) — lifespan publishes; route resolves.

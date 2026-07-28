@@ -13,6 +13,7 @@ head with ``.one()`` (``core/decision_history.py:489``) and raises
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -356,6 +357,272 @@ async def test_append_turn_bumps_counters(store: ConversationStore) -> None:
     assert rec.last_turn_at is not None
 
 
+@pytest.mark.parametrize(("prompt_tokens", "completion_tokens"), [(-1, 0), (0, True)])
+async def test_append_turn_rejects_non_count_token_usage(
+    store: ConversationStore,
+    db: AsyncEngine,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    try:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            await store.append_turn(
+                conversation_id=cid,
+                tenant_id="t1",
+                seq=1,
+                user_message="question",
+                answer="answer",
+                agent_run_id="agent-run-invalid-usage",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                actor_id="s1",
+                request_id="req-turn-invalid-usage",
+                claim_id=claim.claim_id,
+            )
+    finally:
+        await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+@pytest.mark.parametrize(
+    "output_request_id",
+    [
+        "",
+        "request-1",
+        "conv-hook-" + "A" * 32,
+        "conv-hook-" + "a" * 31,
+        "conv-hook-" + "a" * 33,
+    ],
+)
+async def test_append_turn_rejects_output_hook_ids_the_examiner_cannot_read(
+    store: ConversationStore,
+    db: AsyncEngine,
+    output_request_id: str,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    try:
+        with pytest.raises(ValueError, match="invalid shape"):
+            await store.append_turn(
+                conversation_id=cid,
+                tenant_id="t1",
+                seq=1,
+                user_message="question",
+                answer="answer",
+                agent_run_id="agent-run-output-hook-id",
+                prompt_tokens=1,
+                completion_tokens=1,
+                actor_id="s1",
+                request_id="req-turn-output-hook-id",
+                claim_id=claim.claim_id,
+                conversation_output_request_id=output_request_id,
+                conversation_output_hook_count=1,
+            )
+    finally:
+        await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_is_digest_only_and_does_not_count_a_turn(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+
+    settled_state = await store.settle_refused_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        question="screened question sentinel",
+        answer="refused answer sentinel",
+        agent_run_id="agent-run-refused",
+        prompt_tokens=7,
+        completion_tokens=3,
+        actor_id="s1",
+        request_id="req-turn-refused",
+        claim_id=claim.claim_id,
+    )
+    assert settled_state == "active"
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 10
+    assert record.turn_count == 0
+    assert record.last_turn_at is None
+    async with db.connect() as conn:
+        turn_count = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_conversation_turns)
+                .where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).scalar_one()
+    assert turn_count == 0
+
+    rows = [row for row in await _chain_rows(db) if row.event_type == "conversation.turn_refused"]
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert set(payload) == {
+        "conversation_id",
+        "seq",
+        "agent_run_id",
+        "question_sha256",
+        "question_bytes",
+        "answer_sha256",
+        "answer_bytes",
+        "prompt_tokens",
+        "completion_tokens",
+        "actor_id",
+    }
+    assert payload["conversation_id"] == str(cid)
+    assert payload["seq"] == 1
+    assert payload["agent_run_id"] == "agent-run-refused"
+    assert payload["prompt_tokens"] == 7
+    assert payload["completion_tokens"] == 3
+    assert payload["question_sha256"] == hashlib.sha256(b"screened question sentinel").hexdigest()
+    assert payload["answer_sha256"] == hashlib.sha256(b"refused answer sentinel").hexdigest()
+    assert payload["question_bytes"] == len(b"screened question sentinel")
+    assert payload["answer_bytes"] == len(b"refused answer sentinel")
+    assert "screened question sentinel" not in str(payload)
+    assert "refused answer sentinel" not in str(payload)
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "completion_tokens"),
+    [(-1, 0), (0, -1), (True, 0), (0, False)],
+)
+async def test_settle_refused_turn_rejects_non_count_token_usage(
+    store: ConversationStore,
+    db: AsyncEngine,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    with pytest.raises(ValueError, match="non-negative integers"):
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="screened",
+            answer="refused",
+            agent_run_id="agent-run-invalid-usage",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            actor_id="s1",
+            request_id="req-turn-refused-invalid-usage",
+            claim_id=claim.claim_id,
+        )
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_evidence_failure_rolls_back_counter_and_chain(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.text(
+                """
+                CREATE TRIGGER refuse_conversation_turn_refused
+                BEFORE INSERT ON decision_history
+                WHEN NEW.event_type = 'conversation.turn_refused'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced conversation.turn_refused insert failure');
+                END
+                """
+            )
+        )
+
+    with pytest.raises(Exception, match=r"forced conversation\.turn_refused"):
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="must not bind",
+            answer="must not bind",
+            agent_run_id="agent-run-refused",
+            prompt_tokens=7,
+            completion_tokens=3,
+            actor_id="s1",
+            request_id="req-turn-refused-rollback",
+            claim_id=claim.claim_id,
+        )
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_rejects_a_reclaimed_claim(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    t0 = datetime.now(UTC)
+    stale = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0,
+        claim_ttl_s=60.0,
+    )
+    current = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=61),
+        claim_ttl_s=60.0,
+    )
+    before = await _decision_chain_state(db)
+
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="stale",
+            answer="stale",
+            agent_run_id="agent-run-stale",
+            prompt_tokens=7,
+            completion_tokens=3,
+            actor_id="s1",
+            request_id="req-turn-refused-stale",
+            claim_id=stale.claim_id,
+        )
+
+    assert exc.value.reason == "conversation_turn_claim_stale"
+    assert current.claim_id != stale.claim_id
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None and record.cumulative_tokens == 0
+    assert await _decision_chain_state(db) == before
+
+
 async def test_create_conversation_emits_created_chain_row(
     store: ConversationStore, db: AsyncEngine
 ) -> None:
@@ -612,6 +879,47 @@ async def test_admitted_turn_settles_after_close_then_new_turns_refuse(
             claim_ttl_s=300.0,
         )
     assert exc.value.reason == "conversation_not_active"
+
+
+async def test_refused_admitted_turn_reports_locked_closed_state(
+    store: ConversationStore,
+) -> None:
+    cid = await _new(store)
+    claim = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    await store.transition(
+        conversation_id=cid,
+        tenant_id="t1",
+        to_state="closed",
+        actor_id="s1",
+        request_id="req-close-before-refusal-settlement",
+    )
+
+    state = await store.settle_refused_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        question="screened",
+        answer="withheld",
+        agent_run_id="agent-run-refused-after-close",
+        prompt_tokens=2,
+        completion_tokens=3,
+        actor_id="s1",
+        request_id="req-refused-after-close",
+        claim_id=claim.claim_id,
+    )
+
+    assert state == "closed"
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.state == "closed"
+    assert record.cumulative_tokens == 5
+    assert record.turn_count == 0
 
 
 async def test_transition_on_missing_conversation_raises_not_found(

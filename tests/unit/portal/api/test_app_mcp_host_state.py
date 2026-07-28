@@ -72,6 +72,26 @@ def test_dlp_guard_preseeded_none_before_lifespan(memory_settings, memory_regist
     )
     app = create_app(s, adapter_registry=memory_registry)
     assert app.state.dlp_guard is None
+    assert app.state.hook_dispatcher is None
+
+
+async def test_hook_runtime_constructed_without_optional_mcp_sdk(
+    memory_settings, memory_registry, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cognic_agentos.portal.api.app.is_mcp_available", lambda: False)
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    app = create_app(s, adapter_registry=memory_registry)
+
+    async with app.router.lifespan_context(app):
+        from cognic_agentos.packs.hooks.dispatcher import HookDispatcher
+        from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
+
+        assert isinstance(app.state.hook_dispatcher, HookDispatcher)
+        assert isinstance(app.state.dlp_guard, DLPGuard)
+        assert app.state.dlp_guard._dispatcher is app.state.hook_dispatcher
+        assert app.state.mcp_host is None
 
 
 async def test_dlp_guard_constructed_and_threaded_when_sdk_present(
@@ -87,6 +107,7 @@ async def test_dlp_guard_constructed_and_threaded_when_sdk_present(
         from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
 
         assert isinstance(app.state.dlp_guard, DLPGuard)
+        assert app.state.dlp_guard._dispatcher is app.state.hook_dispatcher
         assert app.state.mcp_host._dlp_guard is app.state.dlp_guard
 
 
@@ -99,7 +120,7 @@ async def test_dlp_guard_construction_failure_is_fail_soft(
     def _boom(**kw):
         raise RuntimeError("guard construction failed")
 
-    monkeypatch.setattr("cognic_agentos.harness.hook_registry.build_dlp_guard", _boom)
+    monkeypatch.setattr("cognic_agentos.harness.hook_registry.build_hook_runtime", _boom)
     s = memory_settings.model_copy(
         update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
     )
@@ -108,5 +129,6 @@ async def test_dlp_guard_construction_failure_is_fail_soft(
         from cognic_agentos.protocol.mcp_host import MCPHost
 
         assert app.state.dlp_guard is None
+        assert app.state.hook_dispatcher is None
         assert isinstance(app.state.mcp_host, MCPHost)
         assert app.state.mcp_host._dlp_guard is None

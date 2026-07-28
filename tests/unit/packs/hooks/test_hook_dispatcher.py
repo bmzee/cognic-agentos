@@ -16,9 +16,10 @@ review-watchpoint scrutiny per Sprint-7A2 plan-of-record:
   the raised exception's class name (walked through ``__mro__``) to
   match the declaration's ``fail_open_exception``. Any other exception
   is fail-closed regardless.
-* Five closed-enum failure modes per Doctrine Lock E:
+* Six closed-enum failure modes per Doctrine Lock E + ADR-028 R25:
   ``hook_timeout`` / ``hook_exception`` / ``hook_malformed_result`` /
-  ``hook_policy_refused`` / ``hook_payload_unscannable``.
+  ``hook_policy_refused`` / ``hook_payload_unscannable`` /
+  ``hook_conversation_transformation_unsupported``.
 * Snapshot semantics: a hook that mutates the registry mid-dispatch
   cannot affect the current dispatch's iteration target.
 
@@ -33,7 +34,7 @@ import asyncio
 import dataclasses
 import hashlib
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, Literal, cast
 
 import pytest
 
@@ -72,6 +73,11 @@ def _ctx_template(
     parent_trace_id: str | None = None,
     manifest_data_classes: tuple[str, ...] = ("pii",),
     manifest_purpose: str = "advisory",
+    conversation_id: str | None = None,
+    conversation_turn_seq: int | None = None,
+    agent_run_id: str | None = None,
+    output_origin: Literal["agent_run", "approval_delivery"] | None = None,
+    approval_delivery_id: str | None = None,
 ) -> HookContext:
     """Build a HookContext with hook_id="" sentinel — the dispatcher
     fills hook_id per-hook via ``dataclasses.replace``."""
@@ -85,6 +91,11 @@ def _ctx_template(
         parent_trace_id=parent_trace_id,
         manifest_data_classes=manifest_data_classes,
         manifest_purpose=manifest_purpose,
+        conversation_id=conversation_id,
+        conversation_turn_seq=conversation_turn_seq,
+        agent_run_id=agent_run_id,
+        output_origin=output_origin,
+        approval_delivery_id=approval_delivery_id,
     )
 
 
@@ -149,6 +160,18 @@ class _MalformedResultHook(Hook):
         # violation. The Hook.invoke() seam raises HookResultShapeError,
         # which the dispatcher routes to ``hook_malformed_result``.
         return HookResult(decision="redact", redacted_payload=None, policy_reason=None)
+
+
+class _UnknownDecisionHook(Hook):
+    hook_id: ClassVar[str] = "unknown_decision_hook"
+    phase: ClassVar[HookPhase] = "dlp_pre"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(
+            decision="unknown",  # type: ignore[arg-type]
+            redacted_payload=None,
+            policy_reason=None,
+        )
 
 
 class _SlowHook(Hook):
@@ -514,6 +537,55 @@ class TestDispatcherRefuseHalts:
 
 
 class TestDispatcherExceptionFailClosed:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("declared_hook_id", "declared_phase", "ordering_class"),
+        [
+            ("signed_but_substituted_id", "dlp_pre", "input_validation"),
+            (_PassHook.hook_id, "dlp_post", "output_validation"),
+        ],
+    )
+    async def test_loaded_class_identity_must_match_signed_declaration(
+        self,
+        declared_hook_id: str,
+        declared_phase: HookPhase,
+        ordering_class: str,
+    ) -> None:
+        registry = HookRegistry(max_timeout_seconds=30.0)
+        registry.register_pack(
+            VerifiedHookPack(
+                distribution_name="cognic-hook-identity-mismatch",
+                distribution_version="0.1.0",
+                signature_digest="sha256:" + "c" * 64,
+                declarations=(
+                    HookDeclaration(
+                        hook_id=declared_hook_id,
+                        phase=declared_phase,
+                        ordering_class=ordering_class,  # type: ignore[arg-type]
+                        timeout_seconds=1.0,
+                        fail_policy="fail_closed",
+                        fail_open_exception=None,
+                        callable_loader=lambda: _PassHook,
+                    ),
+                ),
+            )
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase=declared_phase,
+            payload=b"data",
+            context_template=_ctx_template(phase=declared_phase),
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+        assert result.failed_hook_id == declared_hook_id
+
     @pytest.mark.asyncio
     async def test_generic_exception_routes_to_hook_exception(self) -> None:
         registry = _seed_registry(hook_class=_RaiseGenericHook)
@@ -972,6 +1044,31 @@ class TestDispatcherMalformedResult:
         assert result.failure_mode == "hook_malformed_result"
         assert result.failed_hook_id == "malformed_result_hook"
 
+    @pytest.mark.asyncio
+    async def test_unknown_decision_is_evidenced_as_malformed_result(self) -> None:
+        rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            rows.append(row)
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(hook_class=_UnknownDecisionHook),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+        assert result.failed_hook_id == "unknown_decision_hook"
+        assert len(rows) == 1
+        assert rows[0]["failure_mode"] == "hook_malformed_result"
+
 
 # ---------------------------------------------------------------------------
 # Timeout → hook_timeout
@@ -1141,6 +1238,44 @@ class TestDispatcherPolicyInputDigest:
             phase="dlp_pre", payload=b"too_big", context_template=_ctx_template()
         )
         assert result_uns.policy_input_digest
+
+    @pytest.mark.asyncio
+    async def test_audit_binds_each_hook_input_and_output_digest_without_values(
+        self,
+    ) -> None:
+        rows: list[dict[str, object]] = []
+
+        async def _emit(row: dict[str, object]) -> None:
+            rows.append(row)
+
+        registry = _seed_registry(hook_class=_RedactHook)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=_emit,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"original_with_pii",
+            context_template=_ctx_template(),
+            evidence_value_projector=lambda value: b"value:" + value,
+        )
+
+        assert result.final_payload == b"REDACTED"
+        assert result.hook_decision_count == 1
+        assert len(rows) == 1
+        assert rows[0]["policy_input_digest"] == hashlib.sha256(b"original_with_pii").hexdigest()
+        assert rows[0]["hook_input_digest"] == hashlib.sha256(b"original_with_pii").hexdigest()
+        assert rows[0]["hook_output_digest"] == hashlib.sha256(b"REDACTED").hexdigest()
+        assert (
+            rows[0]["hook_input_value_sha256"]
+            == hashlib.sha256(b"value:original_with_pii").hexdigest()
+        )
+        assert rows[0]["hook_output_value_sha256"] == hashlib.sha256(b"value:REDACTED").hexdigest()
+        assert b"original_with_pii" not in repr(rows).encode()
+        assert b"REDACTED" not in repr(rows).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -1333,7 +1468,7 @@ class TestDispatchResultShape:
         with pytest.raises((AttributeError, TypeError)):
             result.injected = "bad"  # type: ignore[attr-defined]
 
-    def test_failure_mode_closed_enum_has_5_values(self) -> None:
+    def test_failure_mode_closed_enum_has_6_values(self) -> None:
         from typing import get_args
 
         members = set(get_args(HookFailureMode))
@@ -1343,6 +1478,7 @@ class TestDispatchResultShape:
             "hook_malformed_result",
             "hook_policy_refused",
             "hook_payload_unscannable",
+            "hook_conversation_transformation_unsupported",
         }
 
     def test_dispatch_outcome_closed_enum_has_3_values(self) -> None:
@@ -1353,7 +1489,7 @@ class TestDispatchResultShape:
 
 
 # ---------------------------------------------------------------------------
-# All five HookFailureMode values reachable via dispatch
+# All six HookFailureMode values reachable via dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -1363,7 +1499,7 @@ class TestEveryFailureModeReachable:
     be updated, which forces the doctrine review."""
 
     @pytest.mark.asyncio
-    async def test_all_five_failure_modes_reachable(self) -> None:
+    async def test_all_six_failure_modes_reachable(self) -> None:
         observed: set[HookFailureMode] = set()
 
         # hook_timeout
@@ -1425,12 +1561,47 @@ class TestEveryFailureModeReachable:
         if r_u.failure_mode is not None:
             observed.add(r_u.failure_mode)
 
+        # hook_conversation_transformation_unsupported
+        class _ConversationTransformHook(Hook):
+            hook_id: ClassVar[str] = "conversation_transform"
+            phase: ClassVar[HookPhase] = "conversation_input"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                return HookResult(
+                    decision="redact",
+                    redacted_payload=b"changed",
+                    policy_reason=None,
+                )
+
+        registry_c = _seed_registry(
+            hook_class=_ConversationTransformHook,
+            phase="conversation_input",
+            ordering_class="input_redaction",
+        )
+        d_c = HookDispatcher(
+            registry=registry_c,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        r_c = await d_c.dispatch(
+            phase="conversation_input",
+            payload=b"x",
+            context_template=_ctx_template(
+                phase="conversation_input",
+                conversation_id="12345678-1234-5678-1234-567812345678",
+                conversation_turn_seq=1,
+            ),
+        )
+        if r_c.failure_mode is not None:
+            observed.add(r_c.failure_mode)
+
         assert observed == {
             "hook_timeout",
             "hook_exception",
             "hook_malformed_result",
             "hook_policy_refused",
             "hook_payload_unscannable",
+            "hook_conversation_transformation_unsupported",
         }
 
 
@@ -1592,6 +1763,377 @@ class TestDispatchForPackEmpty:
         assert result.policy_reason is None
         # Digest computed against the original payload.
         assert result.policy_input_digest == hashlib.sha256(b"hello").hexdigest()
+
+
+class TestConversationPhaseFailClosedBoundaries:
+    def test_phase_readiness_and_timeout_budget_use_admitted_snapshot(self) -> None:
+        class _InputA(Hook):
+            hook_id: ClassVar[str] = "input_a"
+            phase: ClassVar[HookPhase] = "conversation_input"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+
+        class _InputB(Hook):
+            hook_id: ClassVar[str] = "input_b"
+            phase: ClassVar[HookPhase] = "conversation_input"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+
+        dispatcher = HookDispatcher(
+            registry=_seed_multi_hook_registry(
+                hook_specs=[
+                    (_InputA, "input_validation"),
+                    (_InputB, "input_redaction"),
+                ],
+                timeout_seconds=50.0,
+                max_timeout_seconds=60.0,
+            ),
+            max_payload_bytes=100,
+            max_timeout_seconds_runtime=20.0,
+        )
+
+        assert dispatcher.has_phase_hooks("conversation_input") is True
+        assert dispatcher.has_phase_hooks("conversation_output") is False
+        assert dispatcher.phase_timeout_budget_s("conversation_input") == 40.0
+        assert dispatcher.phase_timeout_budget_s("conversation_output") == 0.0
+
+    @pytest.mark.asyncio
+    async def test_required_empty_phase_refuses_and_emits_value_free_failure(self) -> None:
+        audit_rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            audit_rows.append(row)
+
+        dispatcher = HookDispatcher(
+            registry=HookRegistry(max_timeout_seconds=30.0),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        payload = b'{"answer":"must not leak"}'
+        result = await dispatcher.dispatch(
+            phase="conversation_output",
+            payload=payload,
+            context_template=dataclasses.replace(
+                _ctx_template(),
+                phase="conversation_output",
+                conversation_id="12345678-1234-5678-1234-567812345678",
+                conversation_turn_seq=1,
+                agent_run_id="agent-run-test",
+                output_origin="agent_run",
+                approval_delivery_id=None,
+            ),
+            require_nonempty=True,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_exception"
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["outcome"] == "failed"
+        assert "must not leak" not in repr(audit_rows)
+
+    @pytest.mark.asyncio
+    async def test_preloop_failure_cannot_emit_unbound_output_identity(self) -> None:
+        audit_rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            audit_rows.append(row)
+
+        dispatcher = HookDispatcher(
+            registry=HookRegistry(max_timeout_seconds=30.0),
+            max_payload_bytes=1,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        with pytest.raises(
+            ValueError,
+            match="conversation hook evidence requires a canonical conversation_id",
+        ):
+            await dispatcher.dispatch(
+                phase="conversation_output",
+                payload=b"oversize",
+                context_template=dataclasses.replace(
+                    _ctx_template(),
+                    phase="conversation_output",
+                    agent_run_id="agent-run-test",
+                    output_origin="agent_run",
+                    approval_delivery_id=None,
+                ),
+                require_nonempty=True,
+            )
+
+        assert audit_rows == []
+
+    @pytest.mark.parametrize(
+        ("phase", "decision"),
+        [
+            ("conversation_input", "redact"),
+            ("conversation_input", "mask"),
+            ("conversation_output", "redact"),
+            ("conversation_output", "mask"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_conversation_transformations_fail_before_bounds_validation_or_next_hook(
+        self,
+        phase: Literal["conversation_input", "conversation_output"],
+        decision: Literal["redact", "mask"],
+    ) -> None:
+        selected_phase = phase
+        selected_decision = decision
+
+        class _TransformHook(Hook):
+            hook_id: ClassVar[str] = "a_transform"
+            phase: ClassVar[HookPhase] = selected_phase
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                return HookResult(
+                    decision=selected_decision,
+                    redacted_payload=b"candidate" * 100,
+                    policy_reason=None,
+                )
+
+        class _FollowingHook(Hook):
+            hook_id: ClassVar[str] = "z_following"
+            phase: ClassVar[HookPhase] = selected_phase
+            invocations: ClassVar[int] = 0
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                type(self).invocations += 1
+                return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+
+        _FollowingHook.invocations = 0
+        rows: list[dict[str, object]] = []
+        validator_calls = 0
+        projector_calls = 0
+
+        async def emit(row: dict[str, object]) -> None:
+            rows.append(row)
+
+        def validate(candidate: bytes) -> None:
+            nonlocal validator_calls
+            validator_calls += 1
+            raise AssertionError("conversation transformation validator must not run")
+
+        def project(candidate: bytes) -> bytes:
+            nonlocal projector_calls
+            projector_calls += 1
+            raise AssertionError("conversation transformation projector must not run")
+
+        dispatcher = HookDispatcher(
+            registry=_seed_multi_hook_registry(
+                hook_specs=[
+                    (
+                        _TransformHook,
+                        "input_validation"
+                        if phase == "conversation_input"
+                        else "output_validation",
+                    ),
+                    (
+                        _FollowingHook,
+                        "input_validation"
+                        if phase == "conversation_input"
+                        else "output_validation",
+                    ),
+                ],
+            ),
+            max_payload_bytes=10,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        context = _ctx_template(
+            phase=phase,
+            conversation_id="12345678-1234-5678-1234-567812345678",
+            conversation_turn_seq=1,
+            agent_run_id="agent-run-test" if phase == "conversation_output" else None,
+            output_origin="agent_run" if phase == "conversation_output" else None,
+            approval_delivery_id=None,
+        )
+        result = await dispatcher.dispatch(
+            phase=phase,
+            payload=b"original",
+            context_template=context,
+            require_nonempty=True,
+            transformed_payload_validator=validate,
+            evidence_value_projector=project,
+            evidence_input_value=b"original",
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_conversation_transformation_unsupported"
+        assert result.failed_hook_id == "a_transform"
+        assert result.final_payload == b"original"
+        assert _FollowingHook.invocations == 0
+        assert validator_calls == 0
+        assert projector_calls == 0
+        assert len(rows) == 1
+        assert rows[0]["failure_mode"] == "hook_conversation_transformation_unsupported"
+        assert rows[0]["hook_output_digest"] == hashlib.sha256(b"candidate" * 100).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_refusal_evidence_is_correlated_and_suppresses_pack_reason(self) -> None:
+        class _RefuseHook(Hook):
+            hook_id: ClassVar[str] = "refuse"
+            phase: ClassVar[HookPhase] = "conversation_output"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                return HookResult(
+                    decision="refuse",
+                    redacted_payload=None,
+                    policy_reason="customer_secret",
+                )
+
+        audit_rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            audit_rows.append(row)
+
+        dispatcher = HookDispatcher(
+            registry=_seed_multi_hook_registry(
+                hook_specs=[(_RefuseHook, "output_validation")],
+            ),
+            max_payload_bytes=100,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        result = await dispatcher.dispatch(
+            phase="conversation_output",
+            payload=b'{"answer":"customer_secret"}',
+            context_template=dataclasses.replace(
+                _ctx_template(),
+                phase="conversation_output",
+                conversation_id="12345678-1234-5678-1234-567812345678",
+                conversation_turn_seq=4,
+                agent_run_id="agent-run-42",
+                output_origin="agent_run",
+                approval_delivery_id=None,
+            ),
+            require_nonempty=True,
+        )
+
+        assert result.outcome == "refused"
+        assert result.policy_reason == "customer_secret"
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["policy_reason"] is None
+        assert audit_rows[0]["conversation_id"] == "12345678-1234-5678-1234-567812345678"
+        assert audit_rows[0]["conversation_turn_seq"] == 4
+        assert audit_rows[0]["output_origin"] == "agent_run"
+        assert audit_rows[0]["agent_run_id"] == "agent-run-42"
+        assert audit_rows[0]["approval_delivery_id"] is None
+        assert "customer_secret" not in repr(audit_rows)
+
+    @pytest.mark.asyncio
+    async def test_exception_evidence_suppresses_pack_controlled_class_name(self) -> None:
+        secret_exception = type("customer_secret", (RuntimeError,), {})
+
+        class _RaiseHook(Hook):
+            hook_id: ClassVar[str] = "raise_secret_class"
+            phase: ClassVar[HookPhase] = "conversation_input"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                raise secret_exception
+
+        audit_rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            audit_rows.append(row)
+
+        dispatcher = HookDispatcher(
+            registry=_seed_multi_hook_registry(
+                hook_specs=[(_RaiseHook, "input_validation")],
+            ),
+            max_payload_bytes=100,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        result = await dispatcher.dispatch(
+            phase="conversation_input",
+            payload=b'{"messages":["customer_secret"]}',
+            context_template=dataclasses.replace(
+                _ctx_template(),
+                phase="conversation_input",
+                conversation_id="12345678-1234-5678-1234-567812345678",
+                conversation_turn_seq=4,
+            ),
+            require_nonempty=True,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_exception"
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["exception_class"] is None
+        assert "customer_secret" not in repr(audit_rows)
+
+    @pytest.mark.parametrize(
+        ("output_origin", "agent_run_id", "approval_delivery_id"),
+        [
+            ("agent_run", "agent-run-42", None),
+            (
+                "approval_delivery",
+                None,
+                "approval-delivery-12345678-1234-5678-1234-567812345678",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_output_technical_failure_binds_disjoint_origin_and_scalar_digests(
+        self,
+        output_origin: Literal["agent_run", "approval_delivery"],
+        agent_run_id: str | None,
+        approval_delivery_id: str | None,
+    ) -> None:
+        class _RaiseHook(Hook):
+            hook_id: ClassVar[str] = "raise"
+            phase: ClassVar[HookPhase] = "conversation_output"
+
+            async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+                raise RuntimeError("technical failure")
+
+        audit_rows: list[dict[str, object]] = []
+
+        async def emit(row: dict[str, object]) -> None:
+            audit_rows.append(row)
+
+        answer = b"screened answer"
+        dispatcher = HookDispatcher(
+            registry=_seed_multi_hook_registry(
+                hook_specs=[(_RaiseHook, "output_validation")],
+            ),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+        result = await dispatcher.dispatch(
+            phase="conversation_output",
+            payload=b'{"answer":"screened answer"}',
+            context_template=dataclasses.replace(
+                _ctx_template(),
+                phase="conversation_output",
+                conversation_id="12345678-1234-5678-1234-567812345678",
+                conversation_turn_seq=4,
+                agent_run_id=agent_run_id,
+                output_origin=output_origin,
+                approval_delivery_id=approval_delivery_id,
+            ),
+            require_nonempty=True,
+            evidence_value_projector=lambda _: answer,
+            evidence_input_value=answer,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_exception"
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["output_origin"] == output_origin
+        assert audit_rows[0]["agent_run_id"] == agent_run_id
+        assert audit_rows[0]["approval_delivery_id"] == approval_delivery_id
+        answer_sha256 = hashlib.sha256(answer).hexdigest()
+        assert audit_rows[0]["hook_input_value_sha256"] == answer_sha256
+        # No candidate transform was admitted, so the dispatcher's retained
+        # value is unchanged even though the turn itself is refused.
+        assert audit_rows[0]["hook_output_value_sha256"] == answer_sha256
+        assert "screened answer" not in repr(audit_rows)
 
 
 class TestDispatchForPackFiltering:
@@ -1797,8 +2339,8 @@ class TestDispatchForPackPayloadBudget:
 
 
 class TestDispatchForPackFailureRouting:
-    """All five HookFailureMode values reachable through dispatch_for_pack
-    just as they are through dispatch — pin parity."""
+    """Representative failure modes retain their routing through
+    ``dispatch_for_pack``; complete enum reachability is pinned above."""
 
     @pytest.mark.asyncio
     async def test_timeout_routes_through_dispatch_for_pack(self) -> None:
@@ -1968,3 +2510,317 @@ class TestDispatchSelectionErrorIsPublic:
         # Inherits from RuntimeError so a generic ``except RuntimeError``
         # also catches it (defense-in-depth — old-style callers).
         assert issubclass(HookDispatchSelectionError, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# Critical-control boundary coverage — constructor, projections, and
+# conversation evidence correlation all fail closed at their owning seam.
+# ---------------------------------------------------------------------------
+
+
+class _ConversationInputPassHook(Hook):
+    hook_id: ClassVar[str] = "conversation_input_pass"
+    phase: ClassVar[HookPhase] = "conversation_input"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+
+
+class _ConversationOutputPassHook(Hook):
+    hook_id: ClassVar[str] = "conversation_output_pass"
+    phase: ClassVar[HookPhase] = "conversation_output"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+
+
+class TestDispatcherCriticalBoundaryCoverage:
+    @pytest.mark.parametrize(
+        ("max_payload_bytes", "max_timeout_seconds_runtime", "message"),
+        [
+            (0, 1.0, "max_payload_bytes must be > 0"),
+            (1, 0.0, "max_timeout_seconds_runtime must be > 0"),
+        ],
+    )
+    def test_constructor_rejects_non_positive_runtime_bounds(
+        self,
+        max_payload_bytes: int,
+        max_timeout_seconds_runtime: float,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            HookDispatcher(
+                registry=HookRegistry(max_timeout_seconds=30.0),
+                max_payload_bytes=max_payload_bytes,
+                max_timeout_seconds_runtime=max_timeout_seconds_runtime,
+            )
+
+    @pytest.mark.asyncio
+    async def test_explicit_evidence_input_requires_projector(self) -> None:
+        dispatcher = HookDispatcher(
+            registry=HookRegistry(max_timeout_seconds=30.0),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        with pytest.raises(ValueError, match="evidence_input_value requires"):
+            await dispatcher.dispatch(
+                phase="dlp_pre",
+                payload=b"payload",
+                context_template=_ctx_template(),
+                evidence_input_value=b"scalar",
+            )
+
+    @pytest.mark.asyncio
+    async def test_loader_returning_non_hook_class_fails_closed(self) -> None:
+        registry = HookRegistry(max_timeout_seconds=30.0)
+        registry.register_pack(
+            VerifiedHookPack(
+                distribution_name="cognic-hook-wrong-loader-shape",
+                distribution_version="0.1.0",
+                signature_digest="sha256:" + "e" * 64,
+                declarations=(
+                    HookDeclaration(
+                        hook_id="wrong_loader_shape",
+                        phase="dlp_pre",
+                        ordering_class="input_validation",
+                        timeout_seconds=1.0,
+                        fail_policy="fail_closed",
+                        fail_open_exception=None,
+                        callable_loader=cast(Callable[[], type[Hook]], lambda: object),
+                    ),
+                ),
+            )
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"payload",
+            context_template=_ctx_template(),
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+        assert result.failed_hook_id == "wrong_loader_shape"
+
+    @pytest.mark.asyncio
+    async def test_initial_scalar_projection_failure_is_malformed(self) -> None:
+        def reject_projection(_: bytes) -> bytes:
+            raise ValueError("unprojectable")
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(hook_class=_PassHook),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"payload",
+            context_template=_ctx_template(),
+            evidence_value_projector=reject_projection,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+
+    @pytest.mark.asyncio
+    async def test_transformed_payload_validator_failure_is_malformed(self) -> None:
+        def reject_candidate(_: bytes) -> None:
+            raise ValueError("invalid transformed envelope")
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(hook_class=_RedactHook),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"payload",
+            context_template=_ctx_template(),
+            transformed_payload_validator=reject_candidate,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+        assert result.final_payload == b"payload"
+
+    @pytest.mark.asyncio
+    async def test_transformed_scalar_projection_failure_is_malformed(self) -> None:
+        projection_calls = 0
+
+        def reject_second_projection(value: bytes) -> bytes:
+            nonlocal projection_calls
+            projection_calls += 1
+            if projection_calls == 2:
+                raise ValueError("transformed scalar unavailable")
+            return value
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(hook_class=_RedactHook),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"payload",
+            context_template=_ctx_template(),
+            evidence_value_projector=reject_second_projection,
+        )
+
+        assert projection_calls == 2
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+        assert result.final_payload == b"payload"
+
+    @pytest.mark.asyncio
+    async def test_fail_open_scalar_projection_failure_is_malformed(self) -> None:
+        def reject_projection(_: bytes) -> bytes:
+            raise ValueError("fail-open evidence unavailable")
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(
+                hook_class=_RaiseHook,
+                fail_policy="fail_open",
+                fail_open_exception="RecoverableHookError",
+            ),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+
+        result = await dispatcher.dispatch(
+            phase="dlp_pre",
+            payload=b"payload",
+            context_template=_ctx_template(),
+            evidence_value_projector=reject_projection,
+        )
+
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+
+    @pytest.mark.parametrize(
+        ("hook_class", "phase", "ordering_class", "context_factory", "message"),
+        [
+            (
+                _ConversationInputPassHook,
+                "conversation_input",
+                "input_validation",
+                lambda: _ctx_template(
+                    phase="conversation_input",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=0,
+                ),
+                "canonical turn correlation",
+            ),
+            (
+                _PassHook,
+                "dlp_pre",
+                "input_validation",
+                lambda: _ctx_template(
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                ),
+                "non-conversation hook evidence cannot carry turn correlation",
+            ),
+            (
+                _ConversationOutputPassHook,
+                "conversation_output",
+                "output_validation",
+                lambda: _ctx_template(
+                    phase="conversation_output",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                    output_origin="agent_run",
+                    agent_run_id="system-not-an-agent-run",
+                ),
+                "agent_run hook evidence correlation is malformed",
+            ),
+            (
+                _ConversationOutputPassHook,
+                "conversation_output",
+                "output_validation",
+                lambda: _ctx_template(
+                    phase="conversation_output",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                    output_origin="approval_delivery",
+                    approval_delivery_id="approval-delivery-not-a-uuid",
+                ),
+                "approval_delivery hook evidence correlation is malformed",
+            ),
+            (
+                _ConversationOutputPassHook,
+                "conversation_output",
+                "output_validation",
+                lambda: _ctx_template(
+                    phase="conversation_output",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                    output_origin="approval_delivery",
+                    approval_delivery_id=("approval-delivery-12345678-1234-5678-1234-567812345678"),
+                    agent_run_id="agent-run-forbidden",
+                ),
+                "approval_delivery hook evidence correlation is malformed",
+            ),
+            (
+                _ConversationOutputPassHook,
+                "conversation_output",
+                "output_validation",
+                lambda: _ctx_template(
+                    phase="conversation_output",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                ),
+                "conversation output hook evidence requires output_origin",
+            ),
+            (
+                _ConversationInputPassHook,
+                "conversation_input",
+                "input_validation",
+                lambda: _ctx_template(
+                    phase="conversation_input",
+                    conversation_id="12345678-1234-5678-1234-567812345678",
+                    conversation_turn_seq=1,
+                    output_origin="agent_run",
+                    agent_run_id="agent-run-forbidden",
+                ),
+                "non-output hook evidence cannot carry output identity",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_evidence_correlation_rejects_malformed_cross_surface_identity(
+        self,
+        hook_class: type[Hook],
+        phase: HookPhase,
+        ordering_class: str,
+        context_factory: Callable[[], HookContext],
+        message: str,
+    ) -> None:
+        async def emit(_: dict[str, object]) -> None:
+            raise AssertionError("malformed evidence must not reach the emitter")
+
+        dispatcher = HookDispatcher(
+            registry=_seed_registry(
+                hook_class=hook_class,
+                phase=phase,
+                ordering_class=ordering_class,
+            ),
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+            audit_emitter=emit,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            await dispatcher.dispatch(
+                phase=phase,
+                payload=b"payload",
+                context_template=context_factory(),
+            )

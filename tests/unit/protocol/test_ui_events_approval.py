@@ -85,7 +85,9 @@ async def test_each_approval_transition_emits_exactly_one_typed_event(
 
     emitter = UIEventEmitter(audit_store=AuditStore(engine), decision_history_store=store)
     emitter.register_hook(collect)
-    payload = {"decision_index": 2, "required_count": 4}
+    payload: dict[str, int | str] = {"decision_index": 2, "required_count": 4}
+    if decision_type == "approval.executed":
+        payload["execution"] = "executed"
 
     await store.append(
         DecisionRecord(
@@ -147,6 +149,35 @@ def test_consumed_is_deliberately_mirror_only() -> None:
         request_id="approval-request-18",
         payload={"consumed_by": "executor"},
         new_hash=b"\x18" * 32,
+        chain_id="decision_history",
+        created_at=datetime.now(UTC),
+    )
+    assert _project_typed_decision_history(cast(AppendedDecisionSnapshot, snapshot)) is None
+
+
+@pytest.mark.parametrize(
+    ("decision_type", "execution"),
+    [
+        ("approval.executed", "dispatch_failed"),
+        ("approval.executed", "replay_unavailable"),
+        ("approval.delivery_refused", None),
+    ],
+)
+def test_non_success_execution_and_delivery_refusal_are_mirror_only(
+    decision_type: str,
+    execution: str | None,
+) -> None:
+    payload: dict[str, Any] = {}
+    if execution is not None:
+        payload["execution"] = execution
+    snapshot = _DHReplaySnapshot(
+        sequence=19,
+        decision_type=decision_type,
+        tenant_id="bank-a",
+        trace_id=None,
+        request_id="approval-request-19",
+        payload=payload,
+        new_hash=b"\x19" * 32,
         chain_id="decision_history",
         created_at=datetime.now(UTC),
     )

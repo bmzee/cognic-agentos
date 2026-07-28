@@ -6,7 +6,7 @@ This is a Cognic AgentOS **hook pack** — a deterministic governance
 extension registered under the `cognic.hooks` entry-point group per
 ADR-017 + the Sprint-7A2 hook taxonomy. Hook packs are NOT Layer C
 agent behavior; they run on the runtime DLP / governance pipeline
-to gate inputs / outputs of tool / skill / agent packs.
+to gate DLP and conversation input/output phases.
 
 ## Wave-1 author lifecycle
 
@@ -28,7 +28,12 @@ uv run agentos verify .         # offline trust-gate dry-run
 
 Hook packs participate in `agentos test-harness` through the public
 `Hook.invoke(context, payload)` seam; the SDK's context, payload, and result
-validation phases all run before the dry-run can pass.
+validation phases all run before the dry-run can pass. Conversation-phase
+authors must also follow the exact canonical JSON schema-v1 envelope in
+`docs/SDK-REFERENCE.md` §8.4.1. In F-S2a those phases are PASS/REFUSE-only:
+returning redact or mask fails closed until F-S3 lands transformation-aware
+examiner projection. Legacy `dlp_pre` / `dlp_post` hooks retain transformation
+support and return a complete envelope rather than a bare replacement string.
 
 ## What this pack ships
 
@@ -57,7 +62,8 @@ validation phases all run before the dry-run can pass.
       `cognic-pack-manifest.toml` + `pyproject.toml` +
       `src/{{ module_name }}/hook.py`.
 - [ ] Implement `{{ class_name }}._invoke()` — return one of the four
-      `HookResult` decisions (pass / redact / mask / refuse).
+      `HookResult` decisions (pass / redact / mask / refuse), observing that
+      conversation phases admit only pass/refuse in F-S2a.
 - [ ] Replace the skipped smoke test with real coverage of every
       decision branch.
 - [ ] Commit `uv.lock`; run `uv lock --check` +

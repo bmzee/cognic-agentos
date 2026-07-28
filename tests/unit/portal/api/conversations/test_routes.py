@@ -379,6 +379,7 @@ _TURN_REFUSAL_CASES = [
     ("conversation_max_turns_exceeded", "active"),
     ("conversation_token_budget_exceeded", "active"),
     ("conversation_turn_claim_stale", "active"),
+    ("conversation_hook_refused", "active"),
 ]
 
 

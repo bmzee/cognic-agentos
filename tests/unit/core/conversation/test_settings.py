@@ -2,8 +2,11 @@
 
 Ruling 5 (2026-07-09): ``core/config.py`` enters this slice, so the Settings get
 dedicated tests — defaults, environment overrides, invalid bounds, and the
-``conversation_claim_ttl_s > agent_run_wall_clock_s`` startup relationship that
-``ConversationTurnExecutor`` refuses to violate.
+declared-budget headroom relationship
+``conversation_claim_ttl_s > agent_run_wall_clock_s + admitted hook invocation
+timeouts`` that ``ConversationTurnExecutor`` refuses to violate. This is a
+configuration check, not an end-to-end lease deadline; claim-id fencing owns
+stale append refusal.
 """
 
 from __future__ import annotations
@@ -14,6 +17,11 @@ import pytest
 from pydantic import ValidationError
 
 from cognic_agentos.core.config import Settings
+
+
+class _ZeroHookBudget:
+    def turn_timeout_budget_s(self) -> float:
+        return 0.0
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -32,7 +40,7 @@ def test_defaults_match_adr_028_section_5() -> None:
     assert s.conversation_chain_candidate_limit == 10_000
 
 
-def test_default_claim_ttl_exceeds_default_agent_wall_clock() -> None:
+def test_default_claim_ttl_exceeds_default_agent_wall_clock_before_hook_budget() -> None:
     """The shipped defaults must satisfy the executor's construction guard,
     else a stock deployment cannot build a ConversationTurnExecutor at all."""
     s = _settings()
@@ -110,7 +118,7 @@ def test_executor_refuses_when_claim_ttl_does_not_exceed_wall_clock() -> None:
     """Settings alone cannot express the cross-field guard; the executor does.
 
     A misconfigured deployment (claim_ttl_s <= agent_run_wall_clock_s) fails
-    LOUDLY at construction rather than silently double-running slow turns.
+    loudly instead of claiming declared-budget headroom it does not have.
     """
     from cognic_agentos.core.conversation.turn import ConversationTurnExecutor
 
@@ -121,6 +129,7 @@ def test_executor_refuses_when_claim_ttl_does_not_exceed_wall_clock() -> None:
         ConversationTurnExecutor(
             store=object(),  # type: ignore[arg-type]
             loop=object(),  # type: ignore[arg-type]
+            hook_guard=_ZeroHookBudget(),  # type: ignore[arg-type]
             max_turns=s.conversation_max_turns,
             cumulative_token_budget=1,
             replay_last_n=s.conversation_replay_last_n,
@@ -137,6 +146,7 @@ def test_executor_accepts_the_shipped_defaults() -> None:
     ex = ConversationTurnExecutor(
         store=object(),  # type: ignore[arg-type]
         loop=object(),  # type: ignore[arg-type]
+        hook_guard=_ZeroHookBudget(),  # type: ignore[arg-type]
         max_turns=s.conversation_max_turns,
         cumulative_token_budget=s.agent_run_token_budget * s.conversation_max_turns,
         replay_last_n=s.conversation_replay_last_n,

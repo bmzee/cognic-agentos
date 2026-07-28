@@ -195,7 +195,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: non-authoritative cursors, the bounded index-addressable chain join, and
 #: the corruption-vs-projection-limit taxonomy) promoted to the gate = 152.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 156
+_EXPECTED_ENTRY_COUNT = 158
+
+_M85F_S2A_GATE_MODULES = (
+    "src/cognic_agentos/harness/agent_host.py",
+    "src/cognic_agentos/harness/hook_registry.py",
+)
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -283,6 +288,16 @@ def test_critical_files_count_is_expected(gate_tool: ModuleType) -> None:
     the ``_CRITICAL_FILES`` change.
     """
     assert len(gate_tool._CRITICAL_FILES) == _EXPECTED_ENTRY_COUNT
+
+
+def test_m85f_s2a_promotions_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """Both new F-S2a trust/evidence owners ride the durable 95/90 gate."""
+
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _M85F_S2A_GATE_MODULES:
+        assert by_path[module] == (0.95, 0.90)
 
 
 def test_sprint_7b3_modules_present_with_standard_floors(
