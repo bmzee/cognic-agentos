@@ -443,7 +443,18 @@ reference them via `[data_governance].dlp_pre_hooks` /
 `dlp_post_hooks` (PACK-MANIFEST-SPEC.md §5). The runtime DLP adapter
 at `packs/hooks/dlp_integration.py` (T8 critical-controls module)
 wraps the hook dispatcher with `dlp_pre` / `dlp_post` phase
-semantics + a closed-enum 3-value `DLPRefusalReason` taxonomy.
+semantics + a closed-enum 3-value `DLPRefusalReason` taxonomy. The
+same dispatcher also admits the additive `conversation_input` /
+`conversation_output` phases; those are selected by the kernel's
+conversation turn boundary, not by a calling pack's `dlp_*_hooks`
+lists. Those phases use the exact canonical JSON schema-v1 envelope
+documented in `SDK-REFERENCE.md` §8.4.1. F-S2a admits PASS/REFUSE
+only on conversation phases. Returning `redact` or `mask` there fails
+closed as `hook_conversation_transformation_unsupported`; the existing
+`dlp_pre` / `dlp_post` transformation contract remains unchanged.
+Conversation transformations are deferred to F-S3 and require the
+hook-aware examiner projection plus before/after digest continuity in
+the same slice.
 
 **Why hook packs vs. shipping DLP code inside the calling pack?**
 Separation of duty. A regulator-friendly pack ecosystem keeps the
@@ -551,9 +562,12 @@ ADR-017 + Doctrine Lock E. The validator refuses every
 exception-declaration shape (a per-`HookDeclaration` runtime
 carve-out, NOT a `[data_governance]` field) is reserved for a
 follow-up sprint and not yet wired up. Use `fail_closed` until
-that lands. See the operator runbook at
+that lands. Runtime admission additionally refuses `fail_open` for
+`conversation_input` and `conversation_output`, so bypassing the
+authoring validator cannot weaken conversation screening. See the
+operator runbook at
 `docs/operator-runbooks/hook-pack-failure-policy.md` for the
-audit-trail contract + the 5 dispatcher failure modes.
+audit-trail contract + the 6 dispatcher failure modes.
 
 ### 8.3 The `Hook` subclass
 

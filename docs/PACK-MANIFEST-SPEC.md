@@ -219,10 +219,10 @@ fail_policy = "fail_closed"
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `hook_id` | string | yes | snake_case identifier (`^[a-z][a-z0-9_]*$`); MUST match the pyproject `[project.entry-points."cognic.hooks"]` key for this hook. Globally unique within the manifest (`duplicate_in_manifest` refusal). |
-| `phase` | string | yes | Closed-enum: `dlp_pre` / `dlp_post`. Sourced from `cognic_agentos.cli._governance_vocab.HookPhase`. |
-| `ordering_class` | string | yes | Closed-enum (8 values): `input_validation` / `input_authorization` / `input_redaction` / `input_normalization` (for `dlp_pre`); `output_validation` / `output_egress_check` / `output_redaction` / `output_masking` (for `dlp_post`). The class name's `input_*` / `output_*` stem MUST match the phase or the validator emits `phase_class_mismatch`. The dispatcher orders hooks within a phase by `HOOK_ORDERING_RANK[ordering_class]` ascending, then `hook_id` alphabetic for ties. |
+| `phase` | string | yes | Additive closed-enum: `dlp_pre` / `dlp_post` / `conversation_input` / `conversation_output`. Sourced from `cognic_agentos.cli._governance_vocab.HookPhase`. |
+| `ordering_class` | string | yes | Closed-enum (8 values): `input_validation` / `input_authorization` / `input_redaction` / `input_normalization` (for `dlp_pre` and `conversation_input`); `output_validation` / `output_egress_check` / `output_redaction` / `output_masking` (for `dlp_post` and `conversation_output`). The class name's `input_*` / `output_*` stem MUST match the phase direction or the validator emits `phase_class_mismatch`. The dispatcher orders hooks within a phase by `HOOK_ORDERING_RANK[ordering_class]` ascending, then `hook_id` alphabetic for ties; existing names and ranks are unchanged. Ordering-class reuse does not authorize transformation: F-S2a conversation phases admit PASS/REFUSE only, and `redact` / `mask` fail closed as `hook_conversation_transformation_unsupported`. Existing DLP-phase transformations are unchanged. |
 | `timeout_seconds` | float | yes | Per-hook invocation timeout. Positive number ≤ `Settings.hook_max_timeout_s` (default ceiling 30.0). The dispatcher routes timeout to the closed-enum `hook_timeout` failure mode. |
-| `fail_policy` | string | yes | Closed-enum: `fail_closed` / `fail_open`. **Wave-1: only `fail_closed` is accepted.** `fail_closed` is the ADR-017 + Doctrine Lock E default — the calling pack's invocation is refused if the hook times out / raises / returns malformed result / explicitly refuses / payload exceeds the unscannable budget. Any `fail_policy = "fail_open"` declaration is REFUSED in Wave-1 with closed-enum `hook_fail_policy_invalid` (failure_mode `fail_open_without_exception`); the matching `fail_open_exception` declaration shape — which would carve out a per-pack exception path on the registry's `HookDeclaration` runtime — is reserved for a follow-up sprint and does NOT live on `[data_governance]`. Use `fail_closed` until that lands. |
+| `fail_policy` | string | yes | Closed-enum: `fail_closed` / `fail_open`. **Wave-1 authoring accepts only `fail_closed`.** `fail_closed` is the ADR-017 + Doctrine Lock E default — the calling pack's invocation is refused if the hook times out / raises / returns malformed result / explicitly refuses / payload exceeds the unscannable budget. Any `fail_policy = "fail_open"` declaration is REFUSED at authoring time with closed-enum `hook_fail_policy_invalid` (failure_mode `fail_open_without_exception`). Runtime admission independently refuses `fail_open` on `conversation_input` and `conversation_output`, including callers that bypass authoring validation; conversation screening therefore has no fail-open carve-out. The dormant DLP-only `fail_open_exception` runtime shape remains reserved for a separately authorized follow-up and does NOT live on `[data_governance]`. |
 
 Cross-checks the validator runs:
 
@@ -247,7 +247,7 @@ The full closed-enum refusal taxonomy emitted by `cli/validators/hooks.py`:
 For the runtime side of the contract — what happens when a referenced
 hook_id can't be resolved at invocation time, when a hook times out,
 when `_invoke()` raises — see
-`docs/operator-runbooks/hook-pack-failure-policy.md` (the 5 closed-enum
+`docs/operator-runbooks/hook-pack-failure-policy.md` (the 6 closed-enum
 dispatcher failure modes + their on-call remediations).
 
 ---

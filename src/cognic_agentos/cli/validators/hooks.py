@@ -59,7 +59,7 @@ reference build-time check):
       * ``not_in_closed_enum``
       * ``not_a_string``
       * ``phase_class_mismatch`` — ``input_*`` paired with
-        ``dlp_post`` or ``output_*`` paired with ``dlp_pre``
+        an output phase or ``output_*`` paired with an input phase
   - ``hook_timeout_invalid`` — ``timeout_seconds`` issues.
     ``payload.failure_mode``:
       * ``not_a_positive_number``
@@ -91,6 +91,7 @@ from typing import Any, Final, cast, get_args
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli._governance_vocab import (
     HOOK_ORDERING_CLASS_PHASE,
+    HOOK_ORDERING_CLASS_PHASES,
     HookFailPolicy,
     HookOrderingClass,
     HookPhase,
@@ -318,7 +319,7 @@ def _validate_phase_field(
                 reason="hook_phase_invalid",
                 message=(
                     f"{block_path}.declarations[{declaration_index}].phase = "
-                    f"{value!r} is not a valid Wave-1 phase. Allowed values: "
+                    f"{value!r} is not a valid hook phase. Allowed values: "
                     f"{sorted(get_args(HookPhase))!r}."
                 ),
                 payload={
@@ -367,7 +368,7 @@ def _validate_ordering_class_field(
                 reason="hook_ordering_class_invalid",
                 message=(
                     f"{block_path}.declarations[{declaration_index}]."
-                    f"ordering_class = {value!r} is not a valid Wave-1 "
+                    f"ordering_class = {value!r} is not a valid "
                     "ordering class. Allowed values: "
                     f"{sorted(get_args(HookOrderingClass))!r}."
                 ),
@@ -380,15 +381,22 @@ def _validate_ordering_class_field(
                 },
             )
         ]
-    # Phase-class mismatch check: input_* classes pair with dlp_pre,
-    # output_* with dlp_post. Only fires when phase is itself valid
-    # (otherwise hook_phase_invalid already covered it).
+    # Phase-class mismatch check: input_* classes pair with input
+    # phases and output_* classes pair with output phases. Only fires
+    # when phase is itself valid (otherwise hook_phase_invalid already
+    # covered it).
     if isinstance(phase_value, str) and phase_value in get_args(HookPhase):
         # ``value`` was just confirmed in the HookOrderingClass enum;
         # cast lets mypy narrow the dict-key lookup against the
         # closed-Literal-keyed map.
-        expected_phase = HOOK_ORDERING_CLASS_PHASE.get(cast(HookOrderingClass, value))
-        if expected_phase is not None and expected_phase != phase_value:
+        ordering_class = cast(HookOrderingClass, value)
+        allowed_phases = HOOK_ORDERING_CLASS_PHASES.get(ordering_class)
+        if allowed_phases is not None and phase_value not in allowed_phases:
+            canonical_phase = HOOK_ORDERING_CLASS_PHASE[ordering_class]
+            ordered_allowed_phases = [
+                canonical_phase,
+                *sorted(allowed_phases - {canonical_phase}),
+            ]
             return [
                 ValidatorFinding(
                     severity="refusal",
@@ -397,9 +405,9 @@ def _validate_ordering_class_field(
                         f"{block_path}.declarations[{declaration_index}] "
                         f"declares phase={phase_value!r} + ordering_class="
                         f"{value!r}, but ordering_class {value!r} pairs with "
-                        f"phase {expected_phase!r}. ``input_*`` classes pair "
-                        "with ``dlp_pre``; ``output_*`` classes pair with "
-                        "``dlp_post``."
+                        f"phases {ordered_allowed_phases!r}. ``input_*`` "
+                        "classes pair with input phases; ``output_*`` "
+                        "classes pair with output phases."
                     ),
                     payload={
                         "block_path": block_path,
@@ -408,7 +416,10 @@ def _validate_ordering_class_field(
                         "failure_mode": "phase_class_mismatch",
                         "declared_phase": phase_value,
                         "declared_ordering_class": value,
-                        "expected_phase_for_class": expected_phase,
+                        # Retained for backward compatibility with existing
+                        # finding consumers; it is the canonical DLP phase.
+                        "expected_phase_for_class": canonical_phase,
+                        "allowed_phases_for_class": ordered_allowed_phases,
                     },
                 )
             ]

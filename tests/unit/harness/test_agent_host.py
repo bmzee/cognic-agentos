@@ -14,14 +14,20 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
+import cognic_agentos.harness.agent_host as agent_host
+from cognic_agentos.cli.validators.data_governance import (
+    _DATA_GOVERNANCE_LOCATIONS,
+)
 from cognic_agentos.core.agent._types import LoadedAgentRecord
-from cognic_agentos.harness import agent_host
 from cognic_agentos.protocol.agent_manifest import AgentManifestNotFound
-from cognic_agentos.protocol.mcp_manifest import PackManifestNotFoundError
+from cognic_agentos.protocol.mcp_manifest import (
+    PackManifestMalformedError,
+    PackManifestNotFoundError,
+)
 
 _VALID_AGENT_MD = """---
 name: schema-advisor
@@ -69,13 +75,22 @@ def _agent_manifest(
             "requested_tools": ["cognic-tool-oracle-schema/describe_table"],
             "max_steps": 8,
         }
-    manifest: dict[str, Any] = {}
+    manifest: dict[str, Any] = {
+        "pack": {
+            "pack_id": "cognic-agent-advisor",
+            "kind": "agent",
+        }
+    }
     if legacy:
         manifest["tool"] = {"cognic": {"agent": block}}
     else:
         manifest["agent"] = block
     if tier is not None:
         manifest["risk_tier"] = {"tier": tier}
+    manifest["data_governance"] = {
+        "data_classes": ["internal"],
+        "purpose": "operational_telemetry",
+    }
     return manifest
 
 
@@ -113,6 +128,73 @@ def _build(reg: _Registry) -> dict[str, LoadedAgentRecord]:
 
 
 # ============================ happy path =====================================
+def test_build_tool_capability_classes_fail_closed_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifests: dict[str, Any] = {
+        "missing": PackManifestNotFoundError("missing"),
+        "malformed": PackManifestMalformedError("malformed"),
+        "not-a-list": {"tool": {"cognic": {"tools": "invalid"}}},
+        "mixed": {
+            "tool": {
+                "cognic": {
+                    "tools": [
+                        "not-a-table",
+                        {"name": "", "capability_class": "action"},
+                        {"name": "no-class"},
+                        {"name": "execute", "capability_class": "action"},
+                    ]
+                }
+            }
+        },
+    }
+
+    def _extract(*, distribution_name: str, package_name: str) -> dict[str, Any]:
+        del package_name
+        result = manifests[distribution_name]
+        if isinstance(result, Exception):
+            raise result
+        return cast(dict[str, Any], result)
+
+    monkeypatch.setattr(agent_host, "extract_pack_manifest", _extract)
+
+    assert agent_host.build_tool_capability_classes(
+        _Registry([_Cand(name) for name in manifests])
+    ) == {"mixed/execute": "action"}
+
+
+def test_manifest_shape_helpers_cover_fail_closed_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (
+        agent_host._risk_tier(
+            {
+                "risk_tier": {"tier": " "},
+                "tool": {"cognic": {"runtime": {"risk_tier": "read_only"}}},
+            }
+        )
+        == "read_only"
+    )
+    assert agent_host._requested_skills({"requested_skills": [""]}) is None
+    assert agent_host._requested_tools({"requested_tools": "bad"}) is None
+    assert agent_host._requested_tools({"requested_tools": [7]}) is None
+
+    metadata_module = cast(Any, agent_host).md
+
+    def _missing_distribution(_name: str) -> Any:
+        raise metadata_module.PackageNotFoundError
+
+    monkeypatch.setattr(metadata_module, "distribution", _missing_distribution)
+    assert agent_host._distribution_version("not-installed") is None
+
+
+def test_governance_projection_legacy_pack_id_and_absent_declaration() -> None:
+    assert agent_host._agent_governance_projection(
+        {"tool": {"cognic": {"pack": {"pack_id": "legacy-agent"}}}},
+        distribution_name="legacy-agent",
+    ) == ("legacy-agent", (), "")
+
+
 def test_build_records_yields_valid_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch(
         monkeypatch,
@@ -133,6 +215,120 @@ def test_build_records_yields_valid_agent(monkeypatch: pytest.MonkeyPatch) -> No
     assert rec.pack_version == "0.1.0"
     assert rec.signed_artefact_digest == "sha256:" + "ab" * 32
     assert rec.registered is True
+    assert rec.pack_id == "cognic-agent-advisor"
+    assert rec.manifest_data_classes == ("internal",)
+    assert rec.manifest_purpose == "operational_telemetry"
+
+
+def test_build_records_projects_legacy_governance_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _agent_manifest()
+    governance = manifest.pop("data_governance")
+    manifest.setdefault("tool", {}).setdefault("cognic", {})["data_governance"] = governance
+    _patch(
+        monkeypatch,
+        manifests={"cognic-agent-advisor": manifest},
+        agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
+    )
+
+    record = _build(_Registry([_Cand("cognic-agent-advisor")]))["schema-advisor"]
+
+    assert record.manifest_data_classes == ("internal",)
+    assert record.manifest_purpose == "operational_telemetry"
+
+
+def test_agent_host_governance_locations_match_admission_validator() -> None:
+    assert agent_host._AGENT_DATA_GOVERNANCE_LOCATIONS == _DATA_GOVERNANCE_LOCATIONS
+
+
+def test_build_records_unions_consistent_dual_governance_locations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _agent_manifest()
+    manifest.setdefault("tool", {}).setdefault("cognic", {})["data_governance"] = {
+        "data_classes": ["customer_pii"],
+        "purpose": "operational_telemetry",
+    }
+    _patch(
+        monkeypatch,
+        manifests={"cognic-agent-advisor": manifest},
+        agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
+    )
+
+    record = _build(_Registry([_Cand("cognic-agent-advisor")]))["schema-advisor"]
+
+    assert record.manifest_data_classes == ("customer_pii", "internal")
+
+
+def test_build_records_warn_skips_ambiguous_dual_governance_purpose(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    manifest = _agent_manifest()
+    manifest.setdefault("tool", {}).setdefault("cognic", {})["data_governance"] = {
+        "data_classes": ["internal"],
+        "purpose": "customer_support",
+    }
+    _patch(
+        monkeypatch,
+        manifests={"cognic-agent-advisor": manifest},
+        agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
+    )
+
+    with caplog.at_level("WARNING"):
+        records = _build(_Registry([_Cand("cognic-agent-advisor")]))
+
+    assert records == {}
+    assert [record.message for record in caplog.records] == ["agent.data_governance_malformed"]
+
+
+def test_build_records_uses_admission_whitespace_and_duplicate_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _agent_manifest()
+    manifest["data_governance"] = {
+        "data_classes": [" internal ", "internal"],
+        "purpose": " operational_telemetry ",
+    }
+    _patch(
+        monkeypatch,
+        manifests={"cognic-agent-advisor": manifest},
+        agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
+    )
+
+    record = _build(_Registry([_Cand("cognic-agent-advisor")]))["schema-advisor"]
+
+    assert record.manifest_data_classes == ("internal",)
+    assert record.manifest_purpose == "operational_telemetry"
+
+
+@pytest.mark.parametrize(
+    "governance",
+    [
+        "not-a-table",
+        {"data_classes": [], "purpose": "operational_telemetry"},
+        {"data_classes": ["unknown"], "purpose": "operational_telemetry"},
+        {"data_classes": ["internal"], "purpose": "unknown"},
+    ],
+)
+def test_explicit_malformed_agent_governance_warn_skips(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    governance: Any,
+) -> None:
+    manifest = _agent_manifest()
+    manifest["data_governance"] = governance
+    _patch(
+        monkeypatch,
+        manifests={"cognic-agent-advisor": manifest},
+        agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        records = _build(_Registry([_Cand("cognic-agent-advisor")]))
+
+    assert records == {}
+    assert "agent.data_governance_malformed" in caplog.text
 
 
 def test_legacy_block_path_honored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,8 +663,6 @@ async def _build_loop(
     mcp_host: Any = "MCP_HOST",
     settings: Any = "DEFAULT",
 ) -> Any:
-    from typing import cast
-
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     if runtime == "DEFAULT":
@@ -477,7 +671,7 @@ async def _build_loop(
         registry = _Registry([])
     if settings == "DEFAULT":
         settings = _LoopSettings()
-    return await agent_host.build_agent_loop(
+    return await agent_host.build_agent_loop_with_records(
         runtime=runtime,
         settings=settings,
         registry=registry,
@@ -486,13 +680,28 @@ async def _build_loop(
     )
 
 
+async def test_build_agent_loop_preserves_three_value_return_contract() -> None:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    result = await agent_host.build_agent_loop(
+        runtime=_StubRuntime(),
+        settings=_LoopSettings(),
+        registry=_Registry([]),
+        mcp_host="MCP_HOST",
+        engine=cast(AsyncEngine, object()),
+    )
+
+    assert len(result) == 3
+
+
 async def test_build_agent_loop_all_deps_builds_loop_no_warnings() -> None:
     from cognic_agentos.core.agent.loop import AgentLoop
 
-    loop, warnings, hosted = await _build_loop()
+    loop, warnings, hosted, records = await _build_loop()
     assert isinstance(loop, AgentLoop)
     assert warnings == []
     assert hosted == []  # empty registry — no hosted rows
+    assert dict(records) == {}
 
 
 async def test_build_agent_loop_threads_signed_tool_capability_classes(
@@ -511,7 +720,7 @@ async def test_build_agent_loop_threads_signed_tool_capability_classes(
     monkeypatch.setattr(agent_host, "build_tool_capability_classes", _build)
     registry = _Registry([])
 
-    loop, warnings, _hosted = await _build_loop(registry=registry)
+    loop, warnings, _hosted, _records = await _build_loop(registry=registry)
 
     assert loop is not None
     assert warnings == []
@@ -522,35 +731,42 @@ async def test_build_agent_loop_threads_signed_tool_capability_classes(
 
 
 async def test_build_agent_loop_some_missing_returns_none_plus_single_warning() -> None:
-    loop, warnings, hosted = await _build_loop(mcp_host=None)
+    loop, warnings, hosted, records = await _build_loop(mcp_host=None)
     assert loop is None
     assert len(warnings) == 1
     assert "mcp_host" in warnings[0]
     assert hosted == []  # rows ride ONLY the built path
+    assert dict(records) == {}
 
 
 async def test_build_agent_loop_multiple_missing_still_single_warning_naming_all() -> None:
     runtime = _StubRuntime(memory_api_factory=None)
-    loop, warnings, hosted = await _build_loop(runtime=runtime, mcp_host=None)
+    loop, warnings, hosted, records = await _build_loop(runtime=runtime, mcp_host=None)
     assert loop is None
     assert len(warnings) == 1
     assert "mcp_host" in warnings[0]
     assert "memory_api_factory" in warnings[0]
     assert hosted == []
+    assert dict(records) == {}
 
 
 async def test_build_agent_loop_zero_deps_stays_quiet() -> None:
     runtime = _StubRuntime(llm_gateway=None, memory_api_factory=None)
-    loop, warnings, hosted = await _build_loop(runtime=runtime, registry=None, mcp_host=None)
+    loop, warnings, hosted, records = await _build_loop(
+        runtime=runtime, registry=None, mcp_host=None
+    )
     assert loop is None
     assert warnings == []
     assert hosted == []
+    assert dict(records) == {}
 
 
 async def test_build_agent_loop_plain_path_signing_key_read_bytes(tmp_path: Any) -> None:
     key = tmp_path / "qc-signing.pem"
     key.write_bytes(b"PEM-BYTES")
-    loop, warnings, _hosted = await _build_loop(settings=_LoopSettings(signing_key_path=str(key)))
+    loop, warnings, _hosted, _records = await _build_loop(
+        settings=_LoopSettings(signing_key_path=str(key))
+    )
     assert loop is not None
     assert warnings == []
     # the dispatcher received the key bytes (private-attr probe — composition pin).
@@ -562,7 +778,7 @@ async def test_build_agent_loop_vault_uri_ships_warn_plus_none_key() -> None:
     A13 — the builder warns explicitly and passes None (stamped-tool
     dispatches then fail loud at mint per the dispatcher's deployment-error
     contract)."""
-    loop, warnings, _hosted = await _build_loop(
+    loop, warnings, _hosted, _records = await _build_loop(
         settings=_LoopSettings(signing_key_path="vault://secret/agent-qc-key")
     )
     assert loop is not None
@@ -589,7 +805,7 @@ async def test_build_agent_loop_returns_hosted_agent_rows(
         agent_mds={"cognic-agent-advisor": _VALID_AGENT_MD},
     )
     reg = _Registry([_Cand("cognic-agent-advisor")])
-    loop, warnings, hosted = await _build_loop(registry=reg)
+    loop, warnings, hosted, records = await _build_loop(registry=reg)
     assert loop is not None
     assert warnings == []
     assert [row["agent_id"] for row in hosted] == ["schema-advisor"]
@@ -598,6 +814,9 @@ async def test_build_agent_loop_returns_hosted_agent_rows(
         agent_host._build_agent_records(registry=reg, settings=_LoopSettings())
     )
     assert hosted == expected
+    assert set(records) == {"schema-advisor"}
+    with pytest.raises(TypeError):
+        cast(Any, records)["replacement"] = records["schema-advisor"]
 
 
 def test_instruction_skill_body_reader_arms() -> None:
@@ -748,6 +967,85 @@ async def test_mcp_action_schema_provider_omits_duplicate_descriptors() -> None:
         )
         == {}
     )
+
+
+async def test_mcp_action_schema_provider_rejects_bad_refs_and_bad_schemas() -> None:
+    class _Descriptor:
+        name = "fallback"
+        inputSchema = None
+        input_schema: ClassVar[dict[str, str]] = {"type": "object"}
+
+    class _StubHost:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_tools(self, **_kwargs: Any) -> list[Any]:
+            self.calls += 1
+            return [
+                _Descriptor(),
+                {"name": "bad-schema", "inputSchema": "not-a-table"},
+            ]
+
+    host = _StubHost()
+    provider = agent_host._MCPHostActionToolSchemaProvider(host)
+
+    assert (
+        await provider.load_action_schemas(
+            tenant_id="tenant-a",
+            tool_refs=frozenset({"missing-separator"}),
+        )
+        == {}
+    )
+    assert host.calls == 0
+    assert await provider.load_action_schemas(
+        tenant_id="tenant-a",
+        tool_refs=frozenset({"srv/fallback", "srv/bad-schema"}),
+    ) == {"srv/fallback": {"type": "object"}}
+
+
+@pytest.mark.parametrize(
+    ("reason", "payload", "expected_exception"),
+    [
+        ("mcp_capability_refused", {}, "passthrough"),
+        ("tool_approval_pending", {"flow": "require_assigned"}, "missing_id"),
+        (
+            "tool_approval_pending",
+            {"approval_request_id": str(uuid.uuid4()), "flow": 7},
+            "malformed_flow",
+        ),
+    ],
+)
+async def test_mcp_host_agent_tool_proxy_refusal_shapes_fail_closed(
+    reason: str,
+    payload: dict[str, Any],
+    expected_exception: str,
+) -> None:
+    from cognic_agentos.protocol.mcp_host import (
+        MCPToolInvocationRefused,
+        ToolInvocationRefusalReason,
+    )
+
+    class _StubHost:
+        async def call_tool(self, **_kwargs: Any) -> Any:
+            raise MCPToolInvocationRefused(
+                cast(ToolInvocationRefusalReason, reason),
+                **payload,
+            )
+
+    proxy = agent_host._MCPHostAgentToolProxy(_StubHost())
+    expected_type: type[Exception] = (
+        MCPToolInvocationRefused if expected_exception == "passthrough" else RuntimeError
+    )
+    with pytest.raises(expected_type):
+        await proxy.call_tool(
+            server_id="probe",
+            tool_name="probe_write",
+            arguments={},
+            request_id="agent-tool-refused",
+            tenant_id="tenant-a",
+            originator_subject="analyst",
+            approval_request_id=None,
+        )
 
 
 async def test_mcp_host_agent_tool_proxy_translates_pending_approval() -> None:

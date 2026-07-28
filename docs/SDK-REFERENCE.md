@@ -371,11 +371,14 @@ class RedactPIIHook(Hook):
     phase: ClassVar[HookPhase] = "dlp_pre"
 ```
 
-`hook_id` matches the manifest's `[hooks].declarations[].hook_id`
-+ the calling pack's `[data_governance].dlp_pre_hooks` /
-`dlp_post_hooks` reference. `phase` is the closed-enum from
-`cognic_agentos.cli._governance_vocab.HookPhase` (Wave-1:
-`"dlp_pre"` / `"dlp_post"`).
+`hook_id` matches the manifest's `[hooks].declarations[].hook_id`.
+For the original DLP phases it may also be referenced by a calling
+pack's `[data_governance].dlp_pre_hooks` / `dlp_post_hooks` list.
+`phase` is the additive closed-enum from
+`cognic_agentos.cli._governance_vocab.HookPhase`:
+`"dlp_pre"` / `"dlp_post"` / `"conversation_input"` /
+`"conversation_output"`. Conversation phases are selected by the
+kernel turn boundary rather than a calling pack's DLP reference list.
 
 ### 8.2 Required override
 
@@ -415,7 +418,7 @@ snapshots the hook may key its decision off:
 | Field | Type | Notes |
 |---|---|---|
 | `hook_id` | `str` | The `hook_id` this invocation targets. |
-| `phase` | `HookPhase` | Closed-enum (`"dlp_pre"` / `"dlp_post"`). |
+| `phase` | `HookPhase` | Closed-enum (`"dlp_pre"` / `"dlp_post"` / `"conversation_input"` / `"conversation_output"`). |
 | `pack_id` | `str` | The CALLING pack's `[pack].pack_id` (NOT the hook pack's). |
 | `tenant_id` | `str` | Per-tenant binding for tenant-specific policy. |
 | `request_id` | `str` | Stable request identifier for audit-chain correlation. |
@@ -423,6 +426,11 @@ snapshots the hook may key its decision off:
 | `parent_trace_id` | `str \| None` | Parent-trace identifier for cross-agent chain linkage (None at top of chain). |
 | `manifest_data_classes` | `tuple[str, ...]` | The CALLING pack's declared `[data_governance].data_classes`, snapshot at admission time. |
 | `manifest_purpose` | `str` | The CALLING pack's declared `[data_governance].purpose`. |
+| `conversation_id` | `str \| None` | Conversation correlation for the two conversation phases; absent on DLP-only calls. |
+| `conversation_turn_seq` | `int \| None` | Kernel-selected turn sequence for the two conversation phases; absent on DLP-only calls. |
+| `output_origin` | `"agent_run" \| "approval_delivery" \| None` | Additive discriminator for `conversation_output`; absent on every other phase. |
+| `agent_run_id` | `str \| None` | Present only when `output_origin="agent_run"` and shaped `agent-run-*`; this is the real completed/refused/failed model-run identity. |
+| `approval_delivery_id` | `str \| None` | Present only when `output_origin="approval_delivery"` and shaped `approval-delivery-<canonical UUID>`. It is deliberately disjoint from the real agent-run namespace. The released schema-v1 transcript may still store its legacy `system-<approval UUID>` placeholder; that storage value is not placed in this hook-correlation field. |
 
 Critical invariant: `HookContext` does NOT carry the payload bytes.
 The dispatcher passes payload separately to `_invoke()` so the
@@ -430,6 +438,56 @@ context is safely loggable. The AST-walk regression at
 `tests/architecture/test_hook_payload_never_logged.py` (Sprint-7A2
 T7) pins the payload-never-logged invariant; hooks MUST NOT log /
 store / exfiltrate the `payload` argument.
+
+#### 8.4.1 Conversation payload schema v1
+
+Conversation phases receive canonical UTF-8 JSON, not an opaque
+application payload. The runtime refuses non-UTF-8 bytes, duplicate
+properties at any nesting depth, non-standard numeric constants,
+non-canonical JSON encodings, extra/missing keys, and changes to
+kernel-owned context.
+
+Both envelopes have these exact common fields:
+
+| Field | Value |
+|---|---|
+| `schema_version` | Integer `1` (Boolean is invalid). |
+| `phase` | Exact phase for the invocation. |
+| `tenant_id` | Kernel-selected tenant ID. |
+| `conversation_id` | Canonical lowercase UUID string. |
+| `turn_seq` | Positive kernel-selected physical turn sequence (Boolean is invalid). |
+| `declared_data_classes` | Sorted, unique, non-empty strings projected from the admitted calling pack. |
+
+`conversation_input` adds exactly one field:
+`messages`, an array of exact `{"role", "content"}` objects containing
+the bounded replay followed by the current user message.
+
+`conversation_output` adds exactly one field: `answer`, a string.
+
+F-S2a conversation phases are PASS/REFUSE-only. If a
+`conversation_input` or `conversation_output` hook returns `redact` or
+`mask`, the dispatcher fails closed with
+`hook_conversation_transformation_unsupported`, evidences the attempted
+envelope digest without plaintext, retains the original value, and the
+turn refuses. The existing `dlp_pre` / `dlp_post` transformation
+contract is unchanged. Reusing an input-redaction or output-masking
+ordering class on a conversation phase orders the hook; it does not
+authorize a transformation.
+
+For model-authored exchange output, conversation-output decision evidence
+carries both the envelope digests
+(`hook_input_digest` / `hook_output_digest`) and the screened scalar
+digests (`hook_input_value_sha256` / `hook_output_value_sha256`).
+PASS/REFUSE-only screening keeps the admitted value byte-identical; no
+F-S2a claim depends on a transformed examiner join. Conversation
+transformations remain an F-S3 entry condition and land only together
+with hook-aware examiner projection plus end-to-end before/after digest
+continuity. No plaintext enters these evidence fields.
+
+Conversation-output evidence also carries the disjoint output identity:
+model output uses `output_origin="agent_run"` with `agent_run_id`, while
+approval delivery uses `output_origin="approval_delivery"` with
+`approval_delivery_id`. Exactly one identity arm is present.
 
 ### 8.5 `HookResult`
 
@@ -439,8 +497,8 @@ Frozen + slotted dataclass returned to the dispatcher.
 |---|---|---|
 | `decision` | `HookDecision` | Closed-enum: `"pass"` / `"redact"` / `"mask"` / `"refuse"`. |
 | `redacted_payload` | `bytes \| None` | For `redact` / `mask`: the modified payload bytes. MUST be None for `pass` / `refuse`. |
-| `policy_reason` | `str \| None` | For `refuse`: closed-enum policy reason from the calling pack's vocabulary; propagates to the `hook_policy_refused` audit row + caller refusal envelope. MUST be None for `pass` / `redact` / `mask`; MUST be a non-empty string for `refuse`. |
-| `audit_metadata` | `dict[str, Any]` | Token-free metadata the dispatcher attaches to the audit row. Hooks MUST NOT include payload bytes here. |
+| `policy_reason` | `str \| None` | For `refuse`: non-empty hook-authored reason. DLP callers retain the existing propagation contract. Conversation phases collapse every refusal to the kernel-owned `conversation_hook_refused` wire value and suppress this hook-authored string from conversation evidence. MUST be None for `pass` / `redact` / `mask`. |
+| `audit_metadata` | `dict[str, Any]` | Reserved token-free SDK metadata. The current runtime dispatcher does not emit or otherwise consume it; hooks MUST NOT rely on persistence and MUST NOT include payload bytes. |
 
 Decision-↔-fields invariant enforced by `Hook.invoke()` AFTER
 `_invoke` returns; violations raise `HookResultShapeError` (subclass
@@ -463,7 +521,7 @@ hierarchy) route to the closed-enum `hook_exception` dispatcher
 failure mode; the dispatcher catches them at the single try/except
 boundary and emits the failure-mode audit row. See
 `docs/operator-runbooks/hook-pack-failure-policy.md` for the full
-5-failure-mode operator runbook.
+6-failure-mode operator runbook.
 
 ### 8.7 What's intentionally NOT here
 
@@ -472,10 +530,13 @@ boundary and emits the failure-mode audit row. See
   invoke other hooks / tools / skills via the SDK. The dispatcher
   enforces ordering + concurrency via the closed-enum
   `ordering_class` taxonomy declared in the manifest.
-- **No automatic schema validation.** Hooks operate on raw
-  `payload: bytes`; pack authors implement payload-shape parsing
-  inline. The dispatcher's payload budget (per-pack + per-hook
-  ceiling) is the only payload-side gate the SDK enforces.
+- **No base-SDK schema validation for opaque DLP payloads.** The public
+  `Hook` API still operates on raw `payload: bytes`; pack authors parse
+  pack-specific DLP shapes inline. Conversation callers are deliberately
+  stricter: the kernel validates the canonical schema-v1 envelope before
+  dispatch, requires a passing result to retain it byte-for-byte, and the
+  dispatcher refuses conversation-phase transformations while enforcing
+  payload bounds for every phase.
 
 ---
 

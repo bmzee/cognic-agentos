@@ -703,8 +703,14 @@ class TestPendingApprovalTerminal:
             db,
             responses=[
                 _resp(
-                    "model-authored proposal must not become the confirmation",
-                    tool_calls=(_tc("other_tool", amount=10),),
+                    "model-content-sentinel must not become the confirmation",
+                    tool_calls=(
+                        _tc(
+                            "other_tool",
+                            amount=10,
+                            memo="tool-argument-sentinel",
+                        ),
+                    ),
                     usage={"prompt_tokens": 7, "completion_tokens": 3},
                 ),
                 _resp("a second completion would violate the pending terminal"),
@@ -713,7 +719,10 @@ class TestPendingApprovalTerminal:
             action_tool_schemas={
                 _OTHER_REF: {
                     "type": "object",
-                    "properties": {"amount": {"type": "integer"}},
+                    "properties": {
+                        "amount": {"type": "integer"},
+                        "memo": {"type": "string"},
+                    },
                     "required": ["amount"],
                 }
             },
@@ -737,6 +746,12 @@ class TestPendingApprovalTerminal:
             approval_request_id=approval_id,
         )
         assert len(h.gateway.calls) == 1
+        # R19 exemption property: this exact terminal string is built only
+        # from kernel constants + the kernel-minted approval id prefix. Neither
+        # model response content nor tool arguments can enter it.
+        assert result.answer == f"Requested approval — #{approval_id[:4]}, pending."
+        assert "model-content-sentinel" not in result.answer
+        assert "tool-argument-sentinel" not in result.answer
         rows = await _rows(db)
         assert [row.event_type for row in rows] == [
             "agent.run.started",

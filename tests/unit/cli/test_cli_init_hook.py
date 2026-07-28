@@ -254,6 +254,22 @@ def test_scaffolded_pack_carries_author_fill_markers(tmp_path: Path) -> None:
     assert "AUTHOR-FILL:" in hook_source_text
 
 
+def test_scaffold_documents_all_hook_phases(tmp_path: Path) -> None:
+    pack_root = _scaffold_hook("example", tmp_path)
+    manifest_text = (pack_root / "cognic-pack-manifest.toml").read_text()
+    hook_source_text = (pack_root / "src" / "cognic_hook_example" / "hook.py").read_text()
+    smoke_test_text = (pack_root / "tests" / "test_hook.py").read_text()
+    for phase in (
+        "dlp_pre",
+        "dlp_post",
+        "conversation_input",
+        "conversation_output",
+    ):
+        assert phase in manifest_text
+        assert phase in hook_source_text
+        assert phase in smoke_test_text
+
+
 # ---------------------------------------------------------------------------
 # (f) Scaffolded subclass — SDK contract regression
 # ---------------------------------------------------------------------------

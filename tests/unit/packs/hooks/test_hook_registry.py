@@ -19,7 +19,7 @@ Pins the public ``HookRegistry`` admission contract per Doctrine Lock D:
   refuses (``ValueError``) on empty ``hook_id``, non-positive timeout,
   timeout above the Settings-derived ceiling, ``phase_class_mismatch``
   (``ordering_class`` doesn't belong to ``phase`` per
-  ``HOOK_ORDERING_CLASS_PHASE``), and ``fail_open`` policy without
+  ``HOOK_ORDERING_CLASS_PHASES``), and ``fail_open`` policy without
   ``fail_open_exception``. ``VerifiedHookPack.__post_init__`` refuses on
   duplicate ``hook_id`` within a single pack's declarations.
 * **Deterministic phase order.** ``get_phase_hooks(phase)`` returns a
@@ -47,6 +47,7 @@ import pytest
 
 from cognic_agentos.cli._governance_vocab import (
     HOOK_ORDERING_CLASS_PHASE,
+    HOOK_ORDERING_CLASS_PHASES,
     HOOK_ORDERING_RANK,
 )
 from cognic_agentos.packs.hooks.registry import (
@@ -143,6 +144,62 @@ class TestHookDeclarationConstruction:
         # ``HookOrderingClass`` belongs to exactly one ``HookPhase``).
         with pytest.raises(ValueError, match=r"phase.*ordering_class|class.*phase"):
             _make_declaration(phase="dlp_post", ordering_class="input_redaction")
+
+    @pytest.mark.parametrize(
+        ("phase", "ordering_class"),
+        [
+            ("conversation_input", "input_validation"),
+            ("conversation_input", "input_normalization"),
+            ("conversation_output", "output_validation"),
+            ("conversation_output", "output_masking"),
+        ],
+    )
+    def test_conversation_phases_reuse_existing_ordering_classes(
+        self,
+        phase: str,
+        ordering_class: str,
+    ) -> None:
+        declaration = _make_declaration(
+            phase=phase,
+            ordering_class=ordering_class,
+        )
+        assert declaration.phase == phase
+        assert declaration.ordering_class == ordering_class
+
+    @pytest.mark.parametrize(
+        ("phase", "ordering_class"),
+        [
+            ("conversation_input", "output_validation"),
+            ("conversation_output", "input_validation"),
+        ],
+    )
+    def test_conversation_phases_refuse_cross_direction_ordering_classes(
+        self,
+        phase: str,
+        ordering_class: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=r"phase.*ordering_class|class.*phase"):
+            _make_declaration(phase=phase, ordering_class=ordering_class)
+
+    @pytest.mark.parametrize(
+        ("phase", "ordering_class"),
+        [
+            ("conversation_input", "input_validation"),
+            ("conversation_output", "output_validation"),
+        ],
+    )
+    def test_conversation_phases_refuse_fail_open_at_runtime_admission(
+        self,
+        phase: str,
+        ordering_class: str,
+    ) -> None:
+        with pytest.raises(ValueError, match="require fail_policy='fail_closed'"):
+            _make_declaration(
+                phase=phase,
+                ordering_class=ordering_class,
+                fail_policy="fail_open",
+                fail_open_exception="RecoverableHookError",
+            )
 
     def test_fail_open_without_exception_refuses(self) -> None:
         # ``fail_open`` policy is opt-in and requires the manifest to
@@ -657,15 +714,17 @@ class TestHookRegistrySnapshotImmutability:
 
 
 class TestHookRegistryRespectsClosedEnumDoctrine:
-    """The registry consumes ``HOOK_ORDERING_CLASS_PHASE`` from
+    """The registry consumes ``HOOK_ORDERING_CLASS_PHASES`` from
     ``cli/_governance_vocab.py``. Pin that the dual-source doctrine
     holds — the registry's phase/class-mismatch check uses the same
     map the validator uses."""
 
-    def test_every_ordering_class_has_a_unique_phase(self) -> None:
-        # Pinned for documentation: every HookOrderingClass belongs to
-        # exactly one phase. Adding a class shared between phases would
-        # break the registry's phase_class_mismatch check.
-        # Each class maps to one phase string (no list / set).
+    def test_legacy_phase_map_remains_singular(self) -> None:
+        # Backward compatibility: existing callers of the original
+        # map still receive the canonical DLP phase string.
         for cls, phase in HOOK_ORDERING_CLASS_PHASE.items():
             assert isinstance(phase, str), f"{cls} maps to non-string {phase!r}"
+
+    def test_registry_authority_maps_each_class_to_two_phases(self) -> None:
+        for cls, phases in HOOK_ORDERING_CLASS_PHASES.items():
+            assert len(phases) == 2, f"{cls} maps to unexpected phases {phases!r}"

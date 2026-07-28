@@ -3,11 +3,11 @@ implementations.
 
 Subclass + register under the ``cognic.hooks`` entry-point group in
 ``pyproject.toml``. The runtime hook dispatcher (Sprint-7A2 T8) consumes
-this contract; the build-time validator (Sprint-7A2 T6) cross-checks
-manifest declarations against subclass ``hook_id`` + ``phase``
-ClassVars. Per Doctrine Decision E: every commit touching this surface
-halts before commit (semver-stability concern, NOT critical-controls
-security gate).
+this contract. The build-time validator (Sprint-7A2 T6) cross-checks manifest
+hook IDs against pyproject entry-point keys; deferred subclass ``hook_id`` +
+``phase`` metadata is checked by the dispatcher at first invocation. Per
+Doctrine Decision E: every commit touching this surface halts before commit
+(semver-stability concern, NOT critical-controls security gate).
 
 Template-method pattern (mirrors ``Tool`` / ``Skill`` from Sprint-7A
 T2):
@@ -44,22 +44,23 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import uuid
 from typing import Any, ClassVar, Literal, final
 
 from cognic_agentos.cli._governance_vocab import HookPhase
 
-#: Closed-enum decision the hook returns to the dispatcher. Wave-1
-#: narrow per ADR-017:
+#: Closed-enum decision the hook returns to the dispatcher, shared by
+#: ADR-017 DLP and ADR-028 conversation phases:
 #:
 #:   - ``"pass"``: payload unchanged; dispatcher continues to the next
-#:     hook (or to pack code for the final ``dlp_pre`` hook /
-#:     to the caller for the final ``dlp_post`` hook).
+#:     hook (or to the governed caller after the final hook).
 #:   - ``"redact"``: payload was modified (PII redacted); dispatcher
 #:     replaces the in-flight payload with ``redacted_payload`` and
-#:     continues. Used by ``dlp_pre`` redaction hooks.
+#:     continues on ``dlp_pre``. An F-S2a ``conversation_input`` /
+#:     ``conversation_output`` use fails closed instead.
 #:   - ``"mask"``: payload was modified (account numbers / secrets
 #:     masked); dispatcher replaces the payload and continues. Used by
-#:     ``dlp_post`` masking hooks.
+#:     ``dlp_post`` hooks; conversation phases fail closed in F-S2a.
 #:   - ``"refuse"``: hook explicitly refuses the call; dispatcher
 #:     short-circuits the dispatch chain + the calling pack's
 #:     invocation is refused with the closed-enum
@@ -125,12 +126,13 @@ class HookContext:
     """
 
     hook_id: str
-    """The hook_id this invocation targets — matches the calling
-    pack's ``[data_governance].dlp_{pre,post}_hooks`` reference and
-    the hook pack's ``[hooks].declarations[].hook_id`` declaration."""
+    """The hook_id this invocation targets — matches the hook pack's
+    ``[hooks].declarations[].hook_id`` declaration. DLP phases additionally
+    resolve it from the calling pack's ``dlp_*_hooks`` reference; conversation
+    phases are selected phase-wide and have no calling-pack hook-id list."""
 
     phase: HookPhase
-    """Closed-enum hook phase (Wave-1: ``dlp_pre`` / ``dlp_post``).
+    """Closed-enum DLP or conversation input/output hook phase.
     Sourced from ``cognic_agentos.cli._governance_vocab.HookPhase``."""
 
     pack_id: str
@@ -165,6 +167,36 @@ class HookContext:
     """The CALLING pack's declared ``[data_governance].purpose``,
     snapshot at admission time."""
 
+    conversation_id: str | None = None
+    """Conversation UUID for conversation-phase evidence correlation.
+    ``None`` for DLP and other non-conversation callers."""
+
+    conversation_turn_seq: int | None = None
+    """Physical conversation turn sequence paired with ``conversation_id``."""
+
+    agent_run_id: str | None = None
+    """Model-execution correlation on conversation output.
+
+    Present only when ``output_origin == "agent_run"`` and required to use
+    the production ``agent-run-`` namespace. Approval delivery deliberately
+    uses :attr:`approval_delivery_id` instead.
+    """
+
+    output_origin: Literal["agent_run", "approval_delivery"] | None = None
+    """Discriminator for conversation-output evidence correlation.
+
+    ``None`` on conversation input and every non-conversation phase.
+    """
+
+    approval_delivery_id: str | None = None
+    """Approval-rendering correlation on conversation output.
+
+    Present only when ``output_origin == "approval_delivery"`` and shaped as
+    ``approval-delivery-<canonical UUID>``. It is never placed in
+    :attr:`agent_run_id`, so examiners cannot mistake a synthetic delivery
+    identity for an ``agent.run.*`` identity.
+    """
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class HookResult:
@@ -177,9 +209,9 @@ class HookResult:
         (the modified payload the dispatcher carries to the next
         hook / to pack code / to the caller).
       - ``"refuse"``: ``policy_reason`` MUST be a non-empty string
-        (closed-enum from the calling pack's policy vocabulary; the
-        dispatcher propagates it into the ``hook_policy_refused``
-        audit row + the refusal envelope returned to the caller).
+        authored by the hook. The dispatcher retains it in the caller result.
+        Conversation evidence deliberately suppresses the pack-controlled
+        string so screened content cannot be encoded into a governed row.
 
     The decision-↔-fields invariant is enforced by ``Hook.invoke()``
     AFTER ``_invoke`` returns; violations raise
@@ -188,10 +220,10 @@ class HookResult:
     refusal-surface catch).
 
     Frozen + slotted; ``audit_metadata`` is the only mutable
-    container (a regular dict so the hook can add token-free metadata
-    rows). The base class does NOT validate dict contents; the
-    dispatcher's audit emission path strips any keys that match the
-    payload-never-logged invariant (T8 closed-list).
+    container. It is reserved SDK metadata: the current runtime
+    dispatcher neither emits nor otherwise consumes it. Pack authors
+    must not rely on persistence and must never place payload bytes in
+    it.
     """
 
     decision: HookDecision
@@ -203,19 +235,21 @@ class HookResult:
     ``refuse``."""
 
     policy_reason: str | None
-    """For ``refuse`` decisions: closed-enum policy reason from the
-    calling pack's policy vocabulary; propagates to the
-    ``hook_policy_refused`` audit row + caller refusal envelope.
-    MUST be None for ``pass`` / ``redact`` / ``mask``; MUST be a
-    non-empty string for ``refuse``."""
+    """For ``refuse`` decisions: non-empty hook-authored reason retained in
+    the caller result. The conversation evidence path suppresses this
+    pack-controlled string. MUST be None for ``pass`` / ``redact`` / ``mask``;
+    MUST be a non-empty string for ``refuse``."""
 
     audit_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-    """Token-free metadata the hook wants the dispatcher to attach
-    to its audit row. Hooks MUST NOT include payload bytes here —
-    the dispatcher's emission path doesn't deeply scan the dict; the
-    pack-author convention + the AST-walk regression
+    """Reserved token-free metadata.
+
+    The current runtime dispatcher does not emit or otherwise consume
+    it. Hooks MUST NOT rely on persistence and MUST NOT include
+    payload bytes; the pack-author convention + the AST-walk
+    regression
     (``tests/architecture/test_hook_payload_never_logged.py``) carry
-    the invariant."""
+    the latter invariant.
+    """
 
 
 def _validate_hook_context(context: Any) -> None:
@@ -228,6 +262,76 @@ def _validate_hook_context(context: Any) -> None:
     if not isinstance(context, HookContext):
         raise HookContextError(
             f"HookContext argument is {type(context).__name__}, expected HookContext"
+        )
+    if context.phase in ("conversation_input", "conversation_output"):
+        try:
+            parsed_conversation_id = uuid.UUID(context.conversation_id or "")
+        except ValueError as exc:
+            raise HookContextError(
+                "conversation-phase HookContext requires a canonical conversation_id"
+            ) from exc
+        if str(parsed_conversation_id) != context.conversation_id:
+            raise HookContextError(
+                "conversation-phase HookContext requires a canonical conversation_id"
+            )
+        if (
+            isinstance(context.conversation_turn_seq, bool)
+            or not isinstance(context.conversation_turn_seq, int)
+            or context.conversation_turn_seq <= 0
+        ):
+            raise HookContextError(
+                "conversation-phase HookContext requires a positive conversation_turn_seq"
+            )
+        if context.phase == "conversation_input" and (
+            context.agent_run_id is not None
+            or context.output_origin is not None
+            or context.approval_delivery_id is not None
+        ):
+            raise HookContextError("conversation_input HookContext cannot carry output correlation")
+        if context.phase == "conversation_output":
+            if context.output_origin == "agent_run":
+                if (
+                    not isinstance(context.agent_run_id, str)
+                    or not context.agent_run_id.startswith("agent-run-")
+                    or context.agent_run_id == "agent-run-"
+                    or context.approval_delivery_id is not None
+                ):
+                    raise HookContextError(
+                        "agent_run output requires one agent-run-* identity and "
+                        "no approval_delivery_id"
+                    )
+            elif context.output_origin == "approval_delivery":
+                prefix = "approval-delivery-"
+                raw_id = context.approval_delivery_id
+                try:
+                    parsed_delivery_id = uuid.UUID(
+                        raw_id[len(prefix) :]
+                        if isinstance(raw_id, str) and raw_id.startswith(prefix)
+                        else ""
+                    )
+                except ValueError as exc:
+                    raise HookContextError(
+                        "approval_delivery output requires a canonical "
+                        "approval-delivery-<uuid> identity"
+                    ) from exc
+                if raw_id != prefix + str(parsed_delivery_id) or context.agent_run_id is not None:
+                    raise HookContextError(
+                        "approval_delivery output requires one canonical delivery "
+                        "identity and no agent_run_id"
+                    )
+            else:
+                raise HookContextError(
+                    "conversation_output HookContext requires a known output_origin"
+                )
+    elif (
+        context.conversation_id is not None
+        or context.conversation_turn_seq is not None
+        or context.agent_run_id is not None
+        or context.output_origin is not None
+        or context.approval_delivery_id is not None
+    ):
+        raise HookContextError(
+            "non-conversation HookContext cannot carry conversation correlation fields"
         )
 
 
@@ -249,6 +353,7 @@ def _validate_hook_result(result: Any) -> None:
 
       - non-``HookResult`` shape (e.g., the subclass returned a dict
         / None / a wrong dataclass).
+      - a decision outside the four-value :data:`HookDecision` vocabulary.
       - ``decision="pass"`` or ``"refuse"`` with ``redacted_payload``
         not None.
       - ``decision="redact"`` or ``"mask"`` with ``redacted_payload``
@@ -261,6 +366,10 @@ def _validate_hook_result(result: Any) -> None:
     if not isinstance(result, HookResult):
         raise HookResultShapeError(f"_invoke returned {type(result).__name__}, expected HookResult")
     decision = result.decision
+    if decision not in ("pass", "redact", "mask", "refuse"):
+        raise HookResultShapeError(
+            f"HookResult.decision={decision!r} is outside the closed HookDecision vocabulary"
+        )
     if decision in ("pass", "refuse") and result.redacted_payload is not None:
         raise HookResultShapeError(
             f"HookResult.decision={decision!r} requires redacted_payload=None; "
@@ -277,7 +386,7 @@ def _validate_hook_result(result: Any) -> None:
                 f"to be bytes; got {type(result.redacted_payload).__name__}"
             )
     if decision == "refuse":
-        if result.policy_reason is None or not result.policy_reason.strip():
+        if not isinstance(result.policy_reason, str) or not result.policy_reason.strip():
             raise HookResultShapeError(
                 'HookResult.decision="refuse" requires policy_reason to be a non-empty string'
             )
@@ -306,11 +415,11 @@ class Hook(abc.ABC):
 
     hook_id: ClassVar[str]
     """Stable identifier matching the manifest's
-    ``[hooks].declarations[].hook_id`` + the calling pack's
-    ``[data_governance].dlp_{pre,post}_hooks`` reference."""
+    ``[hooks].declarations[].hook_id``. DLP callers reference it through the
+    calling pack's ``dlp_*_hooks`` lists; conversation phases do not."""
 
     phase: ClassVar[HookPhase]
-    """Closed-enum hook phase (Wave-1: ``dlp_pre`` / ``dlp_post``)."""
+    """Closed-enum DLP or conversation input/output hook phase."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Runtime enforcement of the ``invoke`` template-method seam.

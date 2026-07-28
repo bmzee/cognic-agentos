@@ -17,9 +17,16 @@ def test_compliance_scope_family_has_exactly_two_values() -> None:
     }
 
 
-def test_examiner_compliance_scopes_holds_both() -> None:
+def test_examiner_compliance_scopes_holds_compliance_and_conversation_controls() -> None:
     assert (
-        frozenset({"compliance.evidence_pack.read", "compliance.trace.read"})
+        frozenset(
+            {
+                "compliance.evidence_pack.read",
+                "compliance.trace.read",
+                "conversation.export",
+                "conversation.redact",
+            }
+        )
         == EXAMINER_COMPLIANCE_SCOPES
     )
 

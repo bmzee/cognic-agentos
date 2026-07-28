@@ -13,7 +13,12 @@ def test_hook_class_creation_passes_sdk_init_subclass() -> None:
     ``Hook.__init_subclass__`` runtime guards (no mixin-smuggled
     ``invoke`` override on the subclass MRO)."""
     assert {{ class_name }}.hook_id  # AUTHOR-FILL: assert exact hook_id once filled in
-    assert {{ class_name }}.phase in ("dlp_pre", "dlp_post")
+    assert {{ class_name }}.phase in (
+        "dlp_pre",
+        "dlp_post",
+        "conversation_input",
+        "conversation_output",
+    )
 
 
 @pytest.mark.skip(reason="AUTHOR-FILL: replace with real test once _invoke() is implemented")
@@ -35,6 +40,25 @@ async def test_hook_invoke_pass_decision() -> None:
         parent_trace_id=None,
         manifest_data_classes=("public",),
         manifest_purpose="operational_telemetry",
+        conversation_id=(
+            "12345678-1234-5678-1234-567812345678"
+            if {{ class_name }}.phase.startswith("conversation_")
+            else None
+        ),
+        conversation_turn_seq=(
+            1 if {{ class_name }}.phase.startswith("conversation_") else None
+        ),
+        agent_run_id=(
+            "agent-run-template"
+            if {{ class_name }}.phase == "conversation_output"
+            else None
+        ),
+        output_origin=(
+            "agent_run"
+            if {{ class_name }}.phase == "conversation_output"
+            else None
+        ),
+        approval_delivery_id=None,
     )
     result = await hook.invoke(context, b"payload")
     assert result.decision in ("pass", "redact", "mask", "refuse")

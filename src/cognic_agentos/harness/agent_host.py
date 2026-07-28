@@ -1,14 +1,22 @@
-"""Agent-pack hosting/ingestion (M8 A8, ADR-027).
+"""Agent-pack hosting/ingestion and governance projection (ADR-027/ADR-028).
 
-Off-gate composition module (mirrors ``harness/skill_host.py`` +
-``harness/mcp_host.py``). Walks the ALREADY-TRUSTED registry candidates (trust
-is upstream — the plugin registry's cosign gate ran before any candidate is
-iterable here), re-extracts each pack's manifest ``[agent]`` block + ``AGENT.md``
-WITHOUT importing pack code (the ADR-002 §gate 1 deferred-load discipline —
-agent-pack Python NEVER loads into the kernel process), validates the persona
-shape via the REUSED skill_manifest frontmatter contract, reads the requested
-capability lists + ``max_steps`` + the MANDATORY risk tier, and yields a
-:class:`LoadedAgentRecord` per admitted agent.
+Walks registry candidates admitted by the upstream plugin trust gate, then
+re-extracts each installed distribution's manifest ``[agent]`` block +
+``AGENT.md`` WITHOUT importing pack
+code (the ADR-002 §gate 1 deferred-load discipline — agent-pack Python NEVER
+loads into the kernel process), validates the persona shape via the REUSED
+skill_manifest frontmatter contract, reads the requested capability lists +
+``max_steps`` + the MANDATORY risk tier, and yields a
+:class:`LoadedAgentRecord` per admitted agent. ADR-028 F-S2a promotes this
+module to the durable critical-controls gate because it now owns the
+fail-closed projection of installed-manifest pack identity, data classes, and purpose
+that conversation hooks receive; this is no longer only thin composition.
+
+The upstream candidate carries ``signature_digest`` provenance, but this
+builder does not independently bind the bytes re-read through
+``Distribution.locate_file`` to the verified wheel or its RECORD. The
+signature-to-installed-bytes parity gap is explicit here; this module must not
+be cited as proving that the re-read governance/persona bytes are signed.
 
 Per-pack fail-closed: a malformed manifest / missing-or-invalid AGENT.md /
 malformed requested lists / invalid max_steps / MISSING RISK TIER warn-skips
@@ -17,15 +25,19 @@ hosted. Mirrors the M5 mapper doctrine. The risk-tier skip is deliberately
 fail-closed: a record without a tier cannot be dispatched (the A5+ loop
 admits by tier), so hosting it would defer the failure to run time.
 
-M8 A13 adds :func:`build_agent_loop` — the governed-loop composition seam the
-``create_app`` lifespan calls (the ``build_skill_executor`` mirror). It owns
-the 3-state dependency discipline per
+M8 A13 adds :func:`build_agent_loop` — the public three-value
+governed-loop composition seam (the ``build_skill_executor`` mirror).
+F-S2a's ``create_app`` lifespan calls
+:func:`build_agent_loop_with_records`, which shares that composition
+and additionally returns the immutable admitted-record projection
+needed by conversation hooks. The composition owns the 3-state
+dependency discipline per
 ``feedback_conditional_router_mount_partial_config_warning`` (ALL gateable
 deps → loop; SOME missing → None + ONE warning naming them; ZERO → None,
 quiet) and assembles the A4 stores + the A5 Rego policy + the A10 dispatcher
 + the A11 loop over the boot-hosted agent + instruction-skill records.
 
-M8.5-D S1 adds :func:`build_tool_capability_classes`, a signed-manifest
+M8.5-D S1 adds :func:`build_tool_capability_classes`, an installed-manifest
 projection keyed by the dispatcher's full ``server_id/tool_name`` identity.
 The map is surfaced here before Task 5 threads it into the dispatcher.
 """
@@ -35,10 +47,13 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata as md
 import logging
+import typing
 import uuid
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from cognic_agentos.cli._governance_vocab import DataClass, Purpose
 from cognic_agentos.core.agent._types import LoadedAgentRecord
 from cognic_agentos.core.agent.assignments import AssignmentStore
 from cognic_agentos.core.agent.dispatch import AgentDispatcher, AgentToolApprovalPending
@@ -81,6 +96,12 @@ logger = logging.getLogger(__name__)
 #: runtime-refuses bug class, pinned test-side).
 _MAX_STEPS_MIN = 1
 _MAX_STEPS_MAX = 32
+_DATA_CLASSES: frozenset[str] = frozenset(typing.get_args(DataClass))
+_PURPOSES: frozenset[str] = frozenset(typing.get_args(Purpose))
+_AGENT_DATA_GOVERNANCE_LOCATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("data_governance", ("data_governance",)),
+    ("tool.cognic.data_governance", ("tool", "cognic", "data_governance")),
+)
 
 
 class _RegistryCandidates(Protocol):
@@ -93,7 +114,7 @@ class _RegistryCandidates(Protocol):
 def build_tool_capability_classes(
     registry: _RegistryCandidates,
 ) -> dict[str, str]:
-    """Project full tool references to classes from signed pack manifests.
+    """Project full tool references to classes from installed pack manifests.
 
     A pack without ``[[tool.cognic.tools]]`` contributes nothing. Its tools
     therefore remain absent from this map and hit the dispatcher's fail-closed
@@ -226,6 +247,69 @@ def _distribution_version(distribution_name: str) -> str | None:
         return None
 
 
+def _agent_governance_projection(
+    manifest: dict[str, Any], *, distribution_name: str
+) -> tuple[str, tuple[str, ...], str] | None:
+    """Project the installed pack's canonical/legacy governance declaration.
+
+    An absent governance block remains a legacy non-conversation record with
+    empty governance values; an explicitly malformed block warn-skips the
+    agent. Values use the build-time validator's whitespace normalization and
+    canonical vocabularies. When both supported locations are present, data
+    classes are unioned exactly like admission validation. Purpose agreement is
+    an intentionally stricter runtime rule: one HookContext cannot truthfully
+    carry two purposes, so ambiguity fail-closes instead of choosing silently.
+    """
+    pack_block = manifest.get("pack")
+    if not isinstance(pack_block, dict):
+        tool = manifest.get("tool")
+        cognic = tool.get("cognic") if isinstance(tool, dict) else None
+        pack_block = cognic.get("pack") if isinstance(cognic, dict) else None
+    pack_id = pack_block.get("pack_id") if isinstance(pack_block, dict) else None
+
+    raw_blocks: list[object] = []
+    for _, path in _AGENT_DATA_GOVERNANCE_LOCATIONS:
+        cursor: object = manifest
+        for segment in path:
+            if not isinstance(cursor, dict) or segment not in cursor:
+                break
+            cursor = cursor[segment]
+        else:
+            raw_blocks.append(cursor)
+    if not raw_blocks:
+        return pack_id if isinstance(pack_id, str) else "", (), ""
+
+    union_classes: set[str] = set()
+    purposes: set[str] = set()
+    for raw_block in raw_blocks:
+        if not isinstance(raw_block, dict):
+            break
+        raw_classes = raw_block.get("data_classes")
+        raw_purpose = raw_block.get("purpose")
+        if not isinstance(raw_classes, list) or not raw_classes:
+            break
+        normalised_classes: list[str] = []
+        for value in raw_classes:
+            if not isinstance(value, str) or value.strip() not in _DATA_CLASSES:
+                break
+            normalised_classes.append(value.strip())
+        else:
+            if isinstance(raw_purpose, str) and raw_purpose.strip() in _PURPOSES:
+                union_classes.update(normalised_classes)
+                purposes.add(raw_purpose.strip())
+                continue
+        break
+    else:
+        if isinstance(pack_id, str) and pack_id and len(purposes) == 1:
+            return pack_id, tuple(sorted(union_classes)), next(iter(purposes))
+
+    logger.warning(
+        "agent.data_governance_malformed",
+        extra={"distribution_name": distribution_name},
+    )
+    return None
+
+
 def _build_agent_records(
     *,
     registry: _RegistryCandidates,
@@ -306,6 +390,13 @@ def _build_agent_records(
                 extra={"distribution_name": cand.distribution_name},
             )
             continue
+        governance = _agent_governance_projection(
+            manifest,
+            distribution_name=cand.distribution_name,
+        )
+        if governance is None:
+            continue
+        pack_id, manifest_data_classes, manifest_purpose = governance
         if agent_id in records:
             logger.warning(
                 "agent.duplicate_agent_id",
@@ -323,6 +414,9 @@ def _build_agent_records(
             pack_version=_distribution_version(cand.distribution_name) or "",
             signed_artefact_digest=cand.signature_digest,
             registered=True,
+            pack_id=pack_id,
+            manifest_data_classes=manifest_data_classes,
+            manifest_purpose=manifest_purpose,
         )
     return records
 
@@ -540,30 +634,38 @@ def _resolve_signing_key(path_value: str | None) -> tuple[bytes | None, list[str
     return Path(path_value).read_bytes(), []
 
 
-async def build_agent_loop(
+async def build_agent_loop_with_records(
     *,
     runtime: _AgentLoopRuntime,
     settings: _AgentLoopSettings,
     registry: _RegistryCandidates | None,
     mcp_host: Any,
     engine: AsyncEngine,
-) -> tuple[AgentLoop | None, list[str], list[dict[str, Any]]]:
-    """Assemble the production governed agent loop (M8 A13) over the trusted
-    candidates + return ``(loop, warnings, hosted_agents)`` — the third
-    element is the :func:`hosted_agents_summary` operator-surface rows for
+) -> tuple[
+    AgentLoop | None,
+    list[str],
+    list[dict[str, Any]],
+    Mapping[str, LoadedAgentRecord],
+]:
+    """Assemble the production governed agent loop and its admitted records.
+
+    Returns ``(loop, warnings, hosted_agents, agent_records)`` —
+    the third element is the :func:`hosted_agents_summary` operator-surface rows for
     ``app.state.hosted_agents`` (read by ``/api/v1/system/plugins`` at
     ``portal/api/system_routes.py``; the ``build_skill_executor`` →
-    ``hosted_skills`` mirror).
+    ``hosted_skills`` mirror). The fourth is an immutable projection from the
+    same admitted records, consumed by the conversation-hook adapter without a
+    second manifest read.
 
     3-state dependency discipline per
     ``feedback_conditional_router_mount_partial_config_warning`` over the four
     gateable deps (``registry`` / ``mcp_host`` / ``runtime.llm_gateway`` /
     ``runtime.memory_api_factory``):
 
-      * ALL present → ``(AgentLoop, [], hosted rows)`` (plus at most the
+      * ALL present → ``(AgentLoop, [], hosted rows, records)`` (plus at most the
         vault:// signing-key warning — see :func:`_resolve_signing_key`);
-      * SOME missing → ``(None, [ONE warning naming the missing deps], [])``;
-      * ZERO present → ``(None, [], [])`` — QUIET (nothing agent-shaped was
+      * SOME missing → ``(None, [ONE warning naming the missing deps], [], {})``;
+      * ZERO present → ``(None, [], [], {})`` — QUIET (nothing agent-shaped was
         ever configured on this deployment; warning would be noise).
 
     Hosted rows ride ONLY the built path: surfacing an agent as hosted while
@@ -581,17 +683,18 @@ async def build_agent_loop(
         if not present
     ]
     if len(missing) == 4:
-        return None, [], []  # zero gateable deps — stay quiet.
+        return None, [], [], MappingProxyType({})  # zero gateable deps — stay quiet.
     if missing:
         return (
             None,
             ["agent loop not built — missing dependencies: " + ", ".join(sorted(missing))],
             [],
+            MappingProxyType({}),
         )
     assert registry is not None  # narrowed by the gate above
 
     # Boot-hosted records: the A8 agent packs + the instruction-mode skill
-    # records the read_skill built-in serves bodies from. The signed per-tool
+    # records the read_skill built-in serves bodies from. The installed-manifest per-tool
     # class map is one immutable-at-construction snapshot consumed by both the
     # dispatcher gate and the LLM schema builder in the loop.
     tool_capability_classes = build_tool_capability_classes(registry)
@@ -640,11 +743,41 @@ async def build_agent_loop(
         run_wall_clock_s=settings.agent_run_wall_clock_s,
         tier="tier1",
     )
-    return loop, warnings, hosted_agents_summary(agent_records)
+    return (
+        loop,
+        warnings,
+        hosted_agents_summary(agent_records),
+        MappingProxyType(dict(agent_records)),
+    )
+
+
+async def build_agent_loop(
+    *,
+    runtime: _AgentLoopRuntime,
+    settings: _AgentLoopSettings,
+    registry: _RegistryCandidates | None,
+    mcp_host: Any,
+    engine: AsyncEngine,
+) -> tuple[AgentLoop | None, list[str], list[dict[str, Any]]]:
+    """Preserve the M8 A13 three-value composition contract.
+
+    F-S2a needs the immutable admitted-record projection as well, so the portal
+    calls :func:`build_agent_loop_with_records`. Existing callers keep the
+    original ``(loop, warnings, hosted_agents)`` shape.
+    """
+    loop, warnings, hosted_agents, _ = await build_agent_loop_with_records(
+        runtime=runtime,
+        settings=settings,
+        registry=registry,
+        mcp_host=mcp_host,
+        engine=engine,
+    )
+    return loop, warnings, hosted_agents
 
 
 __all__ = [
     "build_agent_loop",
+    "build_agent_loop_with_records",
     "build_tool_capability_classes",
     "hosted_agents_summary",
 ]

@@ -203,3 +203,65 @@ class TurnChainResponse(BaseModel):
     started: RunStartedEvidenceResponse
     terminal: RunTerminalEvidenceResponse
     dispatches: list[DispatchEvidenceResponse]
+
+
+class ConversationExportMetadataResponse(BaseModel):
+    """Minimal schema-v1 conversation metadata.
+
+    This is deliberately operational metadata only. Examiner-full enrichment
+    is a later versioned extension; no credential-specific metadata field is
+    representable. Governed transcript fields remain opaque caller content.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: uuid.UUID
+    tenant_id: str
+    agent_id: str
+    creator_subject: str
+    state: ConversationState
+    turn_count: int
+    cumulative_tokens: int
+    retention_class: str | None
+    created_at: datetime
+    last_turn_at: datetime | None
+    erased_at: datetime | None
+
+
+class ConversationExportTurnResponse(BaseModel):
+    """One persisted turn, including an explicit tombstone after erasure."""
+
+    model_config = ConfigDict(frozen=True)
+
+    turn_id: uuid.UUID
+    seq: int
+    user_message: str | None
+    answer: str | None
+    agent_run_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: datetime
+    erased_at: datetime | None
+    approval_request_id: str | None
+    turn_kind: Literal["exchange", "system"]
+    turn_completed_request_id: str
+
+
+class ConversationExportChainRefResponse(BaseModel):
+    """A value-free reference to one correlation-selected chain row."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sequence: int
+    hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class ConversationExportResponse(BaseModel):
+    """The ruled minimal, versioned conversation export envelope."""
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: Literal[1] = 1
+    metadata: ConversationExportMetadataResponse
+    turns: list[ConversationExportTurnResponse]
+    chain_refs: list[ConversationExportChainRefResponse]

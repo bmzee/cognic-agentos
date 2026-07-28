@@ -104,7 +104,7 @@ earlier in a plan. Sibling regressions are common and the promotion commit is
 where they surface.
 
 **The gate is a budget, not a ratchet.** The count has only ever grown — 129
-to 156 with no removal — because promotion has a procedure and demotion does
+to 158 with no removal — because promotion has a procedure and demotion does
 not. Every promotion permanently raises the cost of touching that file, so the
 set must be curated rather than accumulated.
 

@@ -38,28 +38,34 @@ tier = "AUTHOR-FILL: e.g., read_only | internal_write | customer_data_read | cus
 # validator cross-checks both directions.
 [hooks]
 [[hooks.declarations]]
-# AUTHOR-FILL: stable snake_case hook ID. Matches the calling pack's
-# [data_governance].dlp_pre_hooks / dlp_post_hooks reference.
+# AUTHOR-FILL: stable snake_case hook ID. DLP callers reference this ID
+# through dlp_pre_hooks/dlp_post_hooks; conversation phases are selected
+# phase-wide and have no calling-pack hook-ID list.
 hook_id = "AUTHOR-FILL: e.g., redact_pii_in_input"
 # Closed-enum hook phase from cognic_agentos.cli._governance_vocab.HookPhase.
-# Wave-1: dlp_pre runs before pack code sees governed input;
-#         dlp_post runs before governed output leaves AgentOS.
-phase = "AUTHOR-FILL: dlp_pre | dlp_post"
+# dlp_pre / dlp_post gate governed pack input/output;
+# conversation_input / conversation_output gate assembled conversation
+# context and generated conversation output.
+phase = "AUTHOR-FILL: dlp_pre | dlp_post | conversation_input | conversation_output"
 # Closed-enum ordering class from cognic_agentos.cli._governance_vocab.
-# HookOrderingClass. Wave-1: input_* classes pair with dlp_pre,
-# output_* classes pair with dlp_post; T6 validator refuses
-# mismatched pairings.
+# HookOrderingClass. input_* classes pair with dlp_pre or
+# conversation_input; output_* classes pair with dlp_post or
+# conversation_output. T6 validator refuses mismatched pairings.
 #
-# dlp_pre classes (semantic order):
+# dlp_pre / conversation_input classes (semantic order):
 #   input_validation       — earliest; refuses obviously-invalid input
 #   input_authorization    — consent / authz checks
 #   input_redaction        — PII redaction
 #   input_normalization    — format normalization
-# dlp_post classes (semantic order):
+# On conversation_input these names define ordering only; F-S2a does not
+# authorize redact/mask transformations.
+# dlp_post / conversation_output classes (semantic order):
 #   output_validation      — earliest post-hook
 #   output_egress_check    — egress allow-list cross-check
 #   output_redaction       — secondary PII redaction
 #   output_masking         — account / id masking
+# On conversation_output these names define ordering only; F-S2a does not
+# authorize redact/mask transformations.
 ordering_class = "AUTHOR-FILL: pick a value from the list above"
 # Per-hook timeout in seconds; capped at Settings.hook_max_timeout_s
 # (default 30.0). Dispatcher enforces min(declared, ceiling) at
@@ -70,9 +76,9 @@ timeout_seconds = 5.0
 #                            the calling-pack invocation refused;
 #                            ADR-017 mandates fail-closed for all
 #                            data-governance phases by default.
-#   fail_open             — REFUSED unless the calling pack declares
-#                            a matching fail_open_exception in its
-#                            [data_governance] block.
+#   fail_open             — REFUSED by the current authoring validator.
+#                            The runtime declaration shape remains reserved
+#                            for a separately governed legacy-DLP follow-up.
 fail_policy = "fail_closed"
 
 [supply_chain]

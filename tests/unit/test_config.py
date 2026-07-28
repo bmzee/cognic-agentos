@@ -1947,11 +1947,12 @@ class TestSprint7A2HookVocabulary:
     These tests pin the Wave-1 hook taxonomy added by Sprint-7A2's
     plan-of-record Doctrine Locks A + C + E:
 
-      - HookPhase: 2 values (dlp_pre / dlp_post).
+      - HookPhase: 4 values (DLP + conversation input/output).
       - HookOrderingClass: 8 values (4 input-side, 4 output-side).
       - HookFailPolicy: 2 values (fail_closed / fail_open).
-      - HOOK_ORDERING_RANK + HOOK_ORDERING_CLASS_PHASE: exhaustive
-        coverage of every HookOrderingClass value.
+      - HOOK_ORDERING_RANK + HOOK_ORDERING_CLASS_PHASES: exhaustive
+        coverage of every HookOrderingClass value while the legacy
+        singular phase map remains backward-compatible.
 
     Future phases (memory pre/post per ADR-019; escalation pre per
     ADR-014; egress pre per ADR-017's egress allow-list) land in
@@ -1959,12 +1960,17 @@ class TestSprint7A2HookVocabulary:
     + dispatcher updates in the same commit.
     """
 
-    def test_hook_phase_has_wave1_two_values(self) -> None:
+    def test_hook_phase_has_four_values(self) -> None:
         from typing import get_args
 
         from cognic_agentos.cli._governance_vocab import HookPhase
 
-        assert set(get_args(HookPhase)) == {"dlp_pre", "dlp_post"}
+        assert set(get_args(HookPhase)) == {
+            "dlp_pre",
+            "dlp_post",
+            "conversation_input",
+            "conversation_output",
+        }
 
     def test_hook_ordering_class_has_eight_values(self) -> None:
         from typing import get_args
@@ -2032,6 +2038,31 @@ class TestSprint7A2HookVocabulary:
         )
 
         assert set(HOOK_ORDERING_CLASS_PHASE.keys()) == set(get_args(HookOrderingClass))
+
+    def test_hook_ordering_class_phases_covers_every_class(self) -> None:
+        """The additive many-phase map is the validator/registry authority."""
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import (
+            HOOK_ORDERING_CLASS_PHASES,
+            HookOrderingClass,
+        )
+
+        assert set(HOOK_ORDERING_CLASS_PHASES) == set(get_args(HookOrderingClass))
+
+    def test_input_classes_are_valid_for_dlp_and_conversation_input(self) -> None:
+        from cognic_agentos.cli._governance_vocab import HOOK_ORDERING_CLASS_PHASES
+
+        for cls, phases in HOOK_ORDERING_CLASS_PHASES.items():
+            if cls.startswith("input_"):
+                assert phases == frozenset({"dlp_pre", "conversation_input"})
+
+    def test_output_classes_are_valid_for_dlp_and_conversation_output(self) -> None:
+        from cognic_agentos.cli._governance_vocab import HOOK_ORDERING_CLASS_PHASES
+
+        for cls, phases in HOOK_ORDERING_CLASS_PHASES.items():
+            if cls.startswith("output_"):
+                assert phases == frozenset({"dlp_post", "conversation_output"})
 
     def test_hook_ordering_class_phase_input_classes_pair_to_dlp_pre(self) -> None:
         from cognic_agentos.cli._governance_vocab import HOOK_ORDERING_CLASS_PHASE

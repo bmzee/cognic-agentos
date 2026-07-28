@@ -1348,8 +1348,20 @@ def _project_approval_expired(snapshot: AppendedDecisionSnapshot) -> ApprovalExp
     )
 
 
-def _project_approval_executed(snapshot: AppendedDecisionSnapshot) -> ApprovalExecuted:
-    """approval.executed → approval.executed."""
+def _project_approval_executed(
+    snapshot: AppendedDecisionSnapshot,
+) -> ApprovalExecuted | None:
+    """Project only rows that affirm a real execution outcome.
+
+    ``approval.executed`` is the established decision-history envelope for
+    executed, dispatch-failed, and replay-unavailable terminal observations.
+    The typed user event named ``executed`` must not collapse either failure
+    arm into a false success; those rows remain visible through the generic
+    decision-audit mirror.
+    """
+
+    if snapshot.payload.get("execution") not in {"executed", "already_executed"}:
+        return None
     return ApprovalExecuted(
         event_id=_chain_derived_event_id(
             chain_id="decision_history",
@@ -1537,7 +1549,7 @@ def _project_agent_run_pending_approval(
 #: projector function, (b) entry here OR prefix/conditional support, (c) the
 #: class added to `_TYPED_PROJECTION_CLASSES` (so the ContextVar capture fires).
 _DECISION_HISTORY_TYPED_PROJECTORS: Final[
-    dict[str, Callable[[AppendedDecisionSnapshot], _BaseEvent]]
+    dict[str, Callable[[AppendedDecisionSnapshot], _BaseEvent | None]]
 ] = {
     "frontend_action.submitted": _project_frontend_action_submitted,
     "frontend_action.accepted": _project_frontend_action_accepted,

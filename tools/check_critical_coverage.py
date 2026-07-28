@@ -159,6 +159,23 @@ carry forward their existing pinning. All four hook modules ride
 the same single strict 95% line / 90% branch floor; gate size grows
 from 37 modules to 41.
 
+ADR-028 F-S2a promotes two composition modules that acquired
+substantive trust and evidence authority:
+
+  * ``harness/agent_host.py`` — fail-closed admitted installed-manifest
+    governance projection carried with each admitted agent record.
+  * ``harness/hook_registry.py`` — mandatory two-phase readiness,
+    governance/correlation binding, canonical-envelope validation,
+    unchanged-PASS enforcement,
+    and fail-loud dual governed-evidence fan-out.
+
+Both qualify under the trust-decision, fail-closed-default, and
+evidence-integrity criteria. The demotion review found no existing
+entry eligible for removal: every current entry still owns its
+documented enforcement or wire/evidence contract. Both new modules
+ride the same strict 95% line / 90% branch floor on fresh full-suite
+branch data; gate size grows from 156 modules to 158.
+
 Sprint 7B.1 T7 extends the gate with the **Bank pack lifecycle**
 pair — two modules that together form the ADR-012 lifecycle-state-
 machine + storage critical path:
@@ -918,6 +935,17 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/packs/hooks/dispatcher.py", 0.95, 0.90),
     ("src/cognic_agentos/packs/hooks/dlp_integration.py", 0.95, 0.90),
     ("src/cognic_agentos/cli/validators/hooks.py", 0.95, 0.90),
+    # ADR-028 F-S2a — these were thin/off-gate composition before this slice.
+    # ``agent_host`` now owns fail-closed admitted installed-manifest governance projection;
+    # ``hook_registry`` owns both-phase readiness, correlation binding,
+    # canonical-envelope validation, unchanged-PASS enforcement, and mandatory
+    # production evidence.
+    # Criteria: trust decision + fail-closed default + evidence integrity.
+    # Demotion review: none; every existing entry still owns its documented
+    # enforcement or wire/evidence contract. Gate 156 -> 158. Verified against
+    # fresh full-suite --cov-branch data in the same change.
+    ("src/cognic_agentos/harness/agent_host.py", 0.95, 0.90),
+    ("src/cognic_agentos/harness/hook_registry.py", 0.95, 0.90),
     # Sprint 7B.1 T7 — Bank pack lifecycle (state machine + storage)
     # pair. Both modules form the ADR-012 lifecycle-state-machine +
     # storage critical path; see module docstring above for per-module
@@ -2410,10 +2438,14 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # COMMIT (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/conversation/storage.py", 0.95, 0.90),
-    # ADR-028 M8.5-B (conversation turn loop) — the terminal-state refusal
-    # contract (a closed/expired/erased conversation NEVER reaches the
-    # AgentLoop) + the conversation-level bounds + the creator-scoped claim that
-    # must precede every append. Gate 150 -> 151. Verified against fresh
+    # ADR-028 M8.5-B + F-S2a (conversation turn loop) — the terminal-state
+    # refusal contract (a closed/expired/erased conversation NEVER reaches the
+    # AgentLoop), conversation-level bounds, creator-scoped claim that must
+    # precede every append, and canonical fail-closed conversation input/output
+    # hook boundaries. F-S2a admits PASS/REFUSE only: malformed, refused,
+    # failed, unevidenced, or transform-attempt hook outcomes never reach,
+    # persist, or ship unscreened content. Legacy DLP transformations are
+    # unchanged. Gate 150 -> 151. Verified against fresh
     # full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
     # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/conversation/turn.py", 0.95, 0.90),

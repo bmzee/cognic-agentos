@@ -13,6 +13,7 @@ head with ``.one()`` (``core/decision_history.py:489``) and raises
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import _chain_heads, _metadata
 from cognic_agentos.core.canonical import ZERO_HASH
+from cognic_agentos.core.chain_verifier import ChainVerifier
 from cognic_agentos.core.conversation._types import (
     ConversationNotFound,
     ConversationTransitionRefused,
@@ -122,13 +124,52 @@ async def _append(
     return turn_id
 
 
-async def _chain_rows(db: AsyncEngine) -> list[sa.Row[tuple[str, dict[str, Any]]]]:
+async def _chain_rows(
+    db: AsyncEngine,
+) -> list[sa.Row[tuple[str, str, dict[str, Any]]]]:
     """``DecisionRecord.decision_type`` persists to the ``event_type`` column."""
     async with db.connect() as conn:
         res = await conn.execute(
-            sa.select(_decision_history.c.event_type, _decision_history.c.payload)
+            sa.select(
+                _decision_history.c.event_type,
+                _decision_history.c.request_id,
+                _decision_history.c.payload,
+            )
         )
         return list(res.fetchall())
+
+
+async def _decision_chain_state(db: AsyncEngine) -> tuple[int, bytes, int]:
+    """Snapshot the decision-chain head plus its physical row count."""
+    async with db.connect() as conn:
+        head = (
+            await conn.execute(
+                sa.select(_chain_heads.c.latest_sequence, _chain_heads.c.latest_hash).where(
+                    _chain_heads.c.chain_id == "decision_history"
+                )
+            )
+        ).one()
+        row_count = (
+            await conn.execute(sa.select(sa.func.count()).select_from(_decision_history))
+        ).scalar_one()
+    return int(head.latest_sequence), bytes(head.latest_hash), int(row_count)
+
+
+async def _refuse_erasure_evidence_inserts(db: AsyncEngine) -> None:
+    """Make the evidence phase fail after a redaction precondition has run."""
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.text(
+                """
+                CREATE TRIGGER refuse_conversation_erased
+                BEFORE INSERT ON decision_history
+                WHEN NEW.event_type = 'conversation.erased'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced conversation.erased insert failure');
+                END
+                """
+            )
+        )
 
 
 # --- tenant + creator isolation ------------------------------------------------
@@ -314,6 +355,272 @@ async def test_append_turn_bumps_counters(store: ConversationStore) -> None:
     assert rec.turn_count == 1
     assert rec.cumulative_tokens == 10
     assert rec.last_turn_at is not None
+
+
+@pytest.mark.parametrize(("prompt_tokens", "completion_tokens"), [(-1, 0), (0, True)])
+async def test_append_turn_rejects_non_count_token_usage(
+    store: ConversationStore,
+    db: AsyncEngine,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    try:
+        with pytest.raises(ValueError, match="non-negative integers"):
+            await store.append_turn(
+                conversation_id=cid,
+                tenant_id="t1",
+                seq=1,
+                user_message="question",
+                answer="answer",
+                agent_run_id="agent-run-invalid-usage",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                actor_id="s1",
+                request_id="req-turn-invalid-usage",
+                claim_id=claim.claim_id,
+            )
+    finally:
+        await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+@pytest.mark.parametrize(
+    "output_request_id",
+    [
+        "",
+        "request-1",
+        "conv-hook-" + "A" * 32,
+        "conv-hook-" + "a" * 31,
+        "conv-hook-" + "a" * 33,
+    ],
+)
+async def test_append_turn_rejects_output_hook_ids_the_examiner_cannot_read(
+    store: ConversationStore,
+    db: AsyncEngine,
+    output_request_id: str,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    try:
+        with pytest.raises(ValueError, match="invalid shape"):
+            await store.append_turn(
+                conversation_id=cid,
+                tenant_id="t1",
+                seq=1,
+                user_message="question",
+                answer="answer",
+                agent_run_id="agent-run-output-hook-id",
+                prompt_tokens=1,
+                completion_tokens=1,
+                actor_id="s1",
+                request_id="req-turn-output-hook-id",
+                claim_id=claim.claim_id,
+                conversation_output_request_id=output_request_id,
+                conversation_output_hook_count=1,
+            )
+    finally:
+        await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_is_digest_only_and_does_not_count_a_turn(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+
+    settled_state = await store.settle_refused_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        question="screened question sentinel",
+        answer="refused answer sentinel",
+        agent_run_id="agent-run-refused",
+        prompt_tokens=7,
+        completion_tokens=3,
+        actor_id="s1",
+        request_id="req-turn-refused",
+        claim_id=claim.claim_id,
+    )
+    assert settled_state == "active"
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 10
+    assert record.turn_count == 0
+    assert record.last_turn_at is None
+    async with db.connect() as conn:
+        turn_count = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_conversation_turns)
+                .where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).scalar_one()
+    assert turn_count == 0
+
+    rows = [row for row in await _chain_rows(db) if row.event_type == "conversation.turn_refused"]
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert set(payload) == {
+        "conversation_id",
+        "seq",
+        "agent_run_id",
+        "question_sha256",
+        "question_bytes",
+        "answer_sha256",
+        "answer_bytes",
+        "prompt_tokens",
+        "completion_tokens",
+        "actor_id",
+    }
+    assert payload["conversation_id"] == str(cid)
+    assert payload["seq"] == 1
+    assert payload["agent_run_id"] == "agent-run-refused"
+    assert payload["prompt_tokens"] == 7
+    assert payload["completion_tokens"] == 3
+    assert payload["question_sha256"] == hashlib.sha256(b"screened question sentinel").hexdigest()
+    assert payload["answer_sha256"] == hashlib.sha256(b"refused answer sentinel").hexdigest()
+    assert payload["question_bytes"] == len(b"screened question sentinel")
+    assert payload["answer_bytes"] == len(b"refused answer sentinel")
+    assert "screened question sentinel" not in str(payload)
+    assert "refused answer sentinel" not in str(payload)
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "completion_tokens"),
+    [(-1, 0), (0, -1), (True, 0), (0, False)],
+)
+async def test_settle_refused_turn_rejects_non_count_token_usage(
+    store: ConversationStore,
+    db: AsyncEngine,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+
+    with pytest.raises(ValueError, match="non-negative integers"):
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="screened",
+            answer="refused",
+            agent_run_id="agent-run-invalid-usage",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            actor_id="s1",
+            request_id="req-turn-refused-invalid-usage",
+            claim_id=claim.claim_id,
+        )
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_evidence_failure_rolls_back_counter_and_chain(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    before = await _decision_chain_state(db)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.text(
+                """
+                CREATE TRIGGER refuse_conversation_turn_refused
+                BEFORE INSERT ON decision_history
+                WHEN NEW.event_type = 'conversation.turn_refused'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced conversation.turn_refused insert failure');
+                END
+                """
+            )
+        )
+
+    with pytest.raises(Exception, match=r"forced conversation\.turn_refused"):
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="must not bind",
+            answer="must not bind",
+            agent_run_id="agent-run-refused",
+            prompt_tokens=7,
+            completion_tokens=3,
+            actor_id="s1",
+            request_id="req-turn-refused-rollback",
+            claim_id=claim.claim_id,
+        )
+
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.cumulative_tokens == 0
+    assert record.turn_count == 0
+    assert await _decision_chain_state(db) == before
+
+
+async def test_settle_refused_turn_rejects_a_reclaimed_claim(
+    store: ConversationStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new(store)
+    t0 = datetime.now(UTC)
+    stale = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0,
+        claim_ttl_s=60.0,
+    )
+    current = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=61),
+        claim_ttl_s=60.0,
+    )
+    before = await _decision_chain_state(db)
+
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.settle_refused_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            question="stale",
+            answer="stale",
+            agent_run_id="agent-run-stale",
+            prompt_tokens=7,
+            completion_tokens=3,
+            actor_id="s1",
+            request_id="req-turn-refused-stale",
+            claim_id=stale.claim_id,
+        )
+
+    assert exc.value.reason == "conversation_turn_claim_stale"
+    assert current.claim_id != stale.claim_id
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None and record.cumulative_tokens == 0
+    assert await _decision_chain_state(db) == before
 
 
 async def test_create_conversation_emits_created_chain_row(
@@ -572,6 +879,47 @@ async def test_admitted_turn_settles_after_close_then_new_turns_refuse(
             claim_ttl_s=300.0,
         )
     assert exc.value.reason == "conversation_not_active"
+
+
+async def test_refused_admitted_turn_reports_locked_closed_state(
+    store: ConversationStore,
+) -> None:
+    cid = await _new(store)
+    claim = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    await store.transition(
+        conversation_id=cid,
+        tenant_id="t1",
+        to_state="closed",
+        actor_id="s1",
+        request_id="req-close-before-refusal-settlement",
+    )
+
+    state = await store.settle_refused_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        question="screened",
+        answer="withheld",
+        agent_run_id="agent-run-refused-after-close",
+        prompt_tokens=2,
+        completion_tokens=3,
+        actor_id="s1",
+        request_id="req-refused-after-close",
+        claim_id=claim.claim_id,
+    )
+
+    assert state == "closed"
+    record = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert record is not None
+    assert record.state == "closed"
+    assert record.cumulative_tokens == 5
+    assert record.turn_count == 0
 
 
 async def test_transition_on_missing_conversation_raises_not_found(
@@ -1002,3 +1350,392 @@ async def test_duplicate_turn_completed_request_id_rolls_back_turn_and_chain(
     assert turn_rows == 1  # the second turn row rolled back
     assert chain_rows == 1  # and so did its chain row — no orphan evidence
     assert tuple(counters) == (1, 2)  # counters reflect ONLY the first turn
+
+
+# --- M8.5-F S1: tenant-scoped value erasure, intact evidence -------------------
+
+
+async def test_redact_turn_nulls_only_values_and_appends_value_free_evidence(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    cid = await _new(store)
+    turn_id = await _append(
+        store,
+        cid,
+        1,
+        q="sensitive user value",
+        a="sensitive answer value",
+        run="agent-run-redact",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        request_id="req-original-turn",
+    )
+
+    assert await store.redact_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="req-redact-turn",
+    )
+
+    async with db.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    sa.select(_conversation_turns).where(_conversation_turns.c.turn_id == turn_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert row["user_message"] is None
+    assert row["answer"] is None
+    assert row["erased_at"] is not None
+    assert row["agent_run_id"] == "agent-run-redact"
+    assert row["approval_request_id"] == "a1b2c3d4-1111-4222-8333-444455556666"
+    assert row["turn_completed_request_id"] == "req-original-turn"
+
+    replay = await store.load_replay_turns(cid, tenant_id="t1", last_n=10)
+    assert len(replay) == 1
+    assert replay[0].user_message is None
+    assert replay[0].answer is None
+
+    rows = await _chain_rows(db)
+    completed = [row for row in rows if row.event_type == "conversation.turn_completed"]
+    erased = [row for row in rows if row.event_type == "conversation.erased"]
+    assert len(completed) == 1
+    assert len(erased) == 1
+    assert erased[0].payload == {
+        "actor_id": "compliance-officer",
+        "conversation_id": str(cid),
+        "erased_turn_count": 1,
+        "scope": "turn",
+        "seq": 1,
+    }
+    evidence_blob = str(erased[0].payload)
+    assert "sensitive user value" not in evidence_blob
+    assert "sensitive answer value" not in evidence_blob
+
+
+async def test_redact_turn_is_idempotent_and_emits_no_duplicate_evidence(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    cid = await _new(store)
+    await _append(store, cid, 1, q="erase once", a="only once")
+
+    first = await store.redact_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="req-redact-turn-first",
+    )
+    second = await store.redact_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="req-redact-turn-second",
+    )
+
+    assert first is True
+    assert second is False
+    erased = [row for row in await _chain_rows(db) if row.event_type == "conversation.erased"]
+    assert len(erased) == 1
+    assert erased[0].request_id == "req-redact-turn-first"
+
+
+async def test_redact_turn_rolls_back_values_when_erasure_evidence_insert_fails(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """Doctrine Lock D: the turn UPDATE cannot commit without its chain row."""
+    cid = await _new(store)
+    await _append(store, cid, 1, q="must survive rollback", a="answer survives too")
+    chain_before = await _decision_chain_state(db)
+    await _refuse_erasure_evidence_inserts(db)
+
+    with pytest.raises(sa.exc.DBAPIError, match=r"forced conversation\.erased insert failure"):
+        await store.redact_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            actor_id="compliance-officer",
+            request_id="req-redact-turn-forced-chain-failure",
+        )
+
+    async with db.connect() as conn:
+        turn = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.user_message,
+                    _conversation_turns.c.answer,
+                    _conversation_turns.c.erased_at,
+                ).where(
+                    _conversation_turns.c.conversation_id == cid,
+                    _conversation_turns.c.seq == 1,
+                )
+            )
+        ).one()
+    assert tuple(turn) == ("must survive rollback", "answer survives too", None)
+    assert await _decision_chain_state(db) == chain_before
+    assert not [
+        event for event in await _chain_rows(db) if event.event_type == "conversation.erased"
+    ]
+
+
+async def test_redact_turn_cross_tenant_is_indistinguishable_from_unknown(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    cid = await _new(store, tenant="tenant-a")
+    await _append(
+        store,
+        cid,
+        1,
+        tenant="tenant-a",
+        q="must remain",
+        a="must remain too",
+    )
+
+    cross_tenant = await store.redact_turn(
+        conversation_id=cid,
+        tenant_id="tenant-b",
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="req-cross-tenant-redact",
+    )
+    unknown = await store.redact_turn(
+        conversation_id=uuid.uuid4(),
+        tenant_id="tenant-b",
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="req-unknown-redact",
+    )
+
+    assert cross_tenant is False
+    assert unknown is False
+    async with db.connect() as conn:
+        row = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.user_message,
+                    _conversation_turns.c.answer,
+                    _conversation_turns.c.erased_at,
+                ).where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).one()
+    assert tuple(row) == ("must remain", "must remain too", None)
+    assert not [
+        event for event in await _chain_rows(db) if event.event_type == "conversation.erased"
+    ]
+
+
+async def test_redact_conversation_erases_parent_and_all_turn_values_atomically(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    cid = await _new(store)
+    await _append(store, cid, 1, q="first user value", a="first answer value")
+    await _append(store, cid, 2, q="second user value", a="second answer value")
+
+    assert await store.redact_conversation(
+        conversation_id=cid,
+        tenant_id="t1",
+        actor_id="compliance-officer",
+        request_id="req-redact-conversation",
+    )
+
+    async with db.connect() as conn:
+        parent = (
+            await conn.execute(
+                sa.select(_conversations.c.state, _conversations.c.erased_at).where(
+                    _conversations.c.conversation_id == cid
+                )
+            )
+        ).one()
+        turns = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.seq,
+                    _conversation_turns.c.user_message,
+                    _conversation_turns.c.answer,
+                    _conversation_turns.c.erased_at,
+                )
+                .where(_conversation_turns.c.conversation_id == cid)
+                .order_by(_conversation_turns.c.seq)
+            )
+        ).all()
+    assert parent.state == "erased"
+    assert parent.erased_at is not None
+    assert [row.seq for row in turns] == [1, 2]
+    assert all(row.user_message is None and row.answer is None for row in turns)
+    assert all(row.erased_at is not None for row in turns)
+
+    erased = [row for row in await _chain_rows(db) if row.event_type == "conversation.erased"]
+    assert len(erased) == 1
+    assert erased[0].payload == {
+        "actor_id": "compliance-officer",
+        "conversation_id": str(cid),
+        "erased_turn_count": 2,
+        "scope": "conversation",
+    }
+    report = await ChainVerifier(db, "decision_history").walk()
+    assert report.is_clean is True
+
+
+async def test_redact_conversation_rolls_back_parent_and_turns_when_evidence_insert_fails(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """Doctrine Lock D: parent and bulk tombstones share the chain transaction."""
+    cid = await _new(store)
+    await _append(store, cid, 1, q="first survives", a="first answer survives")
+    await _append(store, cid, 2, q="second survives", a="second answer survives")
+    chain_before = await _decision_chain_state(db)
+    await _refuse_erasure_evidence_inserts(db)
+
+    with pytest.raises(sa.exc.DBAPIError, match=r"forced conversation\.erased insert failure"):
+        await store.redact_conversation(
+            conversation_id=cid,
+            tenant_id="t1",
+            actor_id="compliance-officer",
+            request_id="req-redact-conversation-forced-chain-failure",
+        )
+
+    async with db.connect() as conn:
+        parent = (
+            await conn.execute(
+                sa.select(_conversations.c.state, _conversations.c.erased_at).where(
+                    _conversations.c.conversation_id == cid
+                )
+            )
+        ).one()
+        turns = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.seq,
+                    _conversation_turns.c.user_message,
+                    _conversation_turns.c.answer,
+                    _conversation_turns.c.erased_at,
+                )
+                .where(_conversation_turns.c.conversation_id == cid)
+                .order_by(_conversation_turns.c.seq)
+            )
+        ).all()
+    assert tuple(parent) == ("active", None)
+    assert [tuple(row) for row in turns] == [
+        (1, "first survives", "first answer survives", None),
+        (2, "second survives", "second answer survives", None),
+    ]
+    assert await _decision_chain_state(db) == chain_before
+    assert not [
+        event for event in await _chain_rows(db) if event.event_type == "conversation.erased"
+    ]
+
+
+async def test_redact_conversation_is_idempotent_and_cross_tenant_safe(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    cid = await _new(store, tenant="tenant-a")
+    await _append(store, cid, 1, tenant="tenant-a", q="private", a="private")
+
+    assert (
+        await store.redact_conversation(
+            conversation_id=cid,
+            tenant_id="tenant-b",
+            actor_id="compliance-officer",
+            request_id="req-wrong-tenant",
+        )
+        is False
+    )
+    assert await store.redact_conversation(
+        conversation_id=cid,
+        tenant_id="tenant-a",
+        actor_id="compliance-officer",
+        request_id="req-right-tenant",
+    )
+    assert (
+        await store.redact_conversation(
+            conversation_id=cid,
+            tenant_id="tenant-a",
+            actor_id="compliance-officer",
+            request_id="req-repeat",
+        )
+        is False
+    )
+    erased = [row for row in await _chain_rows(db) if row.event_type == "conversation.erased"]
+    assert len(erased) == 1
+    assert erased[0].request_id == "req-right-tenant"
+
+
+async def test_redact_conversation_fences_an_admitted_turn_from_resurrection(
+    store: ConversationStore,
+) -> None:
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+
+    assert await store.redact_conversation(
+        conversation_id=cid,
+        tenant_id="t1",
+        actor_id="compliance-officer",
+        request_id="req-redact-during-turn",
+    )
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.append_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            user_message="must not resurrect",
+            answer="must not land",
+            agent_run_id="agent-run-late",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id="req-late-turn",
+            claim_id=claim.claim_id,
+        )
+    assert exc.value.reason == "conversation_not_active"
+    assert exc.value.current_state == "erased"
+
+
+async def test_redact_conversation_erases_system_turn_values_uniformly(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """Erasure is shape-based, never conditional on the kind of turn."""
+    cid = await _new(store)
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id="t1",
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        text="kernel-authored sensitive value",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id="req-system-before-redaction",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    assert await store.redact_conversation(
+        conversation_id=cid,
+        tenant_id="t1",
+        actor_id="compliance-officer",
+        request_id="req-redact-system-turn",
+    )
+
+    async with db.connect() as conn:
+        row = (
+            await conn.execute(
+                sa.select(
+                    _conversation_turns.c.turn_kind,
+                    _conversation_turns.c.user_message,
+                    _conversation_turns.c.answer,
+                    _conversation_turns.c.erased_at,
+                ).where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).one()
+    assert row.turn_kind == "system"
+    assert row.user_message is None
+    assert row.answer is None
+    assert row.erased_at is not None
