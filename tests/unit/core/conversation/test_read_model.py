@@ -12,6 +12,7 @@ defect classes the integrity doctrine refuses).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import uuid
 from collections.abc import AsyncIterator
@@ -22,19 +23,27 @@ from typing import Any
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from sqlalchemy.dialects import oracle, postgresql, sqlite
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from cognic_agentos.core.audit import _chain_heads
 from cognic_agentos.core.conversation.read_model import (
     PAGE_LIMIT_DEFAULT,
     PAGE_LIMIT_MAX,
     ConversationChainIntegrityError,
     ConversationChainProjectionLimit,
+    ConversationExportEnvelope,
     ConversationReadModel,
     ConversationTranscriptIntegrityError,
     CursorInvalid,
     TurnNotFound,
     _build_chain_row_stmt,
     _build_dispatch_window_stmt,
+    _build_export_chain_candidates_stmt,
+    _build_export_chain_watermark_stmt,
+    _build_export_conversation_lock_stmt,
+    _build_export_turn_locks_stmt,
     _build_list_stmt,
     _build_transcript_stmt,
     _encode_cursor,
@@ -664,6 +673,543 @@ async def test_transcript_surfaces_the_erasure_shape(
     turn = page.turns[0]
     assert turn.user_message is None and turn.answer is None
     assert turn.erased_at is not None
+
+
+@pytest.mark.parametrize(
+    ("user_message", "answer", "erased_at"),
+    [
+        ("question 1", None, datetime(2026, 7, 10, 13, 0, 0, tzinfo=UTC)),
+        (None, "answer 1", datetime(2026, 7, 10, 13, 0, 0, tzinfo=UTC)),
+        (None, None, None),
+        ("question 1", None, None),
+    ],
+)
+async def test_transcript_refuses_inconsistent_tombstones(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+    user_message: str | None,
+    answer: str | None,
+    erased_at: datetime | None,
+) -> None:
+    """A half-erased row must never be rendered as either live or erased."""
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversation_turns)
+            .where(_conversation_turns.c.conversation_id == cid)
+            .values(user_message=user_message, answer=answer, erased_at=erased_at)
+        )
+
+    with pytest.raises(ConversationTranscriptIntegrityError, match="tombstone"):
+        await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject=_CREATOR)
+
+
+async def test_transcript_tombstone_corruption_in_probe_fails_immediately(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    await _drive_turn(store, history, cid, 2)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversation_turns)
+            .where(
+                _conversation_turns.c.conversation_id == cid,
+                _conversation_turns.c.seq == 2,
+            )
+            .values(answer=None, erased_at=None)
+        )
+
+    with pytest.raises(ConversationTranscriptIntegrityError, match="tombstone"):
+        await reader.read_transcript(
+            cid,
+            tenant_id=_TENANT,
+            creator_subject=_CREATOR,
+            limit=1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Export: tenant-wide scope, tombstones, bounded correlation-only chain refs
+# ---------------------------------------------------------------------------
+
+
+async def test_export_sqlite_emits_deferred_begin_before_every_snapshot_read(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    """Pin the stable snapshot without reserving SQLite's global writer lock."""
+
+    cid = await _new_conversation(store)
+    statements: list[str] = []
+    commits: list[None] = []
+
+    def _record_statement(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    def _record_commit(_conn: Any) -> None:
+        commits.append(None)
+
+    sa.event.listen(db.sync_engine, "before_cursor_execute", _record_statement)
+    sa.event.listen(db.sync_engine, "commit", _record_commit)
+    try:
+        exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+    finally:
+        sa.event.remove(db.sync_engine, "before_cursor_execute", _record_statement)
+        sa.event.remove(db.sync_engine, "commit", _record_commit)
+
+    assert exported is not None
+    assert statements[0] == "BEGIN"
+    assert "conversations" in statements[1]
+    assert "conversation_turns" in statements[2]
+    assert "governance_chain_heads" in statements[3]
+    assert "decision_history" in statements[4]
+    assert all("BEGIN IMMEDIATE" not in statement for statement in statements)
+    assert commits == [None]
+
+
+async def test_export_sqlite_rolls_back_explicit_snapshot_on_error(
+    store: ConversationStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.delete(_chain_heads).where(_chain_heads.c.chain_id == "decision_history")
+        )
+
+    statements: list[str] = []
+    rollbacks: list[None] = []
+
+    def _record_statement(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    def _record_rollback(_conn: Any) -> None:
+        rollbacks.append(None)
+
+    sa.event.listen(db.sync_engine, "before_cursor_execute", _record_statement)
+    sa.event.listen(db.sync_engine, "rollback", _record_rollback)
+    try:
+        with pytest.raises(NoResultFound):
+            await reader.export_conversation(cid, tenant_id=_TENANT)
+    finally:
+        sa.event.remove(db.sync_engine, "before_cursor_execute", _record_statement)
+        sa.event.remove(db.sync_engine, "rollback", _record_rollback)
+
+    assert statements[0] == "BEGIN"
+    assert "conversations" in statements[1]
+    assert "conversation_turns" in statements[2]
+    assert "governance_chain_heads" in statements[3]
+    assert all("BEGIN IMMEDIATE" not in statement for statement in statements)
+    assert rollbacks == [None]
+
+
+async def test_export_server_releases_local_locks_before_chain_scan() -> None:
+    """Pin the short server fence and unlocked scan order without a live server."""
+
+    cid = uuid.uuid4()
+    now = datetime(2026, 7, 27, tzinfo=UTC)
+    conversation = {
+        "conversation_id": cid,
+        "tenant_id": _TENANT,
+        "agent_id": _AGENT,
+        "creator_subject": _CREATOR,
+        "state": "active",
+        "turn_count": 0,
+        "cumulative_tokens": 0,
+        "retention_class": None,
+        "created_at": now,
+        "last_turn_at": None,
+        "erased_at": None,
+    }
+
+    class _Result:
+        def __init__(self, *, one: Any = None, first: Any = None, rows: Any = None) -> None:
+            self._one = one
+            self._first = first
+            self._rows = [] if rows is None else rows
+
+        def one(self) -> Any:
+            return self._one
+
+        def mappings(self) -> _Result:
+            return self
+
+        def first(self) -> Any:
+            return self._first
+
+        def all(self) -> Any:
+            return self._rows
+
+    class _Transaction:
+        def __init__(self, connection: _Connection) -> None:
+            self.connection = connection
+
+        async def __aenter__(self) -> None:
+            self.connection.transaction_enters += 1
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            self.connection.transaction_exits += 1
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Connection:
+        dialect = _Dialect()
+
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+            self.transaction_states: list[tuple[int, int]] = []
+            self.transaction_enters = 0
+            self.transaction_exits = 0
+            self.results = iter(
+                (
+                    _Result(first=conversation),
+                    _Result(rows=[]),
+                    _Result(one=(0,)),
+                    _Result(rows=[]),
+                )
+            )
+
+        def begin(self) -> _Transaction:
+            return _Transaction(self)
+
+        async def exec_driver_sql(self, _sql: str) -> None:
+            raise AssertionError("server dialect must not use SQLite transaction SQL")
+
+        async def execute(self, statement: Any) -> _Result:
+            self.statements.append(statement)
+            self.transaction_states.append((self.transaction_enters, self.transaction_exits))
+            return next(self.results)
+
+    class _Connect:
+        def __init__(self, connection: _Connection) -> None:
+            self.connection = connection
+
+        async def __aenter__(self) -> _Connection:
+            return self.connection
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.connection = _Connection()
+
+        def connect(self) -> _Connect:
+            return _Connect(self.connection)
+
+    engine = _Engine()
+    reader = ConversationReadModel(engine, chain_candidate_limit=10)  # type: ignore[arg-type]
+
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+
+    assert exported is not None
+    assert engine.connection.transaction_enters == 1
+    assert engine.connection.transaction_exits == 1
+    assert len(engine.connection.statements) == 4
+    assert engine.connection.transaction_states == [
+        (1, 0),
+        (1, 0),
+        (1, 0),
+        (1, 1),
+    ]
+    assert engine.connection.statements[0].compare(
+        _build_export_conversation_lock_stmt(
+            conversation_id=cid,
+            tenant_id=_TENANT,
+        )
+    )
+    assert engine.connection.statements[1].compare(
+        _build_export_turn_locks_stmt(conversation_id=cid)
+    )
+    assert engine.connection.statements[2].compare(_build_export_chain_watermark_stmt())
+    assert engine.connection.statements[3].compare(
+        _build_export_chain_candidates_stmt(
+            tenant_id=_TENANT,
+            watermark=0,
+            limit_plus_one=11,
+        )
+    )
+
+
+async def test_export_local_locks_and_unlocked_watermark_compile_for_dialects() -> None:
+    conversation_lock = _build_export_conversation_lock_stmt(
+        conversation_id=uuid.uuid4(),
+        tenant_id=_TENANT,
+    )
+    turn_locks = _build_export_turn_locks_stmt(conversation_id=uuid.uuid4())
+    watermark = _build_export_chain_watermark_stmt()
+
+    for dialect in (postgresql.dialect(), oracle.dialect()):  # type: ignore[no-untyped-call]
+        assert "FOR UPDATE" in str(conversation_lock.compile(dialect=dialect))
+        assert "FOR UPDATE" in str(turn_locks.compile(dialect=dialect))
+        assert "FOR UPDATE" not in str(watermark.compile(dialect=dialect))
+
+    for statement in (conversation_lock, turn_locks, watermark):
+        assert "FOR UPDATE" not in str(statement.compile(dialect=sqlite.dialect()))
+
+
+async def test_export_chain_candidate_scan_is_cut_off_at_unlocked_watermark() -> None:
+    stmt = _build_export_chain_candidates_stmt(
+        tenant_id=_TENANT,
+        watermark=17,
+        limit_plus_one=11,
+    )
+    compiled = stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+    assert compiled.params["tenant_id_1"] == _TENANT
+    assert compiled.params["sequence_1"] == 17
+    assert compiled.params["param_1"] == 11
+
+
+async def test_export_is_tenant_wide_and_cross_tenant_absent(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+) -> None:
+    creator = "analyst.other"
+    cid = await _new_conversation(store, creator=creator)
+    await _drive_turn(store, history, cid, 1, creator=creator)
+
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+    assert isinstance(exported, ConversationExportEnvelope)
+    assert exported.schema_version == 1
+    assert exported.conversation.creator_subject == creator
+    assert await reader.export_conversation(cid, tenant_id="t-other") is None
+
+
+async def test_export_preserves_every_turn_and_tombstone(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    await _drive_turn(store, history, cid, 2)
+    erased_when = datetime(2026, 7, 10, 13, 0, 0, tzinfo=UTC)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversation_turns)
+            .where(
+                _conversation_turns.c.conversation_id == cid,
+                _conversation_turns.c.seq == 1,
+            )
+            .values(user_message=None, answer=None, erased_at=erased_when)
+        )
+
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+    assert exported is not None
+    assert [turn.seq for turn in exported.turns] == [1, 2]
+    assert exported.turns[0].user_message is None
+    assert exported.turns[0].answer is None
+    assert exported.turns[0].erased_at is not None
+    assert exported.turns[1].user_message == "question 2"
+    assert exported.turns[1].answer == "answer 2"
+    assert exported.turns[1].erased_at is None
+
+
+async def test_export_preserves_live_system_turn_shape(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id=_TENANT,
+        now=datetime.now(UTC),
+        claim_ttl_s=600.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text="approval settled",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id=f"conv-system-{uuid.uuid4().hex}",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id=_TENANT, claim_id=claim.claim_id)
+
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+    assert exported is not None
+    assert [turn.turn_kind for turn in exported.turns] == ["exchange", "system"]
+    system_turn = exported.turns[1]
+    assert system_turn.user_message is None
+    assert system_turn.answer == "approval settled"
+    assert system_turn.erased_at is None
+    assert len(exported.chain_refs) == 3
+
+
+async def test_redaction_values_are_unrecoverable_through_transcript_and_export(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+) -> None:
+    """Exercise the real write verb through both public read projections."""
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+
+    assert await store.redact_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        seq=1,
+        actor_id="compliance-officer",
+        request_id="conversation-redact-read-path-regression",
+    )
+
+    transcript = await reader.read_transcript(
+        cid,
+        tenant_id=_TENANT,
+        creator_subject=_CREATOR,
+    )
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+
+    assert transcript is not None
+    assert exported is not None
+    assert len(transcript.turns) == len(exported.turns) == 1
+    assert transcript.turns[0].user_message is None
+    assert transcript.turns[0].answer is None
+    assert transcript.turns[0].erased_at is not None
+    assert exported.turns[0].user_message is None
+    assert exported.turns[0].answer is None
+    assert exported.turns[0].erased_at is not None
+    # created + turn_completed + the newly appended conversation.erased row.
+    # R9 makes this correlation-derived; no event name is enumerated in code.
+    assert len(exported.chain_refs) == 3
+
+
+async def test_export_refuses_inconsistent_tombstone_through_shared_validator(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversation_turns)
+            .where(_conversation_turns.c.conversation_id == cid)
+            .values(answer=None, erased_at=None)
+        )
+
+    with pytest.raises(ConversationTranscriptIntegrityError, match="tombstone"):
+        await reader.export_conversation(cid, tenant_id=_TENANT)
+
+
+async def test_export_chain_refs_follow_payload_correlation_without_event_allowlist(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    await store.transition(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        to_state="closed",
+        actor_id=_CREATOR,
+        request_id=f"conv-close-{uuid.uuid4().hex}",
+    )
+    credential_sentinel = "vault://must-not-leak/export-credential"
+    await history.append(
+        DecisionRecord(
+            decision_type="future.conversation.lifecycle",
+            request_id=f"future-conversation-{uuid.uuid4().hex}",
+            tenant_id=_TENANT,
+            payload={
+                "conversation_id": str(cid),
+                "credential_rotation_ref": credential_sentinel,
+            },
+        )
+    )
+    await history.append(
+        DecisionRecord(
+            decision_type="future.conversation.lifecycle",
+            request_id=f"cross-tenant-conversation-{uuid.uuid4().hex}",
+            tenant_id="t-other",
+            payload={"conversation_id": str(cid)},
+        )
+    )
+    other_cid = await _new_conversation(store)
+    await _drive_turn(store, history, other_cid, 1)
+
+    async with db.connect() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    sa.select(_decision_history)
+                    .where(_decision_history.c.tenant_id == _TENANT)
+                    .order_by(_decision_history.c.sequence.asc())
+                )
+            )
+            .mappings()
+            .all()
+        )
+    expected = tuple(
+        (row["sequence"], bytes(row["hash"]).hex())
+        for row in rows
+        if isinstance(row["payload"], dict) and row["payload"].get("conversation_id") == str(cid)
+    )
+    correlated_types = {
+        row["event_type"]
+        for row in rows
+        if isinstance(row["payload"], dict) and row["payload"].get("conversation_id") == str(cid)
+    }
+
+    exported = await reader.export_conversation(cid, tenant_id=_TENANT)
+    assert exported is not None
+    assert tuple((ref.sequence, ref.hash) for ref in exported.chain_refs) == expected
+    assert {
+        "conversation.created",
+        "conversation.turn_completed",
+        "conversation.closed",
+        "future.conversation.lifecycle",
+    } <= correlated_types
+    assert credential_sentinel not in repr(dataclasses.asdict(exported))
+    assert {field.name for field in dataclasses.fields(exported.chain_refs[0])} == {
+        "sequence",
+        "hash",
+    }
+
+
+async def test_export_chain_scan_fails_closed_above_candidate_limit(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    db: AsyncEngine,
+) -> None:
+    cid = await _new_conversation(store)
+    await _drive_turn(store, history, cid, 1)
+    bounded = ConversationReadModel(db, chain_candidate_limit=1)
+
+    with pytest.raises(ConversationChainProjectionLimit, match="export"):
+        await bounded.export_conversation(cid, tenant_id=_TENANT)
 
 
 async def test_transcript_gap_is_integrity_failure(

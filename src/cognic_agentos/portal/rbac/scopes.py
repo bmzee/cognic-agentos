@@ -485,9 +485,9 @@ AgentRBACScope = Literal["agent.ask"]
 AGENT_SCOPES: frozenset[AgentRBACScope] = frozenset({"agent.ask"})
 
 
-#: ADR-028 M8.5-C — conversation RBAC family. Four values in the vertical
-#: slice; ``conversation.export`` / ``conversation.redact`` are compliance-role,
-#: human-actor-gated scopes that land with the M8.5-F erasure pathway (the
+#: ADR-028 M8.5-C/F — conversation RBAC family. Six values after the M8.5-F
+#: erasure slice; ``conversation.export`` / ``conversation.redact`` are
+#: compliance-role, human-actor-gated scopes (the
 #: ``RunRBACScope`` 1 -> 2 additive growth is the precedent). Namespace-disjoint
 #: from ``agent.*`` -- deliberately distinct, because conversing with an agent is
 #: not the same authority as invoking one. Pinned by
@@ -497,9 +497,11 @@ ConversationRBACScope = Literal[
     "conversation.read",
     "conversation.post_turn",
     "conversation.close",
+    "conversation.export",
+    "conversation.redact",
 ]
 
-#: The 4 conversation scopes as a frozenset (1:1 with
+#: The 6 conversation scopes as a frozenset (1:1 with
 #: :data:`ConversationRBACScope`) for bank-overlay binders.
 CONVERSATION_SCOPES: frozenset[ConversationRBACScope] = frozenset(
     {
@@ -507,6 +509,8 @@ CONVERSATION_SCOPES: frozenset[ConversationRBACScope] = frozenset(
         "conversation.read",
         "conversation.post_turn",
         "conversation.close",
+        "conversation.export",
+        "conversation.redact",
     }
 )
 
@@ -552,12 +556,15 @@ CONFIG_OVERLAY_SCOPES: frozenset[ConfigOverlayRBACScope] = frozenset(
 )
 
 
-#: Examiner-role compliance grant. Bank-overlay examiner binders grant
+#: Examiner-role compliance + conversation-erasure grant. Bank-overlay
+#: examiner binders grant
 #: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
-EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
+EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope | ConversationRBACScope] = frozenset(
     {
         "compliance.evidence_pack.read",
         "compliance.trace.read",
+        "conversation.export",
+        "conversation.redact",
     }
 )
 

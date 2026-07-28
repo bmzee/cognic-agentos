@@ -2,12 +2,14 @@
 
 CRITICAL CONTROLS. Two enforcement boundaries live here:
 
-1. **Tenant + creator isolation.** Every read and every claim carries
-   ``WHERE tenant_id = :tenant_id AND creator_subject = :creator_subject``.
-   A cross-tenant or cross-actor ``conversation_id`` reads as ABSENT (``None``
-   / :class:`ConversationNotFound`), never as a permission error -- the route
-   collapses it to a 404 byte-identical to a genuine not-found, so a probe
-   cannot enumerate conversations across tenants or actors.
+1. **Tenant isolation.** User-facing reads and claims additionally carry the
+   immutable ``creator_subject`` predicate. Compliance erasure is deliberately
+   tenant-wide, so its writes carry ``WHERE tenant_id = :tenant_id`` without
+   creator scope. A cross-tenant or cross-actor ``conversation_id`` reads as
+   ABSENT (``None`` / :class:`ConversationNotFound`), never as a permission
+   error -- the route collapses it to a 404 byte-identical to a genuine
+   not-found, so a probe cannot enumerate conversations across tenants or
+   actors.
 
 2. **Chain atomicity (Doctrine Lock D).** Every write drives
    ``DecisionHistoryStore.append_with_precondition`` so the chain row, the
@@ -86,6 +88,11 @@ _STATE_TO_DECISION_TYPE: Final[dict[str, str]] = {
 _PERSISTABLE_STATES: Final[frozenset[ConversationState]] = frozenset({"active", "closed"})
 
 _TS = TIMESTAMP(timezone=True)
+
+
+class _RedactionNotApplied(Exception):
+    """Internal rollback signal for absent or already-erased targets."""
+
 
 _conversations = Table(
     "conversations",
@@ -702,6 +709,146 @@ class ConversationStore:
             precondition=_precondition,
         )
         return turn_id
+
+    # -- erasure ---------------------------------------------------------------
+
+    async def redact_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        seq: int,
+        actor_id: str,
+        request_id: str,
+    ) -> bool:
+        """Erase one turn's values and append ``conversation.erased`` atomically.
+
+        Compliance authority is tenant-wide: creator identity is deliberately
+        not part of this predicate. Absent, cross-tenant and already-erased
+        targets all return ``False`` without appending evidence. The retained
+        row keeps identifiers, correlation and the original digest-only chain
+        row intact.
+        """
+        now = datetime.now(UTC)
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
+            tenant_match = sa.exists(
+                select(1).where(
+                    _conversations.c.conversation_id == conversation_id,
+                    _conversations.c.tenant_id == tenant_id,
+                )
+            )
+            result = await conn.execute(
+                update(_conversation_turns)
+                .where(
+                    _conversation_turns.c.conversation_id == conversation_id,
+                    _conversation_turns.c.seq == seq,
+                    _conversation_turns.c.erased_at.is_(None),
+                    tenant_match,
+                )
+                .values(
+                    user_message=None,
+                    answer=None,
+                    erased_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                raise _RedactionNotApplied
+
+        def _build(_: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="conversation.erased",
+                request_id=request_id,
+                payload={
+                    "conversation_id": str(conversation_id),
+                    "scope": "turn",
+                    "seq": seq,
+                    "erased_turn_count": 1,
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=CONVERSATION_ISO_CONTROLS,
+            )
+
+        try:
+            await self._history.append_with_precondition(
+                record_builder=_build,
+                precondition=_precondition,
+            )
+        except _RedactionNotApplied:
+            return False
+        return True
+
+    async def redact_conversation(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        actor_id: str,
+        request_id: str,
+    ) -> bool:
+        """Erase a conversation and all of its turn values atomically.
+
+        Marking the parent ``erased`` in the same transaction is the
+        resurrection fence: an already-admitted worker reaches
+        :func:`_require_persistable_claim` before persistence and refuses. The
+        parent UPDATE carries the tenant and ``erased_at IS NULL`` guards; a
+        zero rowcount is the same absent/already-erased ``False`` result as the
+        turn-scoped verb.
+        """
+        now = datetime.now(UTC)
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> int:
+            parent = await conn.execute(
+                update(_conversations)
+                .where(
+                    _conversations.c.conversation_id == conversation_id,
+                    _conversations.c.tenant_id == tenant_id,
+                    _conversations.c.erased_at.is_(None),
+                )
+                .values(
+                    state="erased",
+                    erased_at=now,
+                )
+            )
+            if parent.rowcount != 1:
+                raise _RedactionNotApplied
+            turns = await conn.execute(
+                update(_conversation_turns)
+                .where(
+                    _conversation_turns.c.conversation_id == conversation_id,
+                    _conversation_turns.c.erased_at.is_(None),
+                )
+                .values(
+                    user_message=None,
+                    answer=None,
+                    erased_at=now,
+                )
+            )
+            return int(turns.rowcount)
+
+        def _build(erased_turn_count: int) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="conversation.erased",
+                request_id=request_id,
+                payload={
+                    "conversation_id": str(conversation_id),
+                    "scope": "conversation",
+                    "erased_turn_count": erased_turn_count,
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=CONVERSATION_ISO_CONTROLS,
+            )
+
+        try:
+            await self._history.append_with_precondition(
+                record_builder=_build,
+                precondition=_precondition,
+            )
+        except _RedactionNotApplied:
+            return False
+        return True
 
     # -- lifecycle -------------------------------------------------------------
 

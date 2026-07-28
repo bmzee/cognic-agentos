@@ -14,6 +14,7 @@ from cognic_agentos.portal.rbac.enforcement import RequireScope
 from cognic_agentos.portal.rbac.scopes import (
     AGENT_SCOPES,
     CONVERSATION_SCOPES,
+    EXAMINER_COMPLIANCE_SCOPES,
     MCP_SCOPES,
     MEMORY_SCOPES,
     PACK_LIFECYCLE_SCOPES,
@@ -28,14 +29,16 @@ def test_literal_and_frozenset_agree() -> None:
     assert set(get_args(ConversationRBACScope)) == CONVERSATION_SCOPES
 
 
-def test_exactly_four_values_in_the_vertical_slice() -> None:
-    """export / redact are compliance-role, human-gated, and land with M8.5-F."""
-    assert len(CONVERSATION_SCOPES) == 4
+def test_exactly_six_values_after_the_erasure_slice() -> None:
+    """Export / redact are the additive M8.5-F compliance-role scopes."""
+    assert len(CONVERSATION_SCOPES) == 6
     assert {
         "conversation.create",
         "conversation.read",
         "conversation.post_turn",
         "conversation.close",
+        "conversation.export",
+        "conversation.redact",
     } == CONVERSATION_SCOPES
 
 
@@ -56,10 +59,9 @@ def test_namespace_is_disjoint_from_every_other_family() -> None:
         assert CONVERSATION_SCOPES.isdisjoint(other)
 
 
-def test_export_and_redact_are_not_yet_in_the_vocabulary() -> None:
-    """Guard against silently widening authority before the erasure slice."""
-    assert "conversation.export" not in CONVERSATION_SCOPES
-    assert "conversation.redact" not in CONVERSATION_SCOPES
+def test_examiner_compliance_grant_carries_export_and_redact() -> None:
+    """The compliance examiner grant is the only built-in role mapping widened."""
+    assert {"conversation.export", "conversation.redact"} <= EXAMINER_COMPLIANCE_SCOPES
 
 
 def test_actor_accepts_a_conversation_scope() -> None:
