@@ -20,12 +20,15 @@ load-bearing alone. Dispatch remains the final authority: the M8 chokepoint
 re-checks assignment -> entitlement -> policy on every dispatch of every turn.
 """
 
+import hashlib
 import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
+from cognic_agentos.core.audit import AuditEvent, AuditStore
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.conversation._types import (
     ConversationNotFound,
     ConversationState,
@@ -35,6 +38,7 @@ from cognic_agentos.core.conversation._types import (
 from cognic_agentos.core.conversation.read_model import (
     ConversationChainIntegrityError,
     ConversationChainProjectionLimit,
+    ConversationExportEnvelope,
     ConversationReadModel,
     ConversationTranscriptIntegrityError,
     CursorInvalid,
@@ -43,6 +47,10 @@ from cognic_agentos.core.conversation.read_model import (
 from cognic_agentos.core.conversation.storage import ConversationStore
 from cognic_agentos.core.conversation.turn import ConversationTurnExecutor
 from cognic_agentos.portal.api.conversations.dto import (
+    ConversationExportChainRefResponse,
+    ConversationExportMetadataResponse,
+    ConversationExportResponse,
+    ConversationExportTurnResponse,
     ConversationListResponse,
     ConversationResponse,
     ConversationSummaryResponse,
@@ -59,6 +67,7 @@ from cognic_agentos.portal.api.conversations.dto import (
 )
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
+from cognic_agentos.portal.rbac.human_actor import RequireHumanActor
 
 #: Byte-stable 404 bodies. A cross-tenant or cross-actor conversation is
 #: indistinguishable from one that never existed.
@@ -103,6 +112,60 @@ def _require_read_model(request: Request) -> ConversationReadModel:
     return reader
 
 
+def _require_audit_store(request: Request) -> AuditStore:
+    audit_store: AuditStore | None = getattr(request.app.state, "audit_store", None)
+    if audit_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"reason": "audit_store_unavailable"},
+        )
+    return audit_store
+
+
+def _render_export(envelope: ConversationExportEnvelope) -> ConversationExportResponse:
+    """Project the core export envelope without filtering its chain rows."""
+    conversation = envelope.conversation
+    return ConversationExportResponse(
+        schema_version=envelope.schema_version,
+        metadata=ConversationExportMetadataResponse(
+            conversation_id=conversation.conversation_id,
+            tenant_id=conversation.tenant_id,
+            agent_id=conversation.agent_id,
+            creator_subject=conversation.creator_subject,
+            state=conversation.state,
+            turn_count=conversation.turn_count,
+            cumulative_tokens=conversation.cumulative_tokens,
+            retention_class=conversation.retention_class,
+            created_at=conversation.created_at,
+            last_turn_at=conversation.last_turn_at,
+            erased_at=conversation.erased_at,
+        ),
+        turns=[
+            ConversationExportTurnResponse(
+                turn_id=turn.turn_id,
+                seq=turn.seq,
+                user_message=turn.user_message,
+                answer=turn.answer,
+                agent_run_id=turn.agent_run_id,
+                prompt_tokens=turn.prompt_tokens,
+                completion_tokens=turn.completion_tokens,
+                created_at=turn.created_at,
+                erased_at=turn.erased_at,
+                approval_request_id=turn.approval_request_id,
+                turn_kind=turn.turn_kind,
+                turn_completed_request_id=turn.turn_completed_request_id,
+            )
+            for turn in envelope.turns
+        ],
+        # R9: the core read model has already selected rows by conversation
+        # correlation. The portal applies no event-type allow-list.
+        chain_refs=[
+            ConversationExportChainRefResponse(sequence=ref.sequence, hash=ref.hash)
+            for ref in envelope.chain_refs
+        ],
+    )
+
+
 def _log_access(
     endpoint: str,
     *,
@@ -112,8 +175,10 @@ def _log_access(
     seq: int | None = None,
 ) -> None:
     """The ruled M8.5-B access log: identifiers + outcome ONLY — never
-    transcript plaintext, never payload content. No chain/audit append rides
-    a GET (a chain write would serialize every read on the chain-head lock)."""
+    transcript plaintext, never payload content. Ordinary read GETs do not
+    append chain/audit rows (a chain write would serialize every read on the
+    chain-head lock). The compliance export is the ruled exception: it appends
+    one value-free ``conversation.exported`` audit row before returning."""
     logger.info(
         "portal.conversations.%s",
         endpoint,
@@ -142,6 +207,9 @@ def build_conversation_routes() -> APIRouter:
     _require_read = RequireScope("conversation.read")
     _require_post_turn = RequireScope("conversation.post_turn")
     _require_close = RequireScope("conversation.close")
+    _require_export = RequireScope("conversation.export")
+    _require_redact = RequireScope("conversation.redact")
+    _require_human = RequireHumanActor()
 
     @router.post("", response_model=ConversationResponse, status_code=201)
     async def create_conversation(
@@ -257,6 +325,107 @@ def build_conversation_routes() -> APIRouter:
             state="closed",
             turn_count=record.turn_count,
         )
+
+    @router.post("/{conversation_id}/redact", status_code=204)
+    async def redact_conversation(
+        conversation_id: uuid.UUID,
+        actor: Annotated[Actor, Depends(_require_redact)],
+        _human: Annotated[Actor, Depends(_require_human)],
+        store: Annotated[ConversationStore, Depends(_require_store)],
+    ) -> Response:
+        redacted = await store.redact_conversation(
+            conversation_id=conversation_id,
+            tenant_id=actor.tenant_id,
+            actor_id=actor.subject,
+            request_id=f"conv-redact-{uuid.uuid4().hex}",
+        )
+        if not redacted:
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
+        return Response(status_code=204)
+
+    @router.post("/{conversation_id}/turns/{seq}/redact", status_code=204)
+    async def redact_turn(
+        conversation_id: uuid.UUID,
+        seq: int,
+        actor: Annotated[Actor, Depends(_require_redact)],
+        _human: Annotated[Actor, Depends(_require_human)],
+        store: Annotated[ConversationStore, Depends(_require_store)],
+    ) -> Response:
+        redacted = await store.redact_turn(
+            conversation_id=conversation_id,
+            seq=seq,
+            tenant_id=actor.tenant_id,
+            actor_id=actor.subject,
+            request_id=f"conv-redact-turn-{uuid.uuid4().hex}",
+        )
+        if not redacted:
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
+        return Response(status_code=204)
+
+    @router.get("/{conversation_id}/export", response_model=ConversationExportResponse)
+    async def export_conversation(
+        request: Request,
+        conversation_id: uuid.UUID,
+        actor: Annotated[Actor, Depends(_require_export)],
+        _human: Annotated[Actor, Depends(_require_human)],
+        reader: Annotated[ConversationReadModel, Depends(_require_read_model)],
+        audit_store: Annotated[AuditStore, Depends(_require_audit_store)],
+    ) -> ConversationExportResponse:
+        try:
+            envelope = await reader.export_conversation(
+                conversation_id,
+                tenant_id=actor.tenant_id,
+            )
+        except ConversationTranscriptIntegrityError as exc:
+            logger.error(
+                "portal.conversations.export_integrity_failed",
+                extra={
+                    "tenant_id": actor.tenant_id,
+                    "actor_subject": actor.subject,
+                    "conversation_id": str(conversation_id),
+                    "detail": exc.detail,
+                },
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"reason": "conversation_transcript_integrity_failed"},
+            ) from None
+        except ConversationChainProjectionLimit as exc:
+            logger.error(
+                "portal.conversations.export_projection_limit",
+                extra={
+                    "tenant_id": actor.tenant_id,
+                    "actor_subject": actor.subject,
+                    "conversation_id": str(conversation_id),
+                    "detail": exc.detail,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"reason": "conversation_chain_projection_limit"},
+            ) from None
+        if envelope is None:
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
+
+        rendered = _render_export(envelope)
+        rendered_sha256 = hashlib.sha256(
+            canonical_bytes(rendered.model_dump(mode="json"))
+        ).hexdigest()
+        await audit_store.append(
+            AuditEvent(
+                event_type="conversation.exported",
+                request_id=getattr(request.state, "request_id", None)
+                or f"conv-export-{uuid.uuid4().hex}",
+                tenant_id=actor.tenant_id,
+                payload={
+                    "actor_id": actor.subject,
+                    "tenant_id": actor.tenant_id,
+                    "conversation_id": str(conversation_id),
+                    "rendered_sha256": rendered_sha256,
+                },
+            )
+        )
+        return rendered
 
     @router.get("", response_model=ConversationListResponse)
     async def list_conversations(

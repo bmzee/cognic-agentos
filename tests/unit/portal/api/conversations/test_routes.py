@@ -10,6 +10,7 @@ FastAPI envelope is the wire contract.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -17,11 +18,20 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.conversation._types import (
     ConversationNotFound,
     ConversationRecord,
     ConversationTransitionRefused,
     ConversationTurnRefused,
+)
+from cognic_agentos.core.conversation.read_model import (
+    ConversationChainProjectionLimit,
+    ConversationChainReference,
+    ConversationExportEnvelope,
+    ConversationExportMetadata,
+    ConversationExportTurn,
+    ConversationTranscriptIntegrityError,
 )
 from cognic_agentos.core.conversation.turn import TurnResult
 from cognic_agentos.portal.api.app import create_app
@@ -52,6 +62,8 @@ def _actor(scopes: Any = None) -> Actor:
                 "conversation.read",
                 "conversation.post_turn",
                 "conversation.close",
+                "conversation.export",
+                "conversation.redact",
             }
         ),
         actor_type="human",
@@ -66,6 +78,8 @@ class _StubStore:
         self._transition_raises = transition_raises
         self.created: list[dict[str, Any]] = []
         self.transitions: list[dict[str, Any]] = []
+        self.redacted_conversations: list[dict[str, Any]] = []
+        self.redacted_turns: list[dict[str, Any]] = []
 
     async def create_conversation(self, **kw: Any) -> tuple[uuid.UUID, bytes]:
         self.created.append(kw)
@@ -79,6 +93,14 @@ class _StubStore:
         if self._transition_raises is not None:
             raise self._transition_raises
         return uuid.uuid4(), b""
+
+    async def redact_conversation(self, **kw: Any) -> bool:
+        self.redacted_conversations.append(kw)
+        return self._record is not None
+
+    async def redact_turn(self, **kw: Any) -> bool:
+        self.redacted_turns.append(kw)
+        return self._record is not None
 
 
 class _StubExecutor:
@@ -134,6 +156,7 @@ def _client(
     store: Any = None,
     executor: Any = None,
     reader: Any = None,
+    audit_store: Any = None,
     actor: Actor | None = None,
     hosted: list[dict[str, Any]] | None = None,
 ) -> Any:
@@ -144,6 +167,8 @@ def _client(
     app.state.conversation_store = store
     app.state.conversation_executor = executor
     app.state.conversation_read_model = reader
+    if audit_store is not None:
+        app.state.audit_store = audit_store
     app.state.hosted_agents = hosted if hosted is not None else [{"agent_id": _AGENT}]
     return client, app
 
@@ -551,6 +576,75 @@ class _StubReader:
     async def read_turn_chain(self, *a: Any, **kw: Any) -> Any:
         self.calls.append(("read_turn_chain", kw))
         return self._resolve("read_turn_chain")
+
+    async def export_conversation(self, *a: Any, **kw: Any) -> Any:
+        self.calls.append(("export_conversation", kw))
+        return self._resolve("export_conversation")
+
+
+class _StubAuditStore:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def append(self, event: Any) -> tuple[uuid.UUID, bytes]:
+        self.events.append(event)
+        return uuid.uuid4(), b"\x00" * 32
+
+
+def _export_envelope() -> ConversationExportEnvelope:
+    when = datetime(2026, 7, 10, tzinfo=UTC)
+    return ConversationExportEnvelope(
+        schema_version=1,
+        conversation=ConversationExportMetadata(
+            conversation_id=_CID,
+            tenant_id="t1",
+            agent_id=_AGENT,
+            creator_subject="analyst.amir",
+            state="erased",
+            turn_count=2,
+            cumulative_tokens=120,
+            retention_class="pilot",
+            created_at=when,
+            last_turn_at=when,
+            erased_at=when,
+        ),
+        turns=(
+            ConversationExportTurn(
+                turn_id=_TURN_ID,
+                seq=1,
+                user_message=None,
+                answer=None,
+                agent_run_id="agent-run-1",
+                prompt_tokens=100,
+                completion_tokens=20,
+                created_at=when,
+                erased_at=when,
+                approval_request_id=None,
+                turn_kind="exchange",
+                turn_completed_request_id=f"conversation-{_CID}-turn-1",
+            ),
+            ConversationExportTurn(
+                turn_id=uuid.UUID("55555555-5555-5555-5555-555555555555"),
+                seq=2,
+                user_message="remaining question",
+                answer="remaining answer",
+                agent_run_id="agent-run-2",
+                prompt_tokens=80,
+                completion_tokens=10,
+                created_at=when,
+                erased_at=None,
+                approval_request_id=None,
+                turn_kind="exchange",
+                turn_completed_request_id=f"conversation-{_CID}-turn-2",
+            ),
+        ),
+        # R9: these are the correlation-selected rows. The route must not
+        # apply an event-type allow-list or drop either reference.
+        chain_refs=(
+            ConversationChainReference(sequence=2, hash="a" * 64),
+            ConversationChainReference(sequence=9, hash="b" * 64),
+        ),
+    )
 
 
 def _summary() -> Any:
@@ -968,3 +1062,312 @@ def test_access_logs_carry_identifiers_and_outcome_never_plaintext(
     record_repr = str(rec.__dict__)
     assert "SECRET-QUESTION-PLAINTEXT" not in record_repr
     assert "SECRET-ANSWER-PLAINTEXT" not in record_repr
+
+
+# --- M8.5-F: human-only redaction and export ------------------------------------
+
+
+def test_redact_conversation_is_human_only_tenant_wide_and_returns_empty_204(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    store = _StubStore(record=_active_record())
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=store,
+        actor=_actor(frozenset({"conversation.redact"})),
+    )
+
+    response = client.post(f"/api/v1/conversations/{_CID}/redact")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert len(store.redacted_conversations) == 1
+    call = store.redacted_conversations[0]
+    assert call["conversation_id"] == _CID
+    assert call["tenant_id"] == "t1"
+    assert call["actor_id"] == "analyst.amir"
+    assert call["request_id"].startswith("conv-redact-")
+    assert "creator_subject" not in call  # compliance authority is tenant-wide
+
+
+def test_redact_turn_is_human_only_tenant_wide_and_returns_empty_204(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    store = _StubStore(record=_active_record())
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=store,
+        actor=_actor(frozenset({"conversation.redact"})),
+    )
+
+    response = client.post(f"/api/v1/conversations/{_CID}/turns/2/redact")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert len(store.redacted_turns) == 1
+    call = store.redacted_turns[0]
+    assert call["conversation_id"] == _CID
+    assert call["seq"] == 2
+    assert call["tenant_id"] == "t1"
+    assert call["actor_id"] == "analyst.amir"
+    assert call["request_id"].startswith("conv-redact-turn-")
+    assert "creator_subject" not in call
+
+
+@pytest.mark.parametrize(
+    ("path", "call_attr"),
+    [
+        (f"/api/v1/conversations/{_CID}/redact", "redacted_conversations"),
+        (f"/api/v1/conversations/{_CID}/turns/1/redact", "redacted_turns"),
+    ],
+)
+def test_redact_unknown_and_cross_tenant_are_byte_identical(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    path: str,
+    call_attr: str,
+) -> None:
+    store = _StubStore(record=None)
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=store,
+        actor=_actor(frozenset({"conversation.redact"})),
+    )
+    cross = client.post(path)
+    unknown_path = path.replace(str(_CID), str(uuid.uuid4()))
+    unknown = client.post(unknown_path)
+
+    assert cross.status_code == unknown.status_code == 404
+    assert cross.content == unknown.content
+    assert cross.json() == {"detail": {"reason": "conversation_not_found"}}
+    assert len(getattr(store, call_attr)) == 2
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/api/v1/conversations/{_CID}/redact",
+        f"/api/v1/conversations/{_CID}/turns/1/redact",
+        f"/api/v1/conversations/{_CID}/export",
+    ],
+)
+def test_erasure_and_export_refuse_service_actors_even_when_scope_is_held(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    path: str,
+) -> None:
+    store = _StubStore(record=_active_record())
+    reader = _StubReader(export_conversation=_export_envelope())
+    audit_store = _StubAuditStore()
+    scope = "conversation.export" if path.endswith("/export") else "conversation.redact"
+    service_actor = _actor(frozenset({scope})).model_copy(update={"actor_type": "service"})
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=store,
+        reader=reader,
+        audit_store=audit_store,
+        actor=service_actor,
+    )
+
+    response = client.get(path) if path.endswith("/export") else client.post(path)
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "actor_type_must_be_human"
+    assert store.redacted_conversations == []
+    assert store.redacted_turns == []
+    assert reader.calls == []
+    assert audit_store.events == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/api/v1/conversations/{_CID}/redact",
+        f"/api/v1/conversations/{_CID}/turns/1/redact",
+        f"/api/v1/conversations/{_CID}/export",
+    ],
+)
+def test_human_gate_precedes_unavailable_operation_dependencies(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    path: str,
+) -> None:
+    """A service actor cannot probe store/read-model availability."""
+    scope = "conversation.export" if path.endswith("/export") else "conversation.redact"
+    service_actor = _actor(frozenset({scope})).model_copy(update={"actor_type": "service"})
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=None,
+        reader=None,
+        actor=service_actor,
+    )
+
+    response = client.get(path) if path.endswith("/export") else client.post(path)
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "actor_type_must_be_human"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "held_scope"),
+    [
+        ("post", f"/api/v1/conversations/{_CID}/redact", "conversation.export"),
+        ("post", f"/api/v1/conversations/{_CID}/turns/1/redact", "conversation.export"),
+        ("get", f"/api/v1/conversations/{_CID}/export", "conversation.redact"),
+    ],
+)
+def test_erasure_and_export_require_the_matching_scope_before_any_operation(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    method: str,
+    path: str,
+    held_scope: str,
+) -> None:
+    store = _StubStore(record=_active_record())
+    reader = _StubReader(export_conversation=_export_envelope())
+    audit_store = _StubAuditStore()
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        store=store,
+        reader=reader,
+        audit_store=audit_store,
+        actor=_actor(frozenset({held_scope})),
+    )
+
+    response = getattr(client, method)(path)
+
+    assert response.status_code == 403
+    assert store.redacted_conversations == []
+    assert store.redacted_turns == []
+    assert reader.calls == []
+    assert audit_store.events == []
+
+
+def test_export_projects_all_correlation_selected_rows_and_audits_only_digest(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader(export_conversation=_export_envelope())
+    audit_store = _StubAuditStore()
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        reader=reader,
+        audit_store=audit_store,
+        actor=_actor(frozenset({"conversation.export"})),
+    )
+
+    response = client.get(f"/api/v1/conversations/{_CID}/export")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == 1
+    assert body["metadata"]["conversation_id"] == str(_CID)
+    assert body["metadata"]["tenant_id"] == "t1"
+    assert body["metadata"]["retention_class"] == "pilot"
+    assert body["turns"][0]["erased_at"] is not None
+    assert body["turns"][0]["user_message"] is None
+    assert body["turns"][0]["answer"] is None
+    assert body["turns"][1]["user_message"] == "remaining question"
+    assert body["turns"][1]["answer"] == "remaining answer"
+    assert body["chain_refs"] == [
+        {"sequence": 2, "hash": "a" * 64},
+        {"sequence": 9, "hash": "b" * 64},
+    ]
+    assert reader.calls == [("export_conversation", {"tenant_id": "t1"})]
+
+    assert len(audit_store.events) == 1
+    event = audit_store.events[0]
+    assert event.event_type == "conversation.exported"
+    assert event.tenant_id == "t1"
+    assert event.payload == {
+        "actor_id": "analyst.amir",
+        "tenant_id": "t1",
+        "conversation_id": str(_CID),
+        "rendered_sha256": hashlib.sha256(canonical_bytes(body)).hexdigest(),
+    }
+    event_repr = repr(event)
+    assert "remaining question" not in event_repr
+    assert "remaining answer" not in event_repr
+
+
+def test_export_unknown_and_cross_tenant_are_byte_identical_and_not_audited(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader(export_conversation=None)
+    audit_store = _StubAuditStore()
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        reader=reader,
+        audit_store=audit_store,
+        actor=_actor(frozenset({"conversation.export"})),
+    )
+
+    cross = client.get(f"/api/v1/conversations/{_CID}/export")
+    unknown = client.get(f"/api/v1/conversations/{uuid.uuid4()}/export")
+
+    assert cross.status_code == unknown.status_code == 404
+    assert cross.content == unknown.content
+    assert cross.json() == {"detail": {"reason": "conversation_not_found"}}
+    assert audit_store.events == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "status_code", "reason"),
+    [
+        (
+            ConversationTranscriptIntegrityError("inconsistent tombstone"),
+            500,
+            "conversation_transcript_integrity_failed",
+        ),
+        (
+            ConversationChainProjectionLimit("export candidate cap exceeded"),
+            503,
+            "conversation_chain_projection_limit",
+        ),
+    ],
+)
+def test_export_failures_use_closed_wire_reasons_and_are_not_audited(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    failure: Exception,
+    status_code: int,
+    reason: str,
+) -> None:
+    reader = _StubReader(export_conversation=failure)
+    audit_store = _StubAuditStore()
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        reader=reader,
+        audit_store=audit_store,
+        actor=_actor(frozenset({"conversation.export"})),
+    )
+
+    response = client.get(f"/api/v1/conversations/{_CID}/export")
+
+    assert response.status_code == status_code
+    assert response.json() == {"detail": {"reason": reason}}
+    assert "inconsistent tombstone" not in response.text
+    assert "candidate cap" not in response.text
+    assert audit_store.events == []

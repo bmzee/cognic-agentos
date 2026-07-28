@@ -2,21 +2,23 @@
 
 CRITICAL CONTROLS. Three enforcement boundaries live here:
 
-1. **Tenant + creator isolation.** Every read resolves the conversation with
-   ``WHERE tenant_id = :t AND creator_subject = :s`` FIRST; absent,
-   cross-tenant and cross-actor all read as ``None`` and the route collapses
-   them to a 404 byte-identical to a genuine not-found. The chain read
-   touches ``decision_history`` only AFTER that gate, and every evidence
-   query carries a tenant predicate besides.
+1. **Tenant isolation and purpose-bounded actor scope.** Interactive reads
+   resolve the conversation with ``WHERE tenant_id = :t AND
+   creator_subject = :s`` FIRST; absent, cross-tenant and cross-actor all
+   read as ``None`` and the route collapses them to a 404 byte-identical to a
+   genuine not-found. The compliance export is deliberately tenant-wide and
+   therefore binds tenant (not creator) before reading turns or chain rows.
+   Every evidence query carries a tenant predicate besides.
 
-2. **Bounded, index-addressable evidence queries — never an unbounded
-   ``decision_history`` scan.** Hop 1 rides the 0016 correlation column
-   through the 0001 ``request_id`` index; the run anchors ride deterministic
-   ``{run_id}-started`` / ``{run_id}-terminal`` request ids; hop 3 rides the
-   0016 ``(tenant_id, event_type, sequence)`` index between the anchor
-   sequences with a configured candidate cap. ``payload`` is verification
-   INSIDE a bounded window, never the access path (Oracle CLOB — no portable
-   JSON index).
+2. **Bounded evidence queries; interactive joins remain index-addressable.**
+   Hop 1 rides the 0016 correlation column through the 0001 ``request_id``
+   index; the run anchors ride deterministic ``{run_id}-started`` /
+   ``{run_id}-terminal`` request ids; hop 3 rides the 0016
+   ``(tenant_id, event_type, sequence)`` index between the anchor sequences
+   with a configured candidate cap. The tenant-wide compliance export is the
+   ruled exception: no portable indexed conversation correlator exists in
+   the Oracle CLOB payload, so it performs a tenant-scoped, candidate-capped
+   scan and refuses rather than returning a partial result.
 
 3. **Chain integrity is corruption, not unavailability.** A persisted turn's
    evidence rows are written BEFORE the turn commits and the chain is
@@ -34,8 +36,9 @@ re-encoded cursor can never widen visibility. Malformed encoding, wrong
 version, invalid types, impossible bounds, filter mismatch and
 cross-conversation reuse all raise :class:`CursorInvalid` (422).
 
-Projections are CURATED per-key — raw chain payloads and chain hashes are
-never exposed (hash packaging is ``conversation.export``, M8.5-F).
+Projections are CURATED per-key — raw chain payloads are never exposed.
+Interactive reads omit chain hashes; the versioned ``conversation.export``
+envelope exposes only the ruled chain reference pair (sequence + hex hash).
 """
 
 from __future__ import annotations
@@ -45,14 +48,16 @@ import binascii
 import json
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, NoReturn
 
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from cognic_agentos.core.audit import _chain_heads
 from cognic_agentos.core.conversation._types import ConversationState
 from cognic_agentos.core.conversation.storage import (
     _conversation_turns,
@@ -139,6 +144,38 @@ class ConversationChainProjectionLimit(Exception):
 
 def _integrity(reason: ChainIntegrityReason, detail: str) -> NoReturn:
     raise ConversationChainIntegrityError(reason, detail)
+
+
+def _validate_turn_tombstone(
+    *,
+    turn_kind: str,
+    user_message: str | None,
+    answer: str | None,
+    erased_at: datetime | None,
+    where: str,
+) -> None:
+    """Refuse half-erased or resurrected turn rows before projection.
+
+    A live exchange carries both values. A live system turn deliberately
+    carries only ``answer``. Every erased turn, regardless of kind, carries
+    neither value and a non-null erasure marker. No other combination is a
+    valid persisted shape.
+    """
+
+    erased = user_message is None and answer is None and erased_at is not None
+    live_exchange = (
+        turn_kind == "exchange"
+        and user_message is not None
+        and answer is not None
+        and erased_at is None
+    )
+    live_system = (
+        turn_kind == "system" and user_message is None and answer is not None and erased_at is None
+    )
+    if not (erased or live_exchange or live_system):
+        raise ConversationTranscriptIntegrityError(
+            f"{where}: inconsistent tombstone for {turn_kind!r} turn"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +318,51 @@ class TranscriptPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationExportMetadata:
+    conversation_id: uuid.UUID
+    tenant_id: str
+    agent_id: str
+    creator_subject: str
+    state: ConversationState
+    turn_count: int
+    cumulative_tokens: int
+    retention_class: str | None
+    created_at: datetime
+    last_turn_at: datetime | None
+    erased_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationExportTurn:
+    turn_id: uuid.UUID
+    seq: int
+    user_message: str | None
+    answer: str | None
+    agent_run_id: str
+    prompt_tokens: int
+    completion_tokens: int
+    created_at: datetime
+    erased_at: datetime | None
+    approval_request_id: str | None
+    turn_kind: Literal["exchange", "system"]
+    turn_completed_request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationChainReference:
+    sequence: int
+    hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationExportEnvelope:
+    schema_version: Literal[1]
+    conversation: ConversationExportMetadata
+    turns: tuple[ConversationExportTurn, ...]
+    chain_refs: tuple[ConversationChainReference, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TurnCompletedProjection:
     sequence: int
     created_at: datetime
@@ -387,6 +469,93 @@ def _build_list_stmt(
             )
         )
     return stmt
+
+
+def _build_export_conversation_lock_stmt(
+    *, conversation_id: uuid.UUID, tenant_id: str
+) -> sa.Select[Any]:
+    """Lock only the tenant-bound conversation being exported."""
+
+    return (
+        sa.select(_conversations)
+        .where(
+            _conversations.c.conversation_id == conversation_id,
+            _conversations.c.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
+
+
+def _build_export_turn_locks_stmt(*, conversation_id: uuid.UUID) -> sa.Select[Any]:
+    """Lock the exported conversation's existing turns in deterministic order."""
+
+    return (
+        sa.select(_conversation_turns)
+        .where(_conversation_turns.c.conversation_id == conversation_id)
+        .order_by(_conversation_turns.c.seq.asc())
+        .with_for_update()
+    )
+
+
+def _build_export_chain_watermark_stmt() -> sa.Select[Any]:
+    """Read the append-only decision-history watermark without locking it."""
+
+    return sa.select(_chain_heads.c.latest_sequence).where(
+        _chain_heads.c.chain_id == "decision_history"
+    )
+
+
+def _build_export_chain_candidates_stmt(
+    *,
+    tenant_id: str,
+    watermark: int,
+    limit_plus_one: int,
+) -> sa.Select[Any]:
+    """Bound the correlation scan to rows committed at the watermark."""
+
+    return (
+        sa.select(
+            _decision_history.c.sequence,
+            _decision_history.c.hash,
+            _decision_history.c.payload,
+        )
+        .where(
+            _decision_history.c.tenant_id == tenant_id,
+            _decision_history.c.sequence <= watermark,
+        )
+        .order_by(_decision_history.c.sequence.asc())
+        .limit(limit_plus_one)
+    )
+
+
+@asynccontextmanager
+async def _export_snapshot_connection(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+    """Yield the short portable transaction that copies the domain snapshot.
+
+    Python 3.12's sqlite3 driver defaults to legacy transaction control:
+    ``Connection.begin()`` does not itself emit ``BEGIN`` and a SELECT does
+    not start a database transaction. A literal deferred ``BEGIN`` is
+    therefore load-bearing on SQLite so the first conversation read
+    establishes one stable snapshot without proactively reserving the
+    database-wide writer lock. Postgres and Oracle use the ordinary explicit
+    transaction; their row locks are applied by the export statements and
+    released before the separately bounded chain scan.
+    """
+
+    async with engine.connect() as conn:
+        if conn.dialect.name == "sqlite":
+            await conn.exec_driver_sql("BEGIN")
+            try:
+                yield conn
+            except BaseException:
+                await conn.rollback()
+                raise
+            else:
+                await conn.commit()
+            return
+
+        async with conn.begin():
+            yield conn
 
 
 def _build_transcript_stmt(
@@ -658,6 +827,13 @@ class ConversationReadModel:
                     f"conversation {conversation_id}: expected seq {expected}, "
                     f"found {turn_row['seq']} (gap inside 1..{watermark})"
                 )
+            _validate_turn_tombstone(
+                turn_kind=turn_row["turn_kind"],
+                user_message=turn_row["user_message"],
+                answer=turn_row["answer"],
+                erased_at=turn_row["erased_at"],
+                where=f"conversation {conversation_id} seq {turn_row['seq']}",
+            )
         last_returned = after_seq + len(page)
         if not has_more and last_returned != watermark:
             raise ConversationTranscriptIntegrityError(
@@ -701,6 +877,142 @@ class ConversationReadModel:
         )
         return TranscriptPage(
             conversation=summary, turns=turns, watermark=watermark, next_cursor=next_cursor
+        )
+
+    # -- compliance export -----------------------------------------------------------
+
+    async def export_conversation(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+    ) -> ConversationExportEnvelope | None:
+        """Return the ruled schema-v1 compliance envelope.
+
+        Export is tenant-wide by design: the route owns the compliance-role
+        + human-actor gate, while this read model binds every query to the
+        tenant and emits no audit row itself (R10). Chain references are
+        selected solely by exact ``payload.conversation_id`` correlation,
+        never by an event-name allow-list (R9), so later lifecycle events are
+        included automatically.
+
+        The current schema has no portable indexed conversation correlator on
+        ``decision_history.payload``. This therefore scans at most
+        ``chain_candidate_limit + 1`` tenant rows and refuses before
+        projection when the cap is exceeded. Cost is O(tenant chain rows) up
+        to that configured bound; it never silently returns a partial chain.
+        Server databases release the target conversation/turn locks before
+        this scan, so it never holds or indirectly queues the platform-global
+        chain head. SQLite has no row locks: the domain capture uses a short
+        deferred snapshot, while its later read scan retains SQLite's native
+        rollback-journal limitation that a reader may briefly delay a writer
+        commit. It never uses ``BEGIN IMMEDIATE``.
+        """
+
+        conversation_stmt = _build_export_conversation_lock_stmt(
+            conversation_id=conversation_id,
+            tenant_id=tenant_id,
+        )
+        turns_stmt = _build_export_turn_locks_stmt(
+            conversation_id=conversation_id,
+        )
+
+        # Server databases lock only the target conversation and its existing
+        # turns while copying the domain snapshot. The decision-history head
+        # is read as an unlocked append-only watermark: rows at or below it
+        # are already committed and immutable. Release the local locks before
+        # the bounded chain scan. Conversation writers acquire the global
+        # chain head before their domain precondition, so holding a local lock
+        # throughout the scan could otherwise make one waiting writer stall
+        # every governance append indirectly.
+        async with _export_snapshot_connection(self._engine) as conn:
+            conversation = (await conn.execute(conversation_stmt)).mappings().first()
+            if conversation is None:
+                return None
+            turn_rows = (await conn.execute(turns_stmt)).mappings().all()
+            watermark_row = (await conn.execute(_build_export_chain_watermark_stmt())).one()
+            watermark = int(watermark_row[0])
+
+        chain_candidates_stmt = _build_export_chain_candidates_stmt(
+            tenant_id=tenant_id,
+            watermark=watermark,
+            limit_plus_one=self._chain_candidate_limit + 1,
+        )
+        async with self._engine.connect() as conn:
+            chain_candidates = (await conn.execute(chain_candidates_stmt)).mappings().all()
+
+        if len(chain_candidates) > self._chain_candidate_limit:
+            raise ConversationChainProjectionLimit(
+                f"conversation {conversation_id}: export tenant-chain candidate cap "
+                f"{self._chain_candidate_limit} exceeded"
+            )
+
+        exchange_count = 0
+        for expected_seq, turn_row in enumerate(turn_rows, start=1):
+            if turn_row["seq"] != expected_seq:
+                raise ConversationTranscriptIntegrityError(
+                    f"conversation {conversation_id}: expected seq {expected_seq}, "
+                    f"found {turn_row['seq']} in export"
+                )
+            if turn_row["turn_kind"] == "exchange":
+                exchange_count += 1
+            _validate_turn_tombstone(
+                turn_kind=turn_row["turn_kind"],
+                user_message=turn_row["user_message"],
+                answer=turn_row["answer"],
+                erased_at=turn_row["erased_at"],
+                where=f"conversation {conversation_id} seq {turn_row['seq']}",
+            )
+        if exchange_count != conversation["turn_count"]:
+            raise ConversationTranscriptIntegrityError(
+                f"conversation {conversation_id}: export found {exchange_count} exchange rows "
+                f"for turn_count {conversation['turn_count']}"
+            )
+
+        metadata = ConversationExportMetadata(
+            conversation_id=conversation["conversation_id"],
+            tenant_id=conversation["tenant_id"],
+            agent_id=conversation["agent_id"],
+            creator_subject=conversation["creator_subject"],
+            state=conversation["state"],
+            turn_count=conversation["turn_count"],
+            cumulative_tokens=conversation["cumulative_tokens"],
+            retention_class=conversation["retention_class"],
+            created_at=conversation["created_at"],
+            last_turn_at=conversation["last_turn_at"],
+            erased_at=conversation["erased_at"],
+        )
+        turns = tuple(
+            ConversationExportTurn(
+                turn_id=turn_row["turn_id"],
+                seq=turn_row["seq"],
+                user_message=turn_row["user_message"],
+                answer=turn_row["answer"],
+                agent_run_id=turn_row["agent_run_id"],
+                prompt_tokens=turn_row["prompt_tokens"],
+                completion_tokens=turn_row["completion_tokens"],
+                created_at=turn_row["created_at"],
+                erased_at=turn_row["erased_at"],
+                approval_request_id=turn_row["approval_request_id"],
+                turn_kind=turn_row["turn_kind"],
+                turn_completed_request_id=turn_row["turn_completed_request_id"],
+            )
+            for turn_row in turn_rows
+        )
+        chain_refs = tuple(
+            ConversationChainReference(
+                sequence=candidate["sequence"],
+                hash=bytes(candidate["hash"]).hex(),
+            )
+            for candidate in chain_candidates
+            if isinstance(candidate["payload"], dict)
+            and candidate["payload"].get("conversation_id") == str(conversation_id)
+        )
+        return ConversationExportEnvelope(
+            schema_version=1,
+            conversation=metadata,
+            turns=turns,
+            chain_refs=chain_refs,
         )
 
     # -- the chain join ---------------------------------------------------------------
