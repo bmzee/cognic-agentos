@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -93,8 +94,13 @@ def test_agent_id_is_required_and_carries_no_pack_default() -> None:
     )
 
     assert result.exit_code == 2
-    assert "agent-id" in (result.stderr + result.stdout)
-    combined = result.stderr + result.stdout
+    # Strip ANSI SGR escapes before BOTH assertions (the T17 R-round-1
+    # ANSI-strip convention from test_cli_verify.py): under a color-capable
+    # terminal (GitHub Actions) Typer's rich renderer interleaves per-character
+    # codes, splitting "--agent-id" so the positive assertion misses — and
+    # splitting would let the negative pack-id assertion pass vacuously.
+    combined = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr + result.stdout)
+    assert "agent-id" in combined
     assert "bank-analyst" not in combined, "no pack id may surface as a CLI default"
 
 
