@@ -4,10 +4,11 @@
 Behavioral pins over the REAL create_app + lifespan, not source inspection:
 
   * the ConversationStore is built from ``adapters.relational.engine``
-  * a build_agent_loop() failure is contained -- no UnboundLocalError, the
+  * a build_agent_loop_with_records() failure is contained -- no
+    UnboundLocalError, the
     store still constructs, the executor stays None, POST-turn fails closed 503
-  * an invalid executor configuration (claim_ttl <= wall clock) is contained --
-    the whole conversation surface fails closed 503
+  * an invalid executor configuration (claim_ttl lacks declared-budget
+    headroom) is contained -- the whole conversation surface fails closed 503
 """
 
 from __future__ import annotations
@@ -80,17 +81,24 @@ def test_read_model_is_built_from_the_engine_with_the_ruled_candidate_cap(
         assert rm._chain_candidate_limit == memory_settings.conversation_chain_candidate_limit
 
 
-def test_executor_presence_tracks_agent_loop_presence(
+def test_executor_requires_agent_loop_and_both_admitted_hook_phases(
     memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
-    """The executor exists iff the agent loop was built. With the memory
-    fixtures (no packs, no MCP host) the loop is absent, so the executor must
-    be too -- and the surface fails closed at the route."""
+    """An empty dispatcher is not a ready conversation safety boundary."""
     app = _app(memory_settings, memory_registry, tmp_path)
     with TestClient(app) as client:
         loop_present = app.state.agent_loop is not None
+        dispatcher = app.state.hook_dispatcher
+        hooks_ready = dispatcher is not None and all(
+            dispatcher.has_phase_hooks(phase)
+            for phase in ("conversation_input", "conversation_output")
+        )
         executor_present = app.state.conversation_executor is not None
-        assert executor_present == loop_present
+        assert executor_present == (loop_present and hooks_ready)
+        if executor_present:
+            assert app.state.conversation_hook_guard is not None
+            assert app.state.conversation_hook_guard._dispatcher is app.state.hook_dispatcher
+            assert app.state.conversation_executor._hook_guard is app.state.conversation_hook_guard
         if not executor_present:
             app.state.actor_binder = _Binder()
             r = client.post(
@@ -101,10 +109,31 @@ def test_executor_presence_tracks_agent_loop_presence(
             assert r.json()["detail"]["reason"] == "conversation_executor_unavailable"
 
 
+def test_hook_runtime_failure_keeps_turn_surface_fail_closed(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cognic_agentos.harness.hook_registry as hook_registry
+
+    def _boom(**kwargs: Any) -> Any:
+        raise RuntimeError("hook runtime construction exploded")
+
+    monkeypatch.setattr(hook_registry, "build_hook_runtime", _boom)
+    app = _app(memory_settings, memory_registry, tmp_path)
+    with TestClient(app):
+        assert app.state.hook_dispatcher is None
+        assert app.state.conversation_hook_guard is None
+        assert app.state.conversation_executor is None
+        assert app.state.conversation_store is not None
+        assert app.state.conversation_read_model is not None
+
+
 def test_build_agent_loop_failure_is_contained(
     memory_settings: Any, memory_registry: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If build_agent_loop() raises, the except arm sets ONLY app.state.agent_loop.
+    """If build_agent_loop_with_records() raises, the fail-soft arm remains safe.
 
     The conversation block reads app.state.agent_loop -- never the local, which
     is genuinely unbound on this path. The proof that no UnboundLocalError fires
@@ -114,7 +143,7 @@ def test_build_agent_loop_failure_is_contained(
     async def _boom(**kwargs: Any) -> Any:
         raise RuntimeError("agent loop construction exploded")
 
-    monkeypatch.setattr(agent_host, "build_agent_loop", _boom)
+    monkeypatch.setattr(agent_host, "build_agent_loop_with_records", _boom)
     app = _app(memory_settings, memory_registry, tmp_path)
     with TestClient(app) as client:  # lifespan completing IS the assertion
         assert app.state.agent_loop is None
@@ -131,17 +160,39 @@ def test_build_agent_loop_failure_is_contained(
 
 
 def test_invalid_executor_configuration_fails_the_surface_closed(
-    memory_settings: Any, memory_registry: Any, tmp_path: Any
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """claim_ttl_s <= agent_run_wall_clock_s trips the executor's construction
-    guard; the lifespan contains the ValueError and nulls the WHOLE surface, so
-    every conversation route fails closed 503 rather than serving a store whose
-    executor could double-run slow turns."""
+    """Insufficient declared-budget headroom trips executor construction.
+
+    The lifespan contains the ValueError and nulls the whole surface, so every
+    conversation route fails closed 503. This does not claim a hard end-to-end
+    lease deadline; the executor docstring records that R20 limitation.
+    """
+    import cognic_agentos.harness.hook_registry as hook_registry
+
+    class _ReadyGuard:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def turn_timeout_budget_s(self) -> float:
+            # The adapter's own unit test pins this as the exact input+output
+            # phase sum. This wiring pin proves the lifespan cannot drop the
+            # returned budget before executor construction.
+            return 60.0
+
+    # This regression isolates the TTL constructor guard. Empty phase-chain
+    # refusal is pinned independently and would otherwise short-circuit first.
+    monkeypatch.setattr(hook_registry, "ConversationHookGuardAdapter", _ReadyGuard)
+
     app = _app(
         memory_settings,
         memory_registry,
         tmp_path,
-        conversation_claim_ttl_s=60.0,  # < agent_run_wall_clock_s default 120.0
+        # Greater than the 120s loop budget, but equal to loop + hook headroom.
+        conversation_claim_ttl_s=180.0,
     )
     with TestClient(app) as client:
         assert app.state.conversation_store is None

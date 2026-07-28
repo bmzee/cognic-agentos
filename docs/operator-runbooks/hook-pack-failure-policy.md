@@ -1,7 +1,7 @@
 # Hook pack failure-policy operator runbook
 <!-- STATUS: CURRENT -->
 <!-- OWNER: cognic-agentos maintainers -->
-<!-- LAST-VERIFIED: 2026-07-18 -->
+<!-- LAST-VERIFIED: 2026-07-28 -->
 
 **Audience.** AgentOS operators on-call. Pairs with the alert
 catalogue + the audit-event taxonomy.
@@ -36,11 +36,12 @@ refusal regardless of the dispatcher's runtime carve-out code path.
 
 ---
 
-## The 5 closed-enum dispatcher failure modes
+## The 6 closed-enum dispatcher failure modes
 
-The `HookFailureMode` literal at `packs/hooks/dispatcher.py:102` is
-the wire-format taxonomy. Every per-hook outcome the audit chain
-records carries exactly one of these values.
+The `HookFailureMode` literal in `packs/hooks/dispatcher.py` is
+the wire-format taxonomy. Every failed or refused per-hook outcome the audit
+chain records carries exactly one of these values; successful
+`hook.decision` and `hook.fail_open` rows carry no failure mode.
 
 ### 1. `hook_timeout`
 
@@ -227,6 +228,31 @@ layer to "let the hook scan" — the budget ceiling is a
 deterministic fail-closed posture; raising it changes the
 governance-enforcement timing model.
 
+### 6. `hook_conversation_transformation_unsupported`
+
+**What happened.** An F-S2a `conversation_input` or
+`conversation_output` hook returned `redact` or `mask`. Those phases
+admit PASS/REFUSE only until F-S3 lands the hook-aware examiner
+projection and before/after digest-continuity contract. The dispatcher
+records the attempted output-envelope digest, retains the original
+payload, stops the chain, and the conversation boundary surfaces
+`conversation_hook_refused`. Existing `dlp_pre` and `dlp_post`
+transformations remain supported and are not affected.
+
+**On-call response.**
+
+1. Identify the hook pack and phase from the digest-only failure row.
+2. Treat a conversation-phase `redact` or `mask` as a pack-contract
+   mismatch, not as a runtime permission to transform.
+3. Replace the decision with `refuse` for blocking behavior, or `pass`
+   only when the original value is safe to continue unchanged.
+4. Do not reclassify the hook as a DLP phase merely to bypass the
+   refusal; phase placement is part of the governed lifecycle.
+
+**Do NOT.** Enable conversation transformations independently. F-S3
+must land the examiner projection and digest-continuity joins in the
+same reviewed slice.
+
 ---
 
 ## Audit-trail contract
@@ -241,8 +267,8 @@ chain (regardless of outcome). The row carries:
   distribution name (None for `outcome="passed"`).
 - `outcome` — closed-enum: `passed` / `refused` (legitimate policy
   refusal) / `failed` (timeout / exception / malformed result /
-  unscannable budget).
-- `failure_mode` — closed-enum `HookFailureMode` (one of the 5
+  unscannable budget / unsupported conversation transformation).
+- `failure_mode` — closed-enum `HookFailureMode` (one of the 6
   values above; None for `outcome="passed"`).
 - `policy_input_digest` — SHA-256 hex digest of the **original**
   payload (NEVER the transformed payload). Computed once at dispatch

@@ -8,14 +8,17 @@ The pack-author contract (Sprint-7A2 T2 SDK):
     Sprint-7A T2 R3 P2 #1 / R8 P2 #1).
   - Declare ``hook_id`` + ``phase`` ClassVars matching the manifest's
     ``[hooks].declarations`` block. The Sprint-7A2 T6 validator
-    cross-checks both directions; the runtime registry (T7) refuses
-    admission if the wheel's entry-point class disagrees with the
-    manifest declaration.
+    cross-checks manifest hook IDs against pyproject entry-point keys in
+    both directions. Entry-point class metadata is deferred-load state; the
+    runtime dispatcher checks it at first invocation and fails closed as a
+    malformed result when it disagrees with the signed declaration.
   - Return a ``HookResult`` with one of four closed-enum decisions:
     ``"pass"`` (continue unchanged), ``"redact"`` / ``"mask"``
     (carry modified payload bytes forward), or ``"refuse"`` (with a
-    non-empty ``policy_reason`` so the dispatcher can route the
-    refusal to the audit chain + the caller's refusal envelope).
+    non-empty hook-authored ``policy_reason``). Legacy DLP callers
+    retain the established reason propagation; conversation callers
+    suppress the string from evidence and expose only the kernel-owned
+    ``conversation_hook_refused`` wire value.
 
   - Payload-contents-never-logged invariant (ADR-017 + Doctrine
     Lock E from the Sprint-7A2 plan-of-record): ``HookContext``
@@ -38,22 +41,30 @@ class {{ class_name }}(Hook):
     """AUTHOR-FILL: docstring describing what governance check this hook performs."""
 
     # AUTHOR-FILL: hook_id matches the cognic-pack-manifest.toml
-    # [hooks].declarations[].hook_id field + the calling pack's
-    # [data_governance].dlp_pre_hooks / dlp_post_hooks reference.
+    # [hooks].declarations[].hook_id field. DLP callers reference it
+    # through dlp_*_hooks; conversation phases are selected phase-wide.
     hook_id: ClassVar[str] = "AUTHOR-FILL: e.g., redact_pii_in_input"
 
-    # AUTHOR-FILL: phase MUST match the manifest. Wave-1: dlp_pre |
-    # dlp_post. Sprint-7A2 T6 validator refuses mismatches.
-    phase: ClassVar[HookPhase] = "dlp_pre"  # AUTHOR-FILL: dlp_pre | dlp_post
+    # AUTHOR-FILL: phase MUST match the manifest. Sprint-7A2 T6
+    # validator refuses input/output direction mismatches.
+    # AUTHOR-FILL: dlp_pre | dlp_post | conversation_input |
+    # conversation_output
+    phase: ClassVar[HookPhase] = "dlp_pre"
 
     async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
         """AUTHOR-FILL: implement the governance decision here.
 
         ``context`` carries hook_id / phase / pack_id (the CALLING
         pack) / tenant_id / request_id / trace_id /
-        manifest_data_classes / manifest_purpose. ``payload`` is the
-        opaque bytes the calling pack is about to receive (dlp_pre)
-        or about to return (dlp_post).
+        manifest_data_classes / manifest_purpose plus conversation
+        correlation fields on conversation phases. DLP payloads are
+        caller-defined bytes. Conversation payloads are the exact
+        canonical JSON schema-v1 envelopes documented in
+        ``docs/SDK-REFERENCE.md`` §8.4.1. Conversation phases are
+        PASS/REFUSE-only in F-S2a: returning redact or mask fails closed until
+        F-S3 lands transformation-aware examiner projection. Legacy DLP
+        transforms return the complete caller-defined payload in
+        ``redacted_payload``.
 
         Return one of:
 
@@ -62,10 +73,12 @@ class {{ class_name }}(Hook):
             continues to the next hook.
           - ``HookResult(decision="redact" | "mask",
             redacted_payload=<modified bytes>, policy_reason=None)``
-            — dispatcher replaces payload + continues.
+            — dispatcher replaces payload + continues for legacy DLP phases;
+            conversation phases fail closed in F-S2a.
           - ``HookResult(decision="refuse", redacted_payload=None,
-            policy_reason="<closed-enum reason>")`` — dispatcher
-            short-circuits; calling-pack invocation refused.
+            policy_reason="<non-empty hook-authored reason>")`` —
+            dispatcher short-circuits. Conversation callers suppress
+            that reason and expose only ``conversation_hook_refused``.
         """
         raise NotImplementedError(
             "AUTHOR-FILL: implement {{ class_name }}._invoke"

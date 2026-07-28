@@ -218,16 +218,18 @@ LOW_AUTHORITY_TIERS: frozenset[str] = frozenset({"read_only", "internal_write"})
 # runtime registry + dispatcher (T7 / T8 of Sprint-7A2) consume the
 # same closed enums for admission + dispatch ordering.
 
-#: Closed-enum hook phase. Wave-1 narrow: only the two ADR-017 DLP
-#: phases (`dlp_pre` runs before pack code sees governed input;
-#: `dlp_post` runs before governed output leaves AgentOS). Future
-#: phases (memory pre/post per ADR-019; escalation pre per ADR-014;
-#: egress pre per ADR-017's egress allow-list) land in follow-up
-#: sprints; growth via the drift-detector test in
+#: Closed-enum hook phase. The two ADR-017 DLP phases gate pack
+#: input/output; the two ADR-028 conversation phases gate assembled
+#: conversation context and generated conversation output. Future phases
+#: (memory pre/post per ADR-019; escalation pre per ADR-014; egress pre
+#: per ADR-017's egress allow-list) land in follow-up sprints; growth
+#: via the drift-detector test in
 #: ``tests/unit/test_config.py::TestSprint7A2HookVocabulary``.
 HookPhase = Literal[
     "dlp_pre",
     "dlp_post",
+    "conversation_input",
+    "conversation_output",
 ]
 
 
@@ -236,15 +238,16 @@ HookPhase = Literal[
 #: ``HOOK_ORDERING_RANK[ordering_class]`` ascending, then by
 #: ``hook_id`` alphabetic for ties — gives deterministic ordering
 #: without surfacing brittle integer-priority knobs to pack authors.
-#: Wave-1 narrow: 4 input-side classes for `dlp_pre`, 4 output-side
-#: classes for `dlp_post` (8 values total).
+#: Wave-1 narrow: 4 input-side classes reused by ``dlp_pre`` and
+#: ``conversation_input``; 4 output-side classes reused by ``dlp_post`` and
+#: ``conversation_output`` (8 values total; no names or ranks changed).
 HookOrderingClass = Literal[
-    # dlp_pre phase
+    # input phases
     "input_validation",  # earliest; refuses obviously-invalid input
     "input_authorization",  # consent / authz checks
     "input_redaction",  # PII redaction (ADR-017 example: redact_pii_in_input)
     "input_normalization",  # format normalization
-    # dlp_post phase
+    # output phases
     "output_validation",  # earliest post-hook; refuses obviously-invalid output
     "output_egress_check",  # egress allow-list cross-check
     "output_redaction",  # secondary PII redaction
@@ -259,12 +262,12 @@ HookOrderingClass = Literal[
 #: deterministic-order primitive. Test pins exhaustive coverage of
 #: every ``HookOrderingClass`` value.
 HOOK_ORDERING_RANK: Final[dict[HookOrderingClass, int]] = {
-    # dlp_pre — input pipeline
+    # input phases
     "input_validation": 10,
     "input_authorization": 20,
     "input_redaction": 30,
     "input_normalization": 40,
-    # dlp_post — output pipeline
+    # output phases
     "output_validation": 10,
     "output_egress_check": 20,
     "output_redaction": 30,
@@ -272,27 +275,25 @@ HOOK_ORDERING_RANK: Final[dict[HookOrderingClass, int]] = {
 }
 
 
-#: Closed-enum hook failure policy. Wave-1: ``fail_closed`` is the
-#: default for all data-governance phases per ADR-017 + Doctrine Lock E
+#: Closed-enum hook failure policy. Wave-1 authoring admits only
+#: ``fail_closed`` per ADR-017 + Doctrine Lock E
 #: (the calling pack's invocation is refused if the hook times out /
 #: raises / returns malformed result / explicitly refuses / payload
-#: exceeds the unscannable budget). ``fail_open`` is permitted ONLY
-#: when the calling pack's ``[data_governance]`` declares a matching
-#: ``fail_open_exception`` phase + reason; the validator (T6) refuses
-#: ``fail_open`` declarations otherwise.
+#: exceeds the unscannable budget). The legacy DLP-only runtime shape still
+#: carries ``fail_open`` for compatibility with its dormant exception carve-out;
+#: authoring refuses it, and runtime registration independently forbids it for
+#: both conversation phases.
 HookFailPolicy = Literal[
     "fail_closed",
     "fail_open",
 ]
 
 
-#: Mapping ``HookOrderingClass`` → set of valid ``HookPhase`` values.
-#: Validator (T6) refuses a pack manifest that pairs an
-#: ``input_*`` ordering class with ``dlp_post`` or an ``output_*``
-#: ordering class with ``dlp_pre`` — the pairing IS phase-specific
-#: and the closed-enum names are deliberately stem-prefixed
-#: (``input_*`` vs ``output_*``) so a future reviewer or author can
-#: read the phase off the class name without consulting this map.
+#: Legacy canonical ``HookOrderingClass`` → DLP ``HookPhase`` mapping.
+#: Kept byte-compatible for existing pack-author tooling that imports
+#: this symbol. Admission uses ``HOOK_ORDERING_CLASS_PHASES`` below,
+#: because ADR-028 reuses the existing input/output semantic classes
+#: in the corresponding conversation phases.
 HOOK_ORDERING_CLASS_PHASE: Final[dict[HookOrderingClass, HookPhase]] = {
     "input_validation": "dlp_pre",
     "input_authorization": "dlp_pre",
@@ -302,6 +303,21 @@ HOOK_ORDERING_CLASS_PHASE: Final[dict[HookOrderingClass, HookPhase]] = {
     "output_egress_check": "dlp_post",
     "output_redaction": "dlp_post",
     "output_masking": "dlp_post",
+}
+
+#: Exhaustive admission map. Existing ordering-class names and ranks are
+#: reused without renaming or reordering: ``input_*`` classes are valid
+#: for pack input and assembled conversation input; ``output_*`` classes
+#: are valid for pack output and generated conversation output.
+HOOK_ORDERING_CLASS_PHASES: Final[dict[HookOrderingClass, frozenset[HookPhase]]] = {
+    "input_validation": frozenset({"dlp_pre", "conversation_input"}),
+    "input_authorization": frozenset({"dlp_pre", "conversation_input"}),
+    "input_redaction": frozenset({"dlp_pre", "conversation_input"}),
+    "input_normalization": frozenset({"dlp_pre", "conversation_input"}),
+    "output_validation": frozenset({"dlp_post", "conversation_output"}),
+    "output_egress_check": frozenset({"dlp_post", "conversation_output"}),
+    "output_redaction": frozenset({"dlp_post", "conversation_output"}),
+    "output_masking": frozenset({"dlp_post", "conversation_output"}),
 }
 
 
@@ -314,6 +330,7 @@ LearningSurfaceMode = Literal["disabled", "profile_only", "notes_and_profile"]
 __all__ = [
     "DATA_CLASS_TO_MIN_RISK_TIER",
     "HOOK_ORDERING_CLASS_PHASE",
+    "HOOK_ORDERING_CLASS_PHASES",
     "HOOK_ORDERING_RANK",
     "LOW_AUTHORITY_TIERS",
     "RESTRICTED_DATA_CLASSES",

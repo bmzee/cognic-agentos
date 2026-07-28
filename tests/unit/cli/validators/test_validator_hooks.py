@@ -50,6 +50,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from cognic_agentos.cli.validators.hooks import validate
 
 # ---------------------------------------------------------------------------
@@ -424,6 +426,77 @@ fail_policy = "fail_closed"
     assert payload["expected_phase_for_class"] == "dlp_post"
 
 
+@pytest.mark.parametrize(
+    ("phase", "ordering_class"),
+    [
+        ("conversation_input", "input_validation"),
+        ("conversation_input", "input_normalization"),
+        ("conversation_output", "output_validation"),
+        ("conversation_output", "output_masking"),
+    ],
+)
+def test_hooks_validator_accepts_conversation_phase_class_pairs(
+    tmp_path: Path,
+    phase: str,
+    ordering_class: str,
+) -> None:
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        f"""
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "{phase}"
+ordering_class = "{ordering_class}"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+"""
+    )
+    findings = validate(_parse(body), tmp_path)
+    assert not [
+        finding
+        for finding in findings
+        if finding.reason in {"hook_phase_invalid", "hook_ordering_class_invalid"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "ordering_class"),
+    [
+        ("conversation_input", "output_validation"),
+        ("conversation_output", "input_validation"),
+    ],
+)
+def test_hooks_validator_refuses_conversation_cross_direction_pairs(
+    tmp_path: Path,
+    phase: str,
+    ordering_class: str,
+) -> None:
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        f"""
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "{phase}"
+ordering_class = "{ordering_class}"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+"""
+    )
+    findings = validate(_parse(body), tmp_path)
+    mismatch = [
+        finding
+        for finding in findings
+        if finding.reason == "hook_ordering_class_invalid"
+        and finding.payload["failure_mode"] == "phase_class_mismatch"
+    ]
+    assert len(mismatch) == 1
+    assert mismatch[0].payload["allowed_phases_for_class"] == (
+        ["dlp_post", "conversation_output"]
+        if ordering_class.startswith("output_")
+        else ["dlp_pre", "conversation_input"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # hook_timeout_invalid arms
 # ---------------------------------------------------------------------------
@@ -736,6 +809,30 @@ fail_policy = "fail_closed"
         if f.reason == "hook_phase_invalid" and f.payload["block_path"] == "tool.cognic.hooks"
     ]
     assert len(legacy_phase_findings) == 1
+
+
+def test_hooks_validator_accepts_conversation_phase_on_legacy_path(
+    tmp_path: Path,
+) -> None:
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        """
+[tool.cognic.hooks]
+[[tool.cognic.hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "conversation_input"
+ordering_class = "input_validation"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+"""
+    )
+    findings = validate(_parse(body), tmp_path)
+    assert not [
+        finding
+        for finding in findings
+        if finding.payload.get("block_path") == "tool.cognic.hooks"
+        and finding.reason in {"hook_phase_invalid", "hook_ordering_class_invalid"}
+    ]
 
 
 def test_hooks_validator_validates_both_canonical_and_legacy_paths(

@@ -21,6 +21,12 @@ CRITICAL CONTROLS. Two enforcement boundaries live here:
 carries ``question_sha256`` / ``answer_sha256`` + byte counts (the M8
 digest-only doctrine extended to conversations, ADR-028 §3). The erasable
 plaintext lives only in ``conversation_turns.user_message`` / ``.answer``.
+R21's ``conversation.turn_refused`` carries token counts plus the screened
+question digest and the original screened answer digest while persisting no
+turn row and no plaintext. F-S2a conversation phases admit no transformation;
+F-S3 owns transformations together with hook-aware examiner projection and
+before/after digest continuity. The counter update and chain append are one
+transaction.
 
 Tables register on the SHARED ``core.audit._metadata``, as every other
 chain-consuming store does (``core/run/storage.py``, ``core/scheduler/storage.py``).
@@ -59,12 +65,14 @@ from cognic_agentos.core.conversation._types import (
     ConversationTurnRefused,
     TurnClaim,
     TurnRecord,
+    _validate_output_hook_correlation,
     validate_transition,
 )
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 
 #: Column widths mirror the ``runs`` / ``entitlements`` substrates.
 CONVERSATION_TENANT_ID_MAX_LEN: Final[int] = 128
+
 CONVERSATION_AGENT_ID_MAX_LEN: Final[int] = 128
 CONVERSATION_SUBJECT_MAX_LEN: Final[int] = 256
 CONVERSATION_AGENT_RUN_ID_MAX_LEN: Final[int] = 64
@@ -153,6 +161,16 @@ _conversation_turns = Table(
 def _digest(text: str) -> tuple[str, int]:
     raw = text.encode("utf-8")
     return hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+def _validate_token_counts(prompt_tokens: object, completion_tokens: object) -> None:
+    """Refuse malformed usage before it can move a governed budget counter."""
+
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (prompt_tokens, completion_tokens)
+    ):
+        raise ValueError("prompt_tokens and completion_tokens must be non-negative integers")
 
 
 def _to_record(row: Any) -> ConversationRecord:
@@ -530,6 +548,8 @@ class ConversationStore:
         claim_id: uuid.UUID,
         approval_request_id: str | None = None,
         turn_kind: Literal["exchange", "system"] = "exchange",
+        conversation_output_request_id: str | None = None,
+        conversation_output_hook_count: int = 0,
     ) -> uuid.UUID:
         """Persist the turn + append ``conversation.turn_completed`` atomically.
 
@@ -553,6 +573,11 @@ class ConversationStore:
         override that lifecycle boundary (the ``_PERSISTABLE_STATES`` rule).
         This refusal fires AT PERSIST TIME, after the AgentLoop has run.
         """
+        _validate_token_counts(prompt_tokens, completion_tokens)
+        _validate_output_hook_correlation(
+            request_id=conversation_output_request_id,
+            hook_count=conversation_output_hook_count,
+        )
         now = datetime.now(UTC)
         turn_id = uuid.uuid4()
         q_sha, q_bytes = _digest(user_message)
@@ -600,21 +625,25 @@ class ConversationStore:
             )
 
         def _build(_: None) -> DecisionRecord:
+            payload: dict[str, Any] = {
+                "conversation_id": str(conversation_id),
+                "turn_id": str(turn_id),
+                "seq": seq,
+                "agent_run_id": agent_run_id,
+                "question_sha256": q_sha,
+                "question_bytes": q_bytes,
+                "answer_sha256": a_sha,
+                "answer_bytes": a_bytes,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+            if conversation_output_request_id is not None:
+                payload["conversation_output_request_id"] = conversation_output_request_id
+                payload["conversation_output_hook_count"] = conversation_output_hook_count
             return DecisionRecord(
                 decision_type="conversation.turn_completed",
                 request_id=request_id,
-                payload={
-                    "conversation_id": str(conversation_id),
-                    "turn_id": str(turn_id),
-                    "seq": seq,
-                    "agent_run_id": agent_run_id,
-                    "question_sha256": q_sha,
-                    "question_bytes": q_bytes,
-                    "answer_sha256": a_sha,
-                    "answer_bytes": a_bytes,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                },
+                payload=payload,
                 actor_id=actor_id,
                 tenant_id=tenant_id,
                 iso_controls=CONVERSATION_ISO_CONTROLS,
@@ -624,6 +653,102 @@ class ConversationStore:
             record_builder=_build, precondition=_precondition
         )
         return turn_id
+
+    async def settle_refused_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        seq: int,
+        question: str,
+        answer: str,
+        agent_run_id: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        actor_id: str,
+        request_id: str,
+        claim_id: uuid.UUID,
+        conversation_output_request_id: str | None = None,
+        conversation_output_hook_count: int = 0,
+    ) -> ConversationState:
+        """Chain-atomically settle usage for one output-suppressed model turn.
+
+        The model ran, so its token usage must count toward the conversation
+        budget. The answer never shipped and therefore is not a transcript
+        turn: no ``conversation_turns`` row is inserted and ``turn_count`` is
+        deliberately unchanged. ``seq`` is the prospective physical sequence
+        for the refused attempt; because no turn row is inserted, repeated
+        refused attempts can truthfully carry the same prospective sequence.
+        ``question`` is the screened loop input. ``answer`` is the original
+        screened model output because F-S2a conversation phases admit only
+        PASS/REFUSE. Plaintext is used only to derive sibling content digests
+        in memory; neither value enters persistence or evidence. F-S3 must add
+        transformation and the hook-aware examiner continuity contract
+        together.
+        """
+
+        _validate_token_counts(prompt_tokens, completion_tokens)
+        _validate_output_hook_correlation(
+            request_id=conversation_output_request_id,
+            hook_count=conversation_output_hook_count,
+        )
+        question_sha, question_bytes = _digest(question)
+        answer_sha, answer_bytes = _digest(answer)
+
+        settled_state: ConversationState | None = None
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
+            nonlocal settled_state
+            settled_state = await _require_persistable_claim(
+                conn,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim_id,
+            )
+            await conn.execute(
+                update(_conversations)
+                .where(
+                    _conversations.c.conversation_id == conversation_id,
+                    _conversations.c.tenant_id == tenant_id,
+                )
+                .values(
+                    cumulative_tokens=_conversations.c.cumulative_tokens
+                    + prompt_tokens
+                    + completion_tokens
+                )
+            )
+
+        def _build(_: None) -> DecisionRecord:
+            payload: dict[str, Any] = {
+                "conversation_id": str(conversation_id),
+                "seq": seq,
+                "agent_run_id": agent_run_id,
+                "question_sha256": question_sha,
+                "question_bytes": question_bytes,
+                "answer_sha256": answer_sha,
+                "answer_bytes": answer_bytes,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+            if conversation_output_request_id is not None:
+                payload["conversation_output_request_id"] = conversation_output_request_id
+                payload["conversation_output_hook_count"] = conversation_output_hook_count
+            return DecisionRecord(
+                decision_type="conversation.turn_refused",
+                request_id=request_id,
+                payload=payload,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=CONVERSATION_ISO_CONTROLS,
+            )
+
+        await self._history.append_with_precondition(
+            record_builder=_build,
+            precondition=_precondition,
+        )
+        if settled_state is None:  # pragma: no cover - append contract violation
+            raise RuntimeError("refused-turn precondition did not report the locked state")
+        return settled_state
 
     async def append_system_turn(
         self,
@@ -635,6 +760,8 @@ class ConversationStore:
         actor_id: str,
         request_id: str,
         claim_id: uuid.UUID,
+        conversation_output_request_id: str | None = None,
+        conversation_output_hook_count: int = 0,
     ) -> uuid.UUID:
         """Persist a replay-excluded completion row + digest-only evidence.
 
@@ -642,6 +769,10 @@ class ConversationStore:
         nor ``cumulative_tokens``; those are user/model budget counters.
         """
         now = datetime.now(UTC)
+        _validate_output_hook_correlation(
+            request_id=conversation_output_request_id,
+            hook_count=conversation_output_hook_count,
+        )
         turn_id = uuid.uuid4()
         answer_sha, answer_bytes = _digest(text)
 
@@ -687,18 +818,22 @@ class ConversationStore:
             return physical_seq
 
         def _build(physical_seq: int) -> DecisionRecord:
+            payload: dict[str, Any] = {
+                "conversation_id": str(conversation_id),
+                "turn_id": str(turn_id),
+                "seq": physical_seq,
+                "agent_run_id": f"system-{approval_request_id}",
+                "approval_request_id": approval_request_id,
+                "answer_sha256": answer_sha,
+                "answer_bytes": answer_bytes,
+            }
+            if conversation_output_request_id is not None:
+                payload["conversation_output_request_id"] = conversation_output_request_id
+                payload["conversation_output_hook_count"] = conversation_output_hook_count
             return DecisionRecord(
                 decision_type="conversation.system_turn_appended",
                 request_id=request_id,
-                payload={
-                    "conversation_id": str(conversation_id),
-                    "turn_id": str(turn_id),
-                    "seq": physical_seq,
-                    "agent_run_id": f"system-{approval_request_id}",
-                    "approval_request_id": approval_request_id,
-                    "answer_sha256": answer_sha,
-                    "answer_bytes": answer_bytes,
-                },
+                payload=payload,
                 actor_id=actor_id,
                 tenant_id=tenant_id,
                 iso_controls=CONVERSATION_ISO_CONTROLS,

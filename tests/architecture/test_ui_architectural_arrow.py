@@ -461,6 +461,16 @@ class TestUIArchitecturalArrowInvariants:
         )
 
         def _snapshot(decision_type: str) -> AppendedDecisionSnapshot:
+            payload = {
+                "request_id": "portal-req-test",
+                "actor_subject": "u1",
+                "tenant_id": "t1",
+                "action_class": "approve",
+                "client_correlation_id": None,
+                "payload_digest": "sha256:test",
+            }
+            if decision_type == "approval.executed":
+                payload["execution"] = "executed"
             return AppendedDecisionSnapshot(
                 record_id=_uuid.uuid4(),
                 chain_id="decision_history",
@@ -469,14 +479,7 @@ class TestUIArchitecturalArrowInvariants:
                 created_at=datetime.now(UTC),
                 decision_type=decision_type,
                 request_id="portal-req-test",
-                payload={
-                    "request_id": "portal-req-test",
-                    "actor_subject": "u1",
-                    "tenant_id": "t1",
-                    "action_class": "approve",
-                    "client_correlation_id": None,
-                    "payload_digest": "sha256:test",
-                },
+                payload=payload,
                 tenant_id="t1",
             )
 

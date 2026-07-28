@@ -17,6 +17,7 @@ would be a stored-column-vocabulary migration.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,7 +40,50 @@ ConversationTurnRefusalReason = Literal[
     "conversation_max_turns_exceeded",
     "conversation_token_budget_exceeded",
     "conversation_turn_claim_stale",
+    "conversation_hook_refused",
 ]
+
+#: Closed, additive ADR-028 decision-history vocabulary. The original six
+#: retain their order. ``conversation.system_turn_appended`` is the
+#: already-shipped D2 approval-outcome row whose omission from the design
+#: document is being corrected in the coordinated docs half; R21 then adds
+#: ``conversation.turn_refused`` for chain-atomic usage settlement when a
+#: model-authored output is suppressed before transcript persistence.
+ConversationChainEventType = Literal[
+    "conversation.created",
+    "conversation.turn_completed",
+    "conversation.escalated",
+    "conversation.closed",
+    "conversation.expired",
+    "conversation.erased",
+    "conversation.system_turn_appended",
+    "conversation.turn_refused",
+]
+
+_OUTPUT_HOOK_REQUEST_ID_RE: Final[re.Pattern[str]] = re.compile(r"conv-hook-[0-9a-f]{32}\Z")
+_SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _is_output_hook_request_id(value: str) -> bool:
+    """Return whether ``value`` is the kernel-minted output-hook group id."""
+
+    return _OUTPUT_HOOK_REQUEST_ID_RE.fullmatch(value) is not None
+
+
+def _validate_output_hook_correlation(*, request_id: str | None, hook_count: object) -> None:
+    """Require the output-hook request/count pair to be complete or absent."""
+
+    if request_id is None:
+        if isinstance(hook_count, bool) or not isinstance(hook_count, int) or hook_count != 0:
+            raise ValueError(
+                "conversation output hook count must be exact integer zero without a request id"
+            )
+        return
+    if not isinstance(request_id, str) or not _is_output_hook_request_id(request_id):
+        raise ValueError("conversation output hook request id has an invalid shape")
+    if isinstance(hook_count, bool) or not isinstance(hook_count, int) or hook_count <= 0:
+        raise ValueError("conversation output hook count must be a positive integer")
+
 
 #: M8.5-A legal-transition subset. EXPAND ONLY; never change the vocabulary.
 _SLICE_VALID_TRANSITIONS: Final[frozenset[tuple[ConversationState, ConversationState]]] = frozenset(
@@ -71,9 +115,12 @@ class ConversationTransitionRefused(Exception):
 class ConversationTurnRefused(Exception):
     """Governed turn refusal.
 
-    Most reasons fire at the lifecycle gate BEFORE the AgentLoop is invoked
+    Most reasons fire before the AgentLoop is invoked
     (``conversation_not_active`` at claim, ``conversation_turn_in_progress``,
-    the two bounds). Two fire AT PERSIST TIME, after the loop has run:
+    the two bounds, and an input-phase ``conversation_hook_refused``). An
+    output-phase ``conversation_hook_refused`` fires after the run completed
+    but before the answer ships or the turn persists. Two more fire AT
+    PERSIST TIME, after the loop has run:
     ``conversation_turn_claim_stale`` (the fencing refusal -- the lease was
     reclaimed while the turn ran) and ``conversation_not_active`` re-raised by
     the ``_PERSISTABLE_STATES`` rule when the row moved to ``expired`` /
@@ -82,11 +129,39 @@ class ConversationTurnRefused(Exception):
     """
 
     def __init__(
-        self, reason: ConversationTurnRefusalReason, *, current_state: ConversationState
+        self,
+        reason: ConversationTurnRefusalReason,
+        *,
+        current_state: ConversationState,
+        conversation_output_request_id: str | None = None,
+        conversation_output_hook_count: int = 0,
+        conversation_output_value_sha256: str | None = None,
+        conversation_output_value_bytes: int | None = None,
     ) -> None:
+        _validate_output_hook_correlation(
+            request_id=conversation_output_request_id,
+            hook_count=conversation_output_hook_count,
+        )
+        if (conversation_output_value_sha256 is None) != (conversation_output_value_bytes is None):
+            raise ValueError("conversation output value digest/size must be present together")
+        if conversation_output_value_sha256 is not None:
+            if _SHA256_HEX_RE.fullmatch(conversation_output_value_sha256) is None:
+                raise ValueError("conversation output value digest must be lowercase SHA-256")
+            if (
+                isinstance(conversation_output_value_bytes, bool)
+                or not isinstance(conversation_output_value_bytes, int)
+                or conversation_output_value_bytes < 0
+            ):
+                raise ValueError("conversation output value size must be a non-negative integer")
         super().__init__(reason)
         self.reason: ConversationTurnRefusalReason = reason
         self.current_state: ConversationState = current_state
+        # Internal evidence correlation only; portal wire rendering remains the
+        # established reason + current_state shape.
+        self.conversation_output_request_id = conversation_output_request_id
+        self.conversation_output_hook_count = conversation_output_hook_count
+        self.conversation_output_value_sha256 = conversation_output_value_sha256
+        self.conversation_output_value_bytes = conversation_output_value_bytes
 
 
 def validate_transition(*, from_state: ConversationState, to_state: ConversationState) -> None:
@@ -120,9 +195,12 @@ class TurnRecord:
     """Operational projection of a ``conversation_turns`` row.
 
     ``user_message`` / ``answer`` are ``None`` after erasure (tombstoned
-    plaintext); ``seq`` and ``agent_run_id`` survive so the
-    ``conversation -> agent_run -> dispatch`` chain join stays reconstructable
-    even though the content is gone (ADR-028 §3 erasure-shape doctrine).
+    plaintext).  Exchange rows retain a real ``agent-run-*`` correlator.
+    System rows instead retain the released schema-v1
+    ``system-<approval UUID>`` placeholder plus ``approval_request_id``;
+    that placeholder is not an agent run and must not be followed into
+    ``agent.run.*`` evidence.  Output-refused attempts create no
+    ``TurnRecord`` at all and settle through ``conversation.turn_refused``.
     """
 
     turn_id: uuid.UUID

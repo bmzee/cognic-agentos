@@ -413,18 +413,57 @@ trigger it. The service resolves the approval's conversation correlation,
 claims consumption once through `MCPHost.execute_consumed_action`, reloads and
 digest-verifies the exact approved canonical argument bytes, stamps a
 short-lived RS256 action-context token, dispatches through the host's existing
-authorization/DLP/audit pipeline, records canonical result bytes, appends a
-replay-excluded system turn, and emits value-free `approval.executed` evidence.
+authorization/DLP/audit pipeline, appends a value-free `approval.executed`
+terminal-outcome row, records a tagged canonical replay-result envelope when
+a result exists, then attempts delivery through the conversation-output hook
+boundary. Approval delivery is correlated to hook evidence with
+`output_origin="approval_delivery"` and a disjoint
+`approval_delivery_id="approval-delivery-<canonical UUID>"`; it is never
+placed in an `agent_run_id` field. A successful delivery atomically appends
+the replay-excluded system turn with
+`conversation.system_turn_appended`; a hook-screening refusal leaves no
+system turn and is followed by value-free `approval.delivery_refused`
+evidence. Other late conversation append/fencing refusals remain the parked
+gap described below. The terminal-outcome row comes first
+deliberately: an action that happened remains true even when its rendering is
+withheld. Its name alone is not a success assertion —
+examiners must also require `payload.execution == "executed"` because the
+established event carries `dispatch_failed` and `replay_unavailable` outcomes.
 The public `MCPHost.call_tool` contract is unchanged; its direct-MCP lane still
 returns `tool_approval_consumed` on a second use.
+
+This ordering is awaited but not cross-step atomic. Tool-side effects,
+`approval.executed`, replay-result persistence, each hook row, the system-turn
+transaction, and `approval.delivery_refused` are separate commit domains. A
+tool action can execute in the bank's system and the subsequent
+`approval.executed` evidence append can still fail; later delivery then does
+not run, while the external side effect remains real. Later crashes can leave
+other truthful prefixes. A consumed retry does not redispatch or redeliver.
+When a new tagged stored result exists it appends a fresh value-free
+`approval.executed` observation only. The API reports `already_executed`, but
+the evidence row retains `execution="executed"` because it records the
+historical outcome, not whether this invocation dispatched. Pre-F-S2a bare
+result objects do not distinguish success from dispatch failure and therefore
+fail closed as replay unavailable without redispatch or redelivery. Evidence
+insertion itself is not idempotent. `approval.delivery_refused` is examiner
+evidence only in this
+slice, not a new typed ADR-020 approval notification.
+
+A separate digest-only fact for the late race in which screening passes but
+the conversation append subsequently refuses is parked and not authorized in
+F-S2a. This slice does not reuse `conversation.turn_refused`: that event owns
+R21's chain-atomic model-token settlement and is a different fact.
 
 The grant route is retry-safe for a participant whose duplicate-decision guard
 fires before the terminal-state guard: only the established duplicate-decider
 or already-finalized reasons may enter stored-result recovery, and only when
 the request currently projects as `granted`. Maker-checker, scope, assignment,
 and reason-policy refusals remain refusals. A second final-grant POST therefore
-reports `already_executed` without redispatching. Denial never executes and
-posts the exact system-authored outcome `Declined by {approver} — {reason}.`
+reports `already_executed`, appends the truthful `execution="executed"`
+observation, and
+neither redispatches the tool nor redelivers a system turn. Denial never
+executes and posts the exact system-authored outcome
+`Declined by {approver} — {reason}.`
 
 Delivery in this phase is an inline attempt plus startup recovery of
 `granted AND consumed_at IS NULL` conversation approvals older than the

@@ -13,7 +13,7 @@ commit on every change.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import pytest
 
@@ -168,6 +168,116 @@ async def test_invoke_raises_hook_context_error_when_context_is_wrong_type() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"phase": "conversation_input"},
+        {
+            "phase": "conversation_input",
+            "conversation_id": "not-a-uuid",
+            "conversation_turn_seq": 1,
+        },
+        {
+            "phase": "conversation_input",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 0,
+        },
+        {
+            "phase": "conversation_input",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+            "agent_run_id": "agent-run-too-early",
+            "output_origin": "agent_run",
+        },
+        {
+            "phase": "conversation_output",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+        },
+        {
+            "phase": "conversation_output",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+            "output_origin": "agent_run",
+            "agent_run_id": "system-not-an-agent-run",
+        },
+        {
+            "phase": "conversation_output",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+            "output_origin": "agent_run",
+            "agent_run_id": "agent-run-real",
+            "approval_delivery_id": ("approval-delivery-12345678-1234-5678-1234-567812345678"),
+        },
+        {
+            "phase": "conversation_output",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+            "output_origin": "approval_delivery",
+            "approval_delivery_id": "approval-delivery-not-a-uuid",
+        },
+        {
+            "phase": "conversation_output",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+            "output_origin": "approval_delivery",
+            "approval_delivery_id": ("approval-delivery-12345678-1234-5678-1234-567812345678"),
+            "agent_run_id": "agent-run-real",
+        },
+        {
+            "phase": "dlp_pre",
+            "conversation_id": "12345678-1234-5678-1234-567812345678",
+            "conversation_turn_seq": 1,
+        },
+        {
+            "phase": "dlp_pre",
+            "output_origin": "agent_run",
+            "agent_run_id": "agent-run-real",
+        },
+    ],
+)
+async def test_conversation_correlation_context_fails_closed(
+    overrides: dict[str, Any],
+) -> None:
+    with pytest.raises(HookContextError):
+        await _PassHook().invoke(_ctx(**overrides), b"payload")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase,output_origin,agent_run_id,approval_delivery_id",
+    [
+        ("conversation_input", None, None, None),
+        ("conversation_output", "agent_run", "agent-run-1", None),
+        (
+            "conversation_output",
+            "approval_delivery",
+            None,
+            "approval-delivery-12345678-1234-5678-1234-567812345678",
+        ),
+    ],
+)
+async def test_conversation_correlation_context_accepts_complete_shape(
+    phase: HookPhase,
+    output_origin: Literal["agent_run", "approval_delivery"] | None,
+    agent_run_id: str | None,
+    approval_delivery_id: str | None,
+) -> None:
+    result = await _PassHook().invoke(
+        _ctx(
+            phase=phase,
+            conversation_id="12345678-1234-5678-1234-567812345678",
+            conversation_turn_seq=1,
+            agent_run_id=agent_run_id,
+            output_origin=output_origin,
+            approval_delivery_id=approval_delivery_id,
+        ),
+        b"payload",
+    )
+    assert result.decision == "pass"
+
+
+@pytest.mark.asyncio
 async def test_invoke_raises_hook_payload_error_when_payload_is_none() -> None:
     inst = _PassHook()
     with pytest.raises(HookPayloadError):
@@ -196,6 +306,23 @@ async def test_invoke_raises_hook_result_shape_error_when_invoke_returns_dict() 
 
     with pytest.raises(HookResultShapeError):
         await _BadShape().invoke(_ctx(), b"payload")
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_decision_outside_closed_vocabulary() -> None:
+    class _UnknownDecision(Hook):
+        hook_id: ClassVar[str] = "unknown_decision"
+        phase: ClassVar[HookPhase] = "dlp_pre"
+
+        async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+            return HookResult(
+                decision="unknown",  # type: ignore[arg-type]
+                redacted_payload=None,
+                policy_reason=None,
+            )
+
+    with pytest.raises(HookResultShapeError, match="closed HookDecision vocabulary"):
+        await _UnknownDecision().invoke(_ctx(), b"payload")
 
 
 @pytest.mark.asyncio

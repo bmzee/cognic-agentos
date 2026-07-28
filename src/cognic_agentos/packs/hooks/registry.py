@@ -47,7 +47,7 @@ Construction-time invariants (raise ``ValueError`` from
 * ``HookDeclaration``: empty ``hook_id``, non-positive
   ``timeout_seconds``, ``phase_class_mismatch`` (the
   ``ordering_class`` doesn't belong to the declared ``phase`` per
-  ``HOOK_ORDERING_CLASS_PHASE``), and ``fail_open`` policy without
+  ``HOOK_ORDERING_CLASS_PHASES``), and ``fail_open`` policy without
   ``fail_open_exception``.
 * ``VerifiedHookPack``: duplicate ``(phase, hook_id)`` keys within
   the pack's own declarations.
@@ -76,7 +76,7 @@ from types import MappingProxyType
 from typing import Final, Literal
 
 from cognic_agentos.cli._governance_vocab import (
-    HOOK_ORDERING_CLASS_PHASE,
+    HOOK_ORDERING_CLASS_PHASES,
     HOOK_ORDERING_RANK,
     HookFailPolicy,
     HookOrderingClass,
@@ -118,10 +118,10 @@ class HookDeclaration:
     declaration after admission to redirect the dispatcher. Fields:
 
     * ``hook_id`` — pack-scoped identifier; non-empty after strip.
-    * ``phase`` — closed-enum ``HookPhase`` (Wave-1: ``dlp_pre`` /
-      ``dlp_post``).
+    * ``phase`` — closed-enum ``HookPhase`` (DLP or conversation
+      input/output).
     * ``ordering_class`` — closed-enum ``HookOrderingClass``; MUST
-      belong to ``phase`` per ``HOOK_ORDERING_CLASS_PHASE``.
+      support ``phase`` per ``HOOK_ORDERING_CLASS_PHASES``.
     * ``timeout_seconds`` — positive float; the registry separately
       enforces the ceiling at admission time.
     * ``fail_policy`` — closed-enum ``HookFailPolicy`` (``fail_closed``
@@ -162,25 +162,37 @@ class HookDeclaration:
         if self.timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be > 0; got {self.timeout_seconds!r}")
 
-        # phase_class_mismatch — ``ordering_class`` belongs to exactly
-        # one ``HookPhase`` per ``HOOK_ORDERING_CLASS_PHASE``. Cross-
-        # phase declaration is the validator's
+        # phase_class_mismatch — ``ordering_class`` belongs to a closed
+        # set of input-side or output-side phases per
+        # ``HOOK_ORDERING_CLASS_PHASES``. Cross-direction declaration is
+        # the validator's
         # ``hook_ordering_class_invalid:phase_class_mismatch`` reason.
-        expected_phase = HOOK_ORDERING_CLASS_PHASE.get(self.ordering_class)
-        if expected_phase is None:
+        allowed_phases = HOOK_ORDERING_CLASS_PHASES.get(self.ordering_class)
+        if allowed_phases is None:
             # Closed-enum violation surfaced as a clear runtime error;
             # static typing should already catch this via Literal
             # narrowing, but defense-in-depth covers the bypass path.
             raise ValueError(
                 f"ordering_class {self.ordering_class!r} is not in the "
-                f"closed enum HOOK_ORDERING_CLASS_PHASE"
+                f"closed enum HOOK_ORDERING_CLASS_PHASES"
             )
-        if expected_phase != self.phase:
+        if self.phase not in allowed_phases:
             raise ValueError(
                 f"phase / ordering_class mismatch: ordering_class "
-                f"{self.ordering_class!r} belongs to phase "
-                f"{expected_phase!r}, not {self.phase!r}"
+                f"{self.ordering_class!r} supports phases "
+                f"{sorted(allowed_phases)!r}, not {self.phase!r}"
             )
+
+        # ADR-028 conversation boundaries are mandatory fail-closed gates.
+        # Preserve legacy DLP fail-open semantics, but never admit a
+        # conversation phase whose only scanner may turn an exception into an
+        # implicit pass. This runtime invariant is load-bearing even when a
+        # pack bypasses the authoring CLI validator.
+        if (
+            self.phase in ("conversation_input", "conversation_output")
+            and self.fail_policy != "fail_closed"
+        ):
+            raise ValueError("conversation hook phases require fail_policy='fail_closed'")
 
         # fail_open requires an exception declaration. Default policy
         # is fail_closed; opting into fail_open is intentional and

@@ -38,8 +38,16 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.conversation.read_model import ConversationReadModel
 from cognic_agentos.core.conversation.storage import ConversationStore, _conversation_turns
-from cognic_agentos.core.conversation.turn import ConversationTurnExecutor
-from cognic_agentos.core.decision_history import DecisionHistoryStore, _decision_history
+from cognic_agentos.core.conversation.turn import (
+    ConversationHookGovernance,
+    ConversationHookScanResult,
+    ConversationTurnExecutor,
+)
+from cognic_agentos.core.decision_history import (
+    DecisionHistoryStore,
+    DecisionRecord,
+    _decision_history,
+)
 from cognic_agentos.core.entitlements.store import EntitlementStore, _action_entitlements
 from cognic_agentos.core.policy.engine import Decision
 from cognic_agentos.harness.agent_host import _MCPHostAgentToolProxy
@@ -68,6 +76,67 @@ _TOOL = "probe_write"
 _TOOL_REF = f"{_SERVER}/{_TOOL}"
 _NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 _ARGUMENTS = {"account_id": "acct-7", "amount": 125}
+
+
+class _PassConversationHooks:
+    def __init__(self, history: DecisionHistoryStore) -> None:
+        self._history = history
+
+    def turn_timeout_budget_s(self) -> float:
+        return 0.0
+
+    def governance_for_agent(self, *, agent_id: str) -> ConversationHookGovernance:
+        assert agent_id == _AGENT
+        return ConversationHookGovernance(
+            pack_id="cognic-agent-approval-probe",
+            declared_data_classes=("internal",),
+            manifest_purpose="operational_telemetry",
+        )
+
+    async def scan(self, **kwargs: Any) -> ConversationHookScanResult:
+        payload = kwargs["payload"]
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
+        projector = kwargs.get("evidence_value_projector")
+        projected_value = projector(payload) if projector is not None else None
+        projected_sha256 = (
+            hashlib.sha256(projected_value).hexdigest() if projected_value is not None else None
+        )
+        phase = kwargs["phase"]
+        row: dict[str, object] = {
+            "event_type": "hook.decision",
+            "phase": phase,
+            "hook_id": "content-safety",
+            "pack_distribution_name": "cognic-hook-content-safety",
+            "pack_distribution_version": "0.1.0",
+            "outcome": "passed",
+            "failure_mode": None,
+            "policy_reason": None,
+            "policy_input_digest": payload_sha256,
+            "hook_input_digest": payload_sha256,
+            "hook_output_digest": payload_sha256,
+            "tenant_id": kwargs["tenant_id"],
+            "request_id": kwargs["request_id"],
+            "decision": "pass",
+            "exception_class": None,
+            "hook_input_value_sha256": projected_sha256,
+            "hook_output_value_sha256": projected_sha256,
+            "conversation_id": str(kwargs["conversation_id"]),
+            "conversation_turn_seq": kwargs["turn_seq"],
+            "agent_run_id": kwargs["agent_run_id"],
+        }
+        await self._history.append(
+            DecisionRecord(
+                decision_type="hook.decision",
+                tenant_id=kwargs["tenant_id"],
+                request_id=kwargs["request_id"],
+                payload=row,
+            )
+        )
+        return ConversationHookScanResult(
+            outcome="passed",
+            final_payload=payload,
+            hook_decision_count=1,
+        )
 
 
 class _SingleApprovalPolicy:
@@ -344,6 +413,7 @@ async def test_governed_write_pending_grant_execute_and_replay(
         conversation_executor = ConversationTurnExecutor(
             store=conversation_store,
             loop=loop,
+            hook_guard=_PassConversationHooks(history),
             max_turns=10,
             cumulative_token_budget=10_000,
             replay_last_n=10,
@@ -559,6 +629,7 @@ async def test_governed_write_pending_grant_execute_and_replay(
             "granted_second",
             "grant_recorded",
             "executed",
+            "executed",
         ]
         assert isinstance(live_approval_events[0], ApprovalPending)
         live_grant_recorded = live_approval_events[3]
@@ -567,6 +638,8 @@ async def test_governed_write_pending_grant_execute_and_replay(
         assert live_grant_recorded.data["required_count"] == 3
         assert isinstance(live_approval_events[4], ApprovalExecuted)
         assert live_approval_events[4].data["execution"] == "executed"
+        assert isinstance(live_approval_events[5], ApprovalExecuted)
+        assert live_approval_events[5].data["execution"] == "executed"
 
         replay_subscriber = broker.register_subscriber(
             tenant_id=_TENANT,
@@ -585,10 +658,12 @@ async def test_governed_write_pending_grant_execute_and_replay(
             "granted_second",
             "grant_recorded",
             "executed",
+            "executed",
         ]
         assert isinstance(replayed_approval_events[2], ApprovalGrantRecorded)
         assert replayed_approval_events[2].data == live_grant_recorded.data
         assert isinstance(replayed_approval_events[3], ApprovalExecuted)
+        assert isinstance(replayed_approval_events[4], ApprovalExecuted)
         broker.unregister_subscriber(live_approval_subscriber)
         broker.unregister_subscriber(replay_subscriber)
 
@@ -659,9 +734,12 @@ async def test_governed_write_pending_grant_execute_and_replay(
             "approval.grant_recorded",
             "approval.consumed",
             "approval.executed",
+            "approval.executed",
         ]
         grant_recorded = approval_execution_events[3]["payload"]
         assert grant_recorded["decision_index"] == 2
         assert grant_recorded["required_count"] == 3
+        assert approval_execution_events[-1]["payload"]["execution"] == "executed"
+        assert approval_execution_events[-1]["payload"]["delivery_request_id"] is None
     finally:
         await engine.dispose()

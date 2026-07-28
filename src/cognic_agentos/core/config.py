@@ -2215,9 +2215,13 @@ class Settings(BaseSettings):
         gt=0,
         description=(
             "M8.5-C (ADR-028 §4, PT-6) — a single-writer turn claim older than "
-            "this is reclaimable. MUST exceed agent_run_wall_clock_s, else a "
-            "slow turn has its claim stolen and can be double-run; "
-            "ConversationTurnExecutor refuses construction otherwise."
+            "this is reclaimable. MUST exceed agent_run_wall_clock_s plus the "
+            "admitted conversation-hook invocation timeout budget as conservative "
+            "configuration headroom; this is not an end-to-end deadline because "
+            "loader, cancellation, evidence, gateway, and persistence time are not "
+            "hard-bounded. ConversationTurnExecutor refuses construction when the "
+            "declared-budget relationship is violated; claim-id fencing remains the "
+            "stale-append authority."
         ),
     )
     conversation_chain_candidate_limit: int = Field(

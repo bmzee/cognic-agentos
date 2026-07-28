@@ -9,11 +9,12 @@ Three modules per Doctrine Lock D in
   unverified packs, stale digests, and timeout-above-ceiling.
 * :mod:`cognic_agentos.packs.hooks.dispatcher` — ``HookDispatcher``
   deterministic phase dispatcher (T7). Reads an immutable snapshot
-  from the registry; never mutates registry state. Five closed-enum
-  failure modes per Doctrine Lock E
+  from the registry; never mutates registry state. Six closed-enum
+  failure modes: the five DLP modes from Doctrine Lock E
   (``hook_timeout`` / ``hook_exception`` / ``hook_malformed_result`` /
-  ``hook_policy_refused`` / ``hook_payload_unscannable``). T8 added
-  ``dispatch_for_pack`` for per-pack hook subset selection.
+  ``hook_policy_refused`` / ``hook_payload_unscannable``) plus F-S2a's
+  conversation-only ``hook_conversation_transformation_unsupported``.
+  T8 added ``dispatch_for_pack`` for per-pack hook subset selection.
   Payload-contents-never-logged invariant pinned by
   ``tests/architecture/test_hook_payload_never_logged.py``.
 * :mod:`cognic_agentos.packs.hooks.dlp_integration` — ``DLPGuard``

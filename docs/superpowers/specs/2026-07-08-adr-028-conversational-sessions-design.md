@@ -23,7 +23,7 @@ This spec is the first artifact of the **M8.5 Phase-1 program**: an internal-pro
 | **M8.5-C** | **Basic bank harness.** Separate web artifact; **three screens only** — chat, approvals, evidence. Same-origin BFF + browser — no independent authorization or governance authority; zero authoritative domain/governance state (transient session/token state only). |
 | **M8.5-D** | **First bank NL-query analytical agent.** Agent pack + tool packs + full agentskills.io skill packs, with the **release-gating golden eval set** from day one (ADR-010; per-agent scorers ship in the agent pack per the plugin discipline) — it also serves as the SR 11-7 documented-validation artifact. |
 | **M8.5-E** | **Full-stack `kind` proof.** Harness + the new agent + its packs + evidence. **Not pilot-ready** — see §0.1. |
-| **M8.5-F** | **Conversational governance completion — pilot gate.** Erasure, content-safety hook phases, escalation, ADR-020 conversation projectors + SSE, and **BARs 4–7 on `kind`**. The ADR-011 red-team against the conversational surface lands here (multi-turn injection and history-reference manipulation are new attack scope vs. M8's single-shot). |
+| **M8.5-F** | **Conversational governance completion — pilot gate.** Erasure and content-safety hook phases ship in the implemented slices; escalation remains the separate design-first F-S2b slice. ADR-020 conversation projectors + SSE and **BARs 4–7 on `kind`** complete the gate. The ADR-011 red-team against the conversational surface lands here (multi-turn injection and history-reference manipulation are new attack scope vs. M8's single-shot). |
 
 Pilot readiness then lands at **M15** + **M16** + **M17**, with **M24** the final v1 AKS completion gate. **M9** (memory), **M12/M13** (ADK; **M23** if the no-code Studio is promoted, activating ADR-021) and **M14/ADR-029** (dynamic workflows) are demand-driven and are **not blockers** for the first NL-query agent.
 
@@ -101,7 +101,9 @@ Recorded before the M8.5-C brainstorm/spec so the harness design cannot drift pa
 - **M8.5-C:** the harness BFF/auth/session boundary + the three screens. NO database client, credential form, data-scope admin, or secret handling of any kind.
 - **M8.5-D:** the first NL-query agent/tool/skill packs + the dedicated data-access identity and credential-brokerage **design** (connection-profile + CredentialBroker ownership decided after source recon). The current 12-claim query-context token is a private AgentOS JWS profile; it is not claimed to be an RFC 9068 OAuth access token. M8.5-D evaluates RFC 8693 for issuance/exchange, RFC 9068 only if OAuth access-token semantics are adopted, and RFC 9396 for fine-grained authorization details. Otherwise, retaining and explicitly versioning the private profile is permitted. IETF Transaction Tokens stay "emerging draft, tracked but non-binding." Add the workload-identity profile (SPIFFE X.509-SVID/mTLS or the bank-cloud equivalent). Implement the Oracle adapter without placing credentials in AgentOS or the pack manifest.
 - **M8.5-E:** the live proof must include entitlement → short-lived query authorization → workload-authenticated credential retrieval → Oracle proxy session → DB-native enforcement. Evidence records credential lease/reference identifiers and DB session/proxy identity, never credential material. Prove rotation/revocation or lease expiry, plus no secret leakage to logs, transcript, model context, or evidence.
-- **M8.5-F:** unchanged — the pilot gate (DLP, erasure, content-safety hooks, escalation, SSE, red-team).
+- **M8.5-F:** the pilot gate (DLP, erasure, F-S2a content-safety hooks,
+  design-first F-S2b escalation, SSE, red-team). Listing escalation here does
+  not claim its runtime exists before the F-S2b design and implementation.
 
 **Approvals-screen live-proof generator (ruled):** a separately released, signed **high-risk MCP tool pack** driven through the **direct MCP call surface** — initial call → `202 tool_approval_pending` with ZERO execution; the approvals screen drives grant/deny including distinct-actor 4-eyes; the exact re-call with the ID → execution or governed denial. The proof must NOT claim this pending request originated from chat (that is HP-5's territory). The managed-run lane is REJECTED as the primary proof (different surface); kernel-seeded pending requests are for tests only. **An entitled read-only NL query does not require human approval. Assignment + entitlement + policy are sufficient. The separate high-risk MCP pack exists solely to prove the approvals screen and must not be presented as a requirement of the first read-only analytical agent.** Actor-bound replay (HP-4) means the grant is usable only by the **original requesting subject**; the **approver** remains a distinct human for 4-eyes — two different identities with two different roles in the same request.
 
@@ -155,9 +157,9 @@ Two tables, mirroring the `runs` substrate pattern (`core/run/storage.py`), next
 
 **`conversations`** — `conversation_id` (UUID PK), `tenant_id` (NOT NULL — the isolation boundary), `agent_id`, `creator_subject` (the bound Actor's subject), `state` (closed-enum: `active | closed | expired | erased`), `turn_count`, `cumulative_tokens`, `created_at`, `last_turn_at`, `retention_class`, retention/erasure bookkeeping. Index on `(tenant_id, creator_subject, state)`.
 
-**`conversation_turns`** — `turn_id` (UUID PK), `conversation_id` (FK), `seq` (monotonic int, unique per conversation), `user_message` (plaintext — erasable), `answer` (plaintext — erasable), `agent_run_id` (the correlator to the M8 `agent.run.*` evidence), per-turn token usage, `created_at`, erasure tombstone fields.
+**`conversation_turns`** — `turn_id` (UUID PK), `conversation_id` (FK), `seq` (monotonic int, unique per conversation), `user_message` (plaintext — erasable), `answer` (plaintext — erasable), `agent_run_id`, per-turn token usage, `created_at`, erasure tombstone fields. For `turn_kind="exchange"`, `agent_run_id` is the real M8 `agent-run-*` correlator. For `turn_kind="system"`, the released schema-v1 row carries the legacy `system-<approval UUID>` placeholder plus `approval_request_id`; that string is namespace-disjoint from `agent-run-*` but is not an agent run and must never be followed as one.
 
-**Erasure shape doctrine (no half-erased ambiguity):** after erasure, plaintext columns are set to NULL or replaced with a fixed tombstone sentinel; digests and byte counts remain in chain/evidence only. The DB row itself remains — `seq` integrity and the `agent_run_id` correlation survive erasure so the chain join stays reconstructable even though content is gone.
+**Erasure shape doctrine (no half-erased ambiguity):** after erasure, plaintext columns are set to NULL or replaced with a fixed tombstone sentinel; digests and byte counts remain in chain/evidence only. The DB row itself remains. For exchange rows, `seq` and the real `agent_run_id` correlation survive erasure. System rows remain correlated through `approval_request_id` plus their `conversation.system_turn_appended` row. Output-suppressed model turns create no transcript row at all; `conversation.turn_refused` proves their token settlement without pretending content was later erased. Its `answer_sha256` binds the original screened scalar; F-S2a conversation phases admit no transformations.
 
 **Plaintext placement doctrine (PT-3 reconciliation):** plaintext lives ONLY in these erasable tables. Hash-chain evidence rows carry **digests only** (`question_sha256`, `answer_sha256`) — the M8 digest-only doctrine extended to conversations. This is what reconciles "audit-reconstructable" with "erasable":
 
@@ -167,7 +169,7 @@ Two tables, mirroring the `runs` substrate pattern (`core/run/storage.py`), next
 
 **Terminal-state refusal contract:** posting a turn to a `closed`, `expired`, or `erased` conversation refuses with a closed-enum reason (`conversation_not_active`, carrying the current state) and **never invokes the AgentLoop** — the refusal fires at the lifecycle gate, before context assembly or any model/gateway activity.
 
-**Chain evidence (decision types):** `conversation.created`, `conversation.turn_completed` (digests + `agent_run_id` + `seq`), `conversation.escalated`, `conversation.closed`, `conversation.expired`, `conversation.erased`. The reconstruction join is three hops, all chained: `conversation_id → agent_run_id → agent.run.dispatch` rows.
+**Chain evidence (additive decision types):** `conversation.created`, `conversation.turn_completed` (digests + real `agent_run_id` + `seq`), `conversation.escalated`, `conversation.closed`, `conversation.expired`, `conversation.erased`, `conversation.system_turn_appended`, and `conversation.turn_refused`. Reconstruction is shape-discriminated, not one universal three-hop claim: exchange rows join `conversation_id → agent_run_id → agent.run.*`; system rows join `conversation_id → approval_request_id → approval.*`; refused output attempts have no transcript row and join their terminal agent-run row to hook evidence and the digest-only `conversation.turn_refused` settlement.
 
 **Tenant + creator scoping:** reads and turn-posts are tenant-scoped AND creator-bound. Cross-tenant and cross-actor access wire-collapses to 404 (byte-identical to genuine not-found), per the established cross-tenant-invisibility doctrine.
 
@@ -179,29 +181,40 @@ POST turn
   → load conversation (tenant + creator bound; else 404 wire-collapse)
   → atomic single-writer claim  ..................... (PT-6; concurrent turn → 409 turn_in_progress)
   → conversation-level bounds check ................. (max_turns, cumulative budget, idle expiry)
-  → content-safety INPUT boundary ................... (§8; hook phase, fail-closed)
   → context assembly ................................ (§5; bounded replay from the kernel store ONLY)
+  → content-safety INPUT boundary ................... (§8; exact assembled context, fail-closed)
   → invoke the M8 AgentLoop with assembled context
        — per-turn bounds, dual identity, and the assignment → entitlement → policy
          dispatch chokepoint run EXACTLY as proven in M8; every dispatch re-checks
          the CURRENT envelope (invariant I-2)
-  → content-safety OUTPUT boundary .................. (§8; hook phase, fail-closed)
+  → content-safety OUTPUT boundary .................. (§8; hook phase, fail-closed;
+                                                       exact pending-approval exception below)
   → persist turn (plaintext) + digests; update counters
   → append conversation.turn_completed chain row; emit ADR-020 events
   → release claim
 ```
 
-**Loop extension is additive:** `core/agent/loop.py` gains a prior-context input (the assembled turn messages precede the new question). The loop's internals — round-top bounds, `agent_workforce_id` stamping, per-round dispatch fan-out, refusals-feed-back-as-tool-messages, digest-only terminal rows — are unchanged in substance. Each turn produces its own `agent.run.*` evidence exactly as M8 does; the conversation layer adds the correlation, never replaces the run evidence.
+If the output phase refuses after a model-authored terminal, that terminal
+evidence remains true. No transcript row or plaintext is inserted.
+`settle_refused_turn` increments only `cumulative_tokens` (not `turn_count`)
+in the same transaction as one digest-only `conversation.turn_refused` row;
+repeated refused attempts therefore reach the cumulative-token bound.
+
+**Loop extension is additive:** `core/agent/loop.py` gains a prior-context input (the assembled turn messages precede the new question). The loop's internals — round-top bounds, `agent_workforce_id` stamping, per-round dispatch fan-out, refusals-feed-back-as-tool-messages, digest-only terminal rows — are unchanged in substance. Each model-authored exchange turn produces its own `agent.run.*` evidence exactly as M8 does; system turns do not. The conversation layer adds the correlation, never replaces run evidence.
 
 **Concurrency + multi-replica (PT-6, binding for AKS):** single-writer-per-conversation is enforced by an atomic DB claim (the 14A-A3b run-claim precedent), NOT in-process locks — turn POSTs may land on any replica. Conversation state is DB-backed; streaming continuity across replicas rides ADR-020's reconnect-safe decision-history replay (that mirror exists for exactly this reason). A second concurrent POST refuses 409 with a closed-enum reason; it does not queue in v1.
 
-### 4.1 Amendment (2026-07-10) — the claim is a FENCED lease, and the wire vocabulary is five values
+### 4.1 Amendments — fenced lease and additive hook refusal
 
 The M8.5-A implementation review found the original claim design unfenced: TTL expiry is **liveness recovery, not mutual exclusion**, and without an ownership token a stalled worker could persist over — and then unlock — the lease of the worker that legitimately reclaimed the conversation (the classic lost-lease race). The binding corrections:
 
 - **Fencing token.** `claim_turn` mints a per-lease `turn_claim_id` (persisted on the row; migration `0015`). `append_turn` verifies it under the row lock inside the same transaction as the insert — a stale token refuses `conversation_turn_claim_stale` and rolls back whole (no turn row, no chain row, no counter movement). `release_claim` conditions on the token, so a stale worker's release is a no-op and the current holder's lease survives.
 - **Refusal timing, stated honestly.** Most turn refusals fire at the lifecycle gate BEFORE the AgentLoop; `conversation_turn_claim_stale` (and the persistence-rule re-raise below) fire AT PERSIST TIME, after the loop has run. The turn's model work is discarded; nothing enters the store or the chain.
-- **The wire vocabulary is five values**, closed: `conversation_not_active`, `conversation_turn_in_progress`, `conversation_max_turns_exceeded`, `conversation_token_budget_exceeded`, `conversation_turn_claim_stale`.
+- **The wire vocabulary is six values**, additive and closed:
+  `conversation_not_active`, `conversation_turn_in_progress`,
+  `conversation_max_turns_exceeded`, `conversation_token_budget_exceeded`,
+  `conversation_turn_claim_stale`, and the F-S2a value
+  `conversation_hook_refused`.
 - **Graceful close + the persistence rule.** `close` blocks new turns but does not cancel admitted work: the in-flight lease survives closure and its turn settles (`close` is NOT an emergency cancel; the kill path is M8.5-F scope). A fenced turn may persist only while the conversation is **`active` or `closed`** — never `expired` or `erased`: writing plaintext into an erased conversation would resurrect content after a regulator erasure (§3), and a valid lease does not override that lifecycle boundary.
 - **Proof.** Unit pins cover the stale-append, stale-release, ordering (ownership precedes lifecycle), and resurrection-prevention cases; a live-Postgres concurrency canary (N-way claim race + the lost-lease race under real row locks) runs in the CI postgres lane (`tests/integration/conversation/test_claim_fencing_pg.py`).
 
@@ -238,15 +251,46 @@ The `[conversation].context_strategy` manifest field ships in v1 (single-value c
 - **Encryption at rest:** transcripts are customer data; CMK/Key-Vault at-rest encryption is an **M15/M16** (AKS) infrastructure requirement, referenced here, designed there.
 - **Export:** `conversation.export` produces the examiner view (transcript + chain correlation), feeding the phase-1 evidence-export deliverable (M17-shaped).
 
-## 8. Human escalation + content-safety boundary
+## 8. Human escalation (F-S2b design) + content-safety boundary (F-S2a)
 
-**Escalation is a first-class conversational move** (the EU-AI-Act / SR 11-7 "oversee, intervene, halt" triplet, mapped to existing mechanisms — oversee: evidence; intervene: escalation + approvals; halt: kill switches):
+**Escalation is a proposed first-class conversational move, not an F-S2a
+runtime surface.** F-S2b is design-first because it requires a non-tool
+approval kind, a new conversation state, and a separately ruled risk tier.
+The intended mapping remains the EU-AI-Act / SR 11-7
+"oversee, intervene, halt" triplet — oversee: evidence; intervene:
+escalation + approvals; halt: kill switches:
 
-- **Trigger (a) — agent-initiated:** an `escalate_to_human` **built-in capability**, dispatch-gated exactly like `read_skill`/`remember` (policy can gate who/when; every escalation is an audited dispatch). **v1 delivery note:** the kernel/evidence surface (the built-in, the chain row, the approval-request mint, the `blocking` refusal contract) ships first; the full human-resolution UX rides the harness approval screen and may trail the kernel surface.
+- **Trigger (a) — agent-initiated (F-S2b proposal):** an `escalate_to_human` **built-in capability**, dispatch-gated exactly like `read_skill`/`remember` (policy can gate who/when; every escalation is an audited dispatch).
 - **Trigger (b) — guardrail-initiated:** the safety boundary can force escalation.
-- **Effect:** `conversation.escalated` chain row + an ADR-014 approval-surface request + a harness event. **v1 escalation classes (closed 2-value enum):** `blocking` — the conversation refuses further turns until a human resolves via the approval surface (resolution audited; resume or close); `advisory` — recorded + surfaced, conversation continues. Human resolution arrives through the existing approval engine under the human's own RBAC — **no new authority mechanism**.
+- **Proposed effect (F-S2b only):** `conversation.escalated` chain row + a non-tool approval-surface request + a harness event. The state, risk tier, and any escalation-class vocabulary remain unapproved until that design slice; F-S2a adds none of them.
 
-**Content-safety boundary (PT-8 — kernel owns the boundary, packs own the scanners):** two new kernel-owned hook phases on conversation I/O — `conversation_input` (assembled context + new message, pre-loop) and `conversation_output` (answer, pre-return) — dispatched through the proven M5 hook machinery (`packs/hooks/dispatcher.py`). Actual scanners (prompt-injection, PII/leakage) ship as `cognic-hook-*` packs, fail-closed per the Wave-1 hook doctrine. The kernel does NOT embed model-based safety classifiers — that would strain the OS-only rule and bake a vendor's safety model into the OS.
+**Content-safety boundary (PT-8 — kernel owns the boundary, packs own the scanners):** two new kernel-owned hook phases on conversation I/O — `conversation_input` (the exact assembled bounded replay plus new message, pre-loop) and `conversation_output` (answer, pre-persistence/pre-return) — dispatched through the proven M5 hook machinery (`packs/hooks/dispatcher.py`). Actual scanners (prompt-injection, PII/leakage) ship as `cognic-hook-*` packs, fail-closed per the Wave-1 hook doctrine. The kernel does NOT embed model-based safety classifiers — that would strain the OS-only rule and bake a vendor's safety model into the OS.
+
+**F-S2a R24/R25 scope:** conversation phases admit PASS/REFUSE only.
+Returning `redact` or `mask` fails closed as
+`hook_conversation_transformation_unsupported`, produces value-free evidence
+of the attempted input/output digest, retains the original value, and refuses
+the turn. Existing `dlp_pre` / `dlp_post` transformations are unchanged.
+Conversation transformations are an F-S3 entry condition and land only with
+hook-aware examiner projection plus end-to-end before/after digest continuity
+in the same slice.
+
+Conversation-output hook evidence uses an additive origin discriminator with
+disjoint identifiers. Model output carries `output_origin="agent_run"` and
+the real `agent_run_id="agent-run-*"`. Approval delivery carries
+`output_origin="approval_delivery"` and
+`approval_delivery_id="approval-delivery-<canonical UUID>"`; it does not
+manufacture an `agent_run_id`. The released schema-v1 system-turn row keeps
+its legacy `system-<approval UUID>` storage placeholder, but that value is
+never represented as a real run in hook evidence.
+
+**F-S2a R19 exact exception:** `pending_approval` does not run the output
+phase. Its terminal answer is accepted only when it exactly matches the
+kernel construction from constant text plus the non-empty kernel-minted
+approval ID; the turn executor refuses if that cross-field property is
+broken. This exception preserves the existing D2 conversation↔approval
+correlation without allowing a hook refusal to destroy a pending human
+decision. Completed, refused, and failed answers remain output-screened.
 
 ## 9. Harness contract
 
@@ -260,12 +304,13 @@ The `[conversation].context_strategy` manifest field ships in v1 (single-value c
 
 Vertical-slice gate = BARs 1–3 on `kind` BEFORE the AKS/hardening program proceeds. The full set runs at the M8.5 AKS proof.
 
-- **BAR 1 — governed multi-turn e2e:** turn N depends on turn N−1's answer (real context dependence); every turn dual-identity; every dispatch through the chokepoint; evidence joins `conversation → agent_run → dispatch` across the chain.
+- **BAR 1 — governed multi-turn e2e:** exchange turn N depends on exchange turn N−1's answer (real context dependence); every model-authored exchange turn is dual-identity; every dispatch passes through the chokepoint; evidence joins `conversation → agent_run → dispatch` across the exchange chain.
 - **BAR 2 — record integrity (deterministic):** the API accepts no client-supplied history in any form; a crafted payload attempting it is refused by schema (`extra="forbid"`); the assembled context provably derives from the kernel store only.
 - **BAR 3 — mid-conversation revocation (the I-2 pin):** entitlement removed between turns → the next turn's affected dispatch refuses `agent_scope_not_entitled`, audited; proves no envelope caching.
 - **BAR 4 — bounds + lifecycle refusal:** cumulative-budget and max-turns exhaustion → governed refusal naming the bound in evidence; idle expiry transitions to `expired`; AND the terminal-state pin — close/expire/redact a conversation, then POST a turn → governed `conversation_not_active` refusal with **zero AgentLoop invocation** (asserted via absence of any new `agent.run.*` row).
 - **BAR 5 — erasure:** redact → plaintext gone, tombstones + intact chain; reconstruction shows the erasure event; (v1.1 extension: derived-summary invalidation).
-- **BAR 6 — safety + escalation:** hostile input refused fail-closed by the input hook pack; `escalate_to_human` produces the approval-surface request and an audited block/resume.
+- **BAR 6a — F-S2a safety:** hostile input and output are refused fail-closed by the content-safety hook pack; a conversation-phase `redact` / `mask` attempt also refuses with `hook_conversation_transformation_unsupported`. The bar makes no transformation claim. F-S3 owns conversation transformations together with hook-aware examiner projection and before/after digest continuity.
+- **BAR 6b — F-S2b escalation (future):** the separately designed `escalate_to_human` surface produces its non-tool approval request and audited state transition.
 - **BAR 7 — harness continuity:** SSE drop + reconnect with Last-Event-ID replays without gap or duplication; on AKS, across replicas.
 
 ## 11. Explicit deferrals
@@ -276,6 +321,7 @@ Vertical-slice gate = BARs 1–3 on `kind` BEFORE the AKS/hardening program proc
 | Shared/reusable/scheduled compositions ("versioned if persisted", "approval-gated if shared"); capability-selection UX; on-the-fly agents; delegated-authority model; dynamic workflows; the subject→capability entitlement axis (PT-1) | **ADR-029 / M14-15A** (placeholder reserved) | ADR-028's runtime-record pattern (§1) is the template; PT-1 is the named prerequisite |
 | Context summarization (+ derived-artifact provenance & erasure propagation, PT-4) | **ADR-028 v1.1** | Constraints pre-recorded in §5 |
 | Token-level answer streaming | v1.1 | Event-level progress ships in v1 |
+| Human escalation state, non-tool approval kind, risk tier, and resolution flow | **F-S2b design** | Explicitly not part of the F-S2a hook-phase implementation |
 | Per-agent conversation ACLs | Future hook (PT-9) | v1 accepted risk; the authoring gate is the reserved slot |
 | Multi-agent conversations; conversation search | Unscheduled | |
 | Self-hosted vLLM conversational proof | Post-phase-1 alternate proof | Azure OpenAI private endpoint is the phase-1 default |
