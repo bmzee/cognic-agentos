@@ -108,6 +108,11 @@ _ALLOWED: frozenset[tuple[str, str, str]] = frozenset(
     {
         # SQLAlchemy dialect discrimination — a database vendor, not a capability.
         ("src/cognic_agentos/db/types.py", "name", "oracle"),
+        # ``conn.dialect.name == "sqlite"`` — the F-S2a export snapshot helper
+        # takes SQLite's implicit-BEGIN path; PG/Oracle use explicit
+        # transactions. Reviewed 2026-07-28 at the K1/F-S2a merge (the first
+        # cross-branch drift this tripwire caught live).
+        ("src/cognic_agentos/core/conversation/read_model.py", "name", "sqlite"),
         (
             "src/cognic_agentos/db/migrations/versions/20260531_0006_memory.py",
             "name",
