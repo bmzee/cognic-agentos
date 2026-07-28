@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,33 @@ def test_skill_eval_command_forwards_only_explicit_configuration(monkeypatch) ->
 
 
 def test_skill_eval_command_requires_bearer_token_without_echoing_it() -> None:
+    # --agent-id is supplied (and required) so this reaches the TOKEN check
+    # rather than short-circuiting on the missing-agent error.
+    result = CliRunner().invoke(
+        app,
+        [
+            "skill-eval",
+            "--pack",
+            "tests/fixtures/skill_eval/valid_pack",
+            "--target",
+            "https://agentos.test",
+            "--agent-id",
+            "example-agent",
+        ],
+        env={"COGNIC_SKILL_EVAL_TOKEN": ""},
+    )
+
+    assert result.exit_code == 2
+    assert "COGNIC_SKILL_EVAL_TOKEN" in result.stderr
+
+
+def test_agent_id_is_required_and_carries_no_pack_default() -> None:
+    """The OS ships no agents, so the CLI must not default to one.
+
+    ``--agent-id`` previously defaulted to a specific deployment's pack id, so
+    an operator omitting the flag silently evaluated against an agent their
+    deployment may not even have. Omission must now fail loud.
+    """
     result = CliRunner().invoke(
         app,
         [
@@ -62,11 +90,18 @@ def test_skill_eval_command_requires_bearer_token_without_echoing_it() -> None:
             "--target",
             "https://agentos.test",
         ],
-        env={"COGNIC_SKILL_EVAL_TOKEN": ""},
+        env={"COGNIC_SKILL_EVAL_TOKEN": "TOKEN-CANARY"},
     )
 
     assert result.exit_code == 2
-    assert "COGNIC_SKILL_EVAL_TOKEN" in result.stderr
+    # Strip ANSI SGR escapes before BOTH assertions (the T17 R-round-1
+    # ANSI-strip convention from test_cli_verify.py): under a color-capable
+    # terminal (GitHub Actions) Typer's rich renderer interleaves per-character
+    # codes, splitting "--agent-id" so the positive assertion misses — and
+    # splitting would let the negative pack-id assertion pass vacuously.
+    combined = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr + result.stdout)
+    assert "agent-id" in combined
+    assert "bank-analyst" not in combined, "no pack id may surface as a CLI default"
 
 
 def test_reference_results_provenance_must_match_the_manifest(tmp_path: Path) -> None:
