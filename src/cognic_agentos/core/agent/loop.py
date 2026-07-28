@@ -69,7 +69,11 @@ from cognic_agentos.core.agent._types import (
     LoadedAgentRecord,
     PriorTurn,
 )
-from cognic_agentos.core.agent.dispatch import AgentRunContext, build_llm_tool_specs
+from cognic_agentos.core.agent.dispatch import (
+    AgentRunContext,
+    DispatchOutcome,
+    build_llm_tool_specs,
+)
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 
 if TYPE_CHECKING:
@@ -108,6 +112,23 @@ _FAILED_ANSWER: Final[str] = (
 )
 
 #: Kernel-owned tool-use contract appended to every system prompt.
+#: The manifest capability class whose dispatches carry a governed data scope
+#: (ADR-027). The kernel tracks scope USE by this class, never by a tool name —
+#: every pack names its own query tool, so a name comparison would serve one
+#: pack and silently omit the rest.
+#:
+#: Declared HERE rather than imported from ``dispatch``: two production modules
+#: sharing a vocabulary value each own their copy, and a test asserts parity
+#: (``tests/unit/core/agent/test_loop.py`` ::TestCapabilityVocabularyParity).
+#: A runtime cross-import would couple the modules; the test catches drift.
+_SCOPED_QUERY_CLASS: Final[str] = "data_query"
+
+#: The kernel's OWN skill-reading built-in — kernel-implemented and
+#: kernel-named (``dispatch._BUILTIN_NAMES``), so naming it here is a kernel
+#: fact, not pack vocabulary. Parity with that set is test-asserted alongside
+#: the class above.
+_READ_SKILL_BUILTIN: Final[str] = "read_skill"
+
 _TOOL_USE_CONTRACT: Final[str] = (
     "Tool-use contract: before acting on a task an assigned skill covers, "
     "load that skill's guidance with the read_skill tool. Use only the tools "
@@ -162,21 +183,32 @@ def _usage_token_counts(usage: object) -> tuple[int, int]:
 
 
 def _track_capability_use(
-    call: GatewayToolCall, *, skills_read: set[str], scope_ids_used: set[str]
+    call: GatewayToolCall,
+    outcome: DispatchOutcome,
+    *,
+    skills_read: set[str],
+    scope_ids_used: set[str],
 ) -> None:
-    """Track the memory-digest facts off an OK-dispatched call's LLM-authored
-    args: ``read_skill`` skill_ids + ``run_readonly_query`` scope_ids. The
-    isinstance guards are defensive — the dispatcher validated both for ok
-    outcomes (the read_skill sub-gate / the gate-2 scope check) — and are
-    direct-tested on this pure helper."""
-    if call.name == "read_skill":
+    """Track the memory-digest facts off an OK-dispatched call.
+
+    Skill reads key on the ``read_skill`` BUILT-IN — kernel-owned, declared in
+    ``dispatch._BUILTIN_NAMES``, so naming it here is a kernel fact and not
+    pack vocabulary. Scope use keys on the dispatcher-resolved capability
+    CLASS, never on a tool name: the kernel hosts any pack's data-query tool
+    under whatever name that pack chose, so a name comparison would track
+    exactly one pack and silently omit every other from the digest.
+
+    The dispatcher already resolved and evidenced both facts, so this reads
+    them off the outcome rather than re-deriving them from LLM-authored args;
+    the ``isinstance`` guard on the built-in path stays defensive (the
+    read_skill sub-gate validated it) and is direct-tested on this pure
+    helper."""
+    if call.name == _READ_SKILL_BUILTIN:
         skill_id = call.arguments.get("skill_id")
         if isinstance(skill_id, str):
             skills_read.add(skill_id)
-    elif call.name == "run_readonly_query":
-        scope_id = call.arguments.get("scope_id")
-        if isinstance(scope_id, str):
-            scope_ids_used.add(scope_id)
+    elif outcome.capability_class == _SCOPED_QUERY_CLASS and outcome.scope_id:
+        scope_ids_used.add(outcome.scope_id)
 
 
 def _build_system_prompt(
@@ -508,7 +540,10 @@ class AgentLoop:
                 else:
                     content = json.dumps(outcome.result)
                     _track_capability_use(
-                        tool_call, skills_read=skills_read, scope_ids_used=scope_ids_used
+                        tool_call,
+                        outcome,
+                        skills_read=skills_read,
+                        scope_ids_used=scope_ids_used,
                     )
                 messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": content})
             n += 1

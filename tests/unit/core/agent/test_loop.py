@@ -42,7 +42,11 @@ from cognic_agentos.core.agent._types import (
     LoadedAgentRecord,
     PriorTurn,
 )
-from cognic_agentos.core.agent.dispatch import AgentDispatcher, AgentToolApprovalPending
+from cognic_agentos.core.agent.dispatch import (
+    AgentDispatcher,
+    AgentToolApprovalPending,
+    DispatchOutcome,
+)
 from cognic_agentos.core.agent.loop import (
     AgentLoop,
     AgentRecordLoader,
@@ -616,6 +620,44 @@ class TestHappyPath:
         assert len(h.proxy.calls) == 1
         note = json.loads(h.memory.api.remember_calls[0]["value"])
         assert note["scope_ids_used"] == [_SCOPE_ID]
+        assert note["skills_read"] == []
+
+    async def test_scope_ids_used_tracked_for_a_DIFFERENTLY_NAMED_pack_query_tool(
+        self, db: AsyncEngine, keypair: tuple[bytes, bytes]
+    ) -> None:
+        """The kernel hosts every bank's own query tool under ITS chosen name.
+
+        Real-loop regression for the pack-vocabulary defect: tracking used to
+        compare ``call.name == "run_readonly_query"``, so a deployment whose
+        data-query tool was named anything else got an empty ``scope_ids_used``
+        digest — silently, with no error. Tracking now keys on the
+        dispatcher-resolved capability CLASS, so this pack is tracked
+        identically to the one the kernel happened to be written against.
+        """
+        private_pem, _ = keypair
+        foreign_ref = "cognic-tool-someothervendor/query_customer_ledger"
+        h = _harness(
+            db,
+            responses=[
+                _resp(
+                    tool_calls=(_tc("query_customer_ledger", scope_id=_SCOPE_ID, sql="SELECT 1"),)
+                ),
+                _resp("Two views are in scope."),
+            ],
+            granted=GrantedCapabilities(skills=frozenset(), tools=frozenset({foreign_ref})),
+            entitled=frozenset({_SCOPE_ID}),
+            scopes={_SCOPE_ID: _SCOPE},
+            signing_key_pem=private_pem,
+            tool_capability_classes={foreign_ref: "data_query"},
+        )
+        result = await _ask(h)
+        assert result.terminal_state == "completed"
+        assert len(h.proxy.calls) == 1
+        note = json.loads(h.memory.api.remember_calls[0]["value"])
+        assert note["scope_ids_used"] == [_SCOPE_ID], (
+            "a pack whose query tool is not named run_readonly_query must still "
+            "have its scope use recorded in the memory digest"
+        )
         assert note["skills_read"] == []
 
 
@@ -1233,37 +1275,140 @@ class TestUsageTokenCounts:
         assert _usage_token_counts(usage) == expected
 
 
+def _ok(capability_class: str | None = None, scope_id: str | None = None) -> DispatchOutcome:
+    """An ok DispatchOutcome carrying the dispatcher-resolved generic facts."""
+    return DispatchOutcome(
+        refused=False,
+        reason=None,
+        message=None,
+        result={"ok": True},
+        capability_class=capability_class,
+        scope_id=scope_id,
+    )
+
+
 class TestTrackCapabilityUse:
-    def test_tracks_read_skill_and_oracle_scope(self) -> None:
+    def test_tracks_read_skill_builtin_and_scoped_query_class(self) -> None:
         skills: set[str] = set()
         scopes: set[str] = set()
         _track_capability_use(
-            _tc("read_skill", skill_id="s-1"), skills_read=skills, scope_ids_used=scopes
+            _tc("read_skill", skill_id="s-1"), _ok(), skills_read=skills, scope_ids_used=scopes
         )
         _track_capability_use(
             _tc("run_readonly_query", scope_id="sc-1", sql="SELECT 1"),
+            _ok(capability_class="data_query", scope_id="sc-1"),
             skills_read=skills,
             scope_ids_used=scopes,
         )
-        _track_capability_use(_tc("other_tool", q="x"), skills_read=skills, scope_ids_used=scopes)
+        _track_capability_use(
+            _tc("other_tool", q="x"),
+            _ok(capability_class="unscoped"),
+            skills_read=skills,
+            scope_ids_used=scopes,
+        )
         assert skills == {"s-1"}
         assert scopes == {"sc-1"}
 
-    def test_defensive_non_str_args_not_tracked(self) -> None:
-        """Defensive isinstance guards (the dispatcher validates both for ok
-        outcomes) — direct-tested on the pure helper."""
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            pytest.param("run_readonly_query", id="the-oracle-pack-name"),
+            pytest.param("query_customer_ledger", id="a-different-pack-name"),
+            pytest.param("execute_sql", id="another-pack-name-entirely"),
+        ],
+    )
+    def test_scope_is_tracked_for_ANY_pack_tool_name(self, tool_name: str) -> None:
+        """The kernel hosts every bank's own data-query tool under whatever
+        name that bank chose. Tracking keys on the dispatcher-resolved
+        capability CLASS, so the digest is complete for all of them.
+
+        This is the regression for the pack-vocabulary defect: the previous
+        implementation compared ``call.name == "run_readonly_query"`` and
+        therefore recorded scope use for exactly ONE pack while silently
+        omitting every other — no error, no warning, a quietly wrong digest.
+        """
         skills: set[str] = set()
         scopes: set[str] = set()
         _track_capability_use(
-            _tc("read_skill", skill_id=7), skills_read=skills, scope_ids_used=scopes
-        )
-        _track_capability_use(
-            _tc("run_readonly_query", scope_id=None, sql="SELECT 1"),
+            _tc(tool_name, scope_id="sc-9", sql="SELECT 1"),
+            _ok(capability_class="data_query", scope_id="sc-9"),
             skills_read=skills,
             scope_ids_used=scopes,
         )
+        assert scopes == {"sc-9"}, f"scope use must be tracked for {tool_name!r}"
+        assert skills == set()
+
+    def test_non_query_classes_and_absent_scope_are_not_tracked(self) -> None:
+        """Only the scoped-query class contributes a scope; a class the
+        dispatcher never resolved (built-ins) contributes nothing."""
+        skills: set[str] = set()
+        scopes: set[str] = set()
+        for outcome in (
+            _ok(capability_class="action", scope_id="sc-x"),
+            _ok(capability_class="unscoped", scope_id="sc-x"),
+            _ok(capability_class=None, scope_id=None),
+            _ok(capability_class="data_query", scope_id=None),
+        ):
+            _track_capability_use(
+                _tc("some_tool", q="x"), outcome, skills_read=skills, scope_ids_used=scopes
+            )
+        assert scopes == set()
+        assert skills == set()
+
+    def test_defensive_non_str_args_not_tracked(self) -> None:
+        """Defensive isinstance guard on the built-in path (the dispatcher
+        validates it for ok outcomes) — direct-tested on the pure helper."""
+        skills: set[str] = set()
+        scopes: set[str] = set()
+        _track_capability_use(
+            _tc("read_skill", skill_id=7), _ok(), skills_read=skills, scope_ids_used=scopes
+        )
         assert skills == set()
         assert scopes == set()
+
+
+class TestCapabilityVocabularyParity:
+    """``loop`` declares its own copies of two dispatch-owned vocabulary values
+    rather than importing them at runtime (the repo's own-copy-plus-parity-test
+    doctrine). These assertions are the other half of that doctrine: without
+    them a rename in ``dispatch`` would silently disable scope tracking again,
+    which is exactly the class of defect this whole change exists to close.
+    """
+
+    def test_scoped_query_class_is_EXACTLY_the_dispatch_owned_value(self) -> None:
+        """EXACT equality against dispatch's constant, never membership.
+
+        A membership assertion is vacuous here and was the first version's
+        defect: ``action`` is a member of BOTH ``_DISPATCHABLE_CLASSES`` and
+        ``_ENTITLEMENT_REQUIRED_CLASSES``, so drifting the loop's copy to
+        ``action`` satisfied membership while silently disabling scope
+        tracking — the exact defect this whole change exists to close.
+        """
+        from cognic_agentos.core.agent import dispatch as dispatch_module
+        from cognic_agentos.core.agent import loop as loop_module
+
+        assert loop_module._SCOPED_QUERY_CLASS == dispatch_module._SCOPED_QUERY_CLASS
+        # And the CANONICAL value itself is pinned. Membership was NOT enough:
+        # renaming BOTH copies to ``action`` satisfies every set-membership
+        # assertion (``action`` is in both class sets) while silently
+        # redirecting scope tracking. Pinning the literal makes changing it a
+        # review action, which is the whole point of a closed vocabulary.
+        assert dispatch_module._SCOPED_QUERY_CLASS == "data_query"
+
+    def test_read_skill_builtin_is_EXACTLY_the_dispatch_owned_value(self) -> None:
+        """EXACT equality — membership in ``_BUILTIN_NAMES`` is not enough.
+
+        Drifting the loop's copy to the sibling built-in ``remember`` keeps
+        membership satisfied while breaking skill-read tracking.
+        """
+        from cognic_agentos.core.agent import dispatch as dispatch_module
+        from cognic_agentos.core.agent import loop as loop_module
+
+        assert loop_module._READ_SKILL_BUILTIN == dispatch_module._READ_SKILL_BUILTIN
+        # Canonical value pinned for the same reason: renaming BOTH copies to
+        # the sibling built-in ``remember`` keeps membership satisfied.
+        assert dispatch_module._READ_SKILL_BUILTIN == "read_skill"
+        assert dispatch_module._READ_SKILL_BUILTIN in dispatch_module._BUILTIN_NAMES
 
 
 class TestRecordLoaderProtocol:

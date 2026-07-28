@@ -101,6 +101,13 @@ logger = logging.getLogger(__name__)
 #: LLM-authored ``skill_id`` argument still clears the granted-skills sub-gate.
 _BUILTIN_NAMES: Final[frozenset[str]] = frozenset({"read_skill", "remember"})
 
+#: The kernel's skill-reading built-in. NAMED (not an inline literal) because
+#: ``core/agent/loop.py`` keeps its own copy and a parity test asserts EXACT
+#: equality against this value — membership in ``_BUILTIN_NAMES`` is NOT
+#: sufficient, since a drift to the sibling ``remember`` would satisfy
+#: membership while silently breaking skill-read tracking.
+_READ_SKILL_BUILTIN: Final[str] = "read_skill"
+
 #: Classes the kernel can dispatch today. ``retrieval`` is deliberately absent:
 #: it is reserved and unimplemented, so it refuses instead of degrading to an
 #: unscoped call. A missing class is the same fail-closed refusal.
@@ -109,6 +116,13 @@ _DISPATCHABLE_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action"
 #: Classes requiring a per-originator entitlement read at gate 2. Data queries
 #: bind a named data scope; actions bind the exact full tool identity.
 _ENTITLEMENT_REQUIRED_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action"})
+
+#: The capability class carrying a governed data scope. NAMED for the same
+#: reason as ``_READ_SKILL_BUILTIN``: ``loop`` holds its own copy and parity is
+#: asserted by EXACT equality. Membership in ``_DISPATCHABLE_CLASSES`` or
+#: ``_ENTITLEMENT_REQUIRED_CLASSES`` would NOT catch a drift to ``action`` —
+#: which is a member of both and would silently disable scope tracking.
+_SCOPED_QUERY_CLASS: Final[str] = "data_query"
 
 #: The reserved argument key the signed query-context token rides on. Kernel-
 #: owned: NEVER advertised in :func:`build_llm_tool_specs` output (the
@@ -178,6 +192,23 @@ class DispatchOutcome:
     ``refused=True`` carries the closed-enum ``reason`` + the closed-form
     graceful ``message`` the loop feeds back to the LLM (never raw exception
     text); ``refused=False`` carries the tool/builtin ``result`` payload.
+
+    ``capability_class`` + ``scope_id`` are the GENERIC facts the dispatcher
+    already resolved for its evidence row, returned so callers never have to
+    re-derive them from the LLM-authored call. Keying on the CLASS is what
+    keeps the kernel pack-agnostic: a caller that instead compared
+    ``call.name`` against a tool literal would work for exactly one pack and
+    silently no-op for every other (the defect this field removes from
+    ``loop._track_capability_use``).
+
+    **Populated on the OK arm only.** Every refusal and the pending-approval
+    arm return both as ``None`` — including refusals raised AFTER the
+    dispatcher resolved the class, where the value is known but deliberately
+    not surfaced. The evidence row remains the complete record of what was
+    resolved on every arm; this pair is a convenience for the ok path and must
+    not be read as "the dispatcher did not resolve it". Widening it later is
+    additive and safe; narrowing what a consumer may infer from it is not,
+    which is why the contract is stated narrowly here.
     """
 
     refused: bool
@@ -186,6 +217,8 @@ class DispatchOutcome:
     result: dict[str, Any] | None
     pending: bool = False
     approval_request_id: str | None = None
+    capability_class: str | None = None
+    scope_id: str | None = None
 
 
 class AgentToolApprovalPending(Exception):
@@ -337,7 +370,8 @@ def _validated_read_skill_id(
 ) -> str | None:
     """THE read_skill SUB-GATE: the built-in is generic, so the LLM-authored
     ``skill_id`` argument is itself a capability selection and must clear the
-    same granted set (without this, ``read_skill("atm-recon")`` would read an
+    same granted set (without this, ``read_skill("<unassigned-skill-id>")``
+    would read an
     unassigned skill's body). ``None`` = refuse ``agent_capability_not_assigned``
     BEFORE the reader is consulted."""
     skill_id = arguments.get("skill_id")
@@ -427,7 +461,7 @@ class AgentDispatcher:
                 scope_id=None,
             )
         read_skill_id: str | None = None
-        if resolved.kind == "builtin" and resolved.ref == "read_skill":
+        if resolved.kind == "builtin" and resolved.ref == _READ_SKILL_BUILTIN:
             read_skill_id = _validated_read_skill_id(call.arguments, run.granted)
             if read_skill_id is None:
                 raw_skill_id = call.arguments.get("skill_id")
@@ -501,7 +535,7 @@ class AgentDispatcher:
                         scope_id=None,
                     )
         # --- 3. Gate 2 — entitlement.
-        stamped = capability_class == "data_query"
+        stamped = capability_class == _SCOPED_QUERY_CLASS
         scope_id: str | None = None
         resolved_scope: DataScope | None = None
         if stamped:
@@ -570,7 +604,9 @@ class AgentDispatcher:
                 # Computed, never asserted: an entitlement-required class can
                 # reach here only after gate 2 resolved a real scope.
                 entitlement_verified=(
-                    (scope_id is not None) if capability_class == "data_query" else action_entitled
+                    (scope_id is not None)
+                    if capability_class == _SCOPED_QUERY_CLASS
+                    else action_entitled
                 )
                 if capability_class in _ENTITLEMENT_REQUIRED_CLASSES
                 else True,
@@ -710,7 +746,14 @@ class AgentDispatcher:
             result=result,
             credential_rotation_ref=rotation_ref,
         )
-        return DispatchOutcome(refused=False, reason=None, message=None, result=result)
+        return DispatchOutcome(
+            refused=False,
+            reason=None,
+            message=None,
+            result=result,
+            capability_class=capability_class,
+            scope_id=scope_id,
+        )
 
     async def _execute_builtin(
         self,
@@ -723,7 +766,7 @@ class AgentDispatcher:
     ) -> dict[str, Any]:
         """Route the two kernel-owned built-ins. ``read_skill_id`` is the
         gate-1-validated skill id (never the raw argument)."""
-        if ref == "read_skill":
+        if ref == _READ_SKILL_BUILTIN:
             assert read_skill_id is not None  # validated at gate 1
             return await _builtins.read_skill(skill_id=read_skill_id, reader=self._skill_reader)
         # remember — a missing/non-str note is a malformed LLM argument:
@@ -858,7 +901,7 @@ def build_llm_tool_specs(
     for tool_name in sorted(name_map):
         full_ref = name_map[tool_name]
         capability_class = capability_classes.get(full_ref)
-        if capability_class == "data_query":
+        if capability_class == _SCOPED_QUERY_CLASS:
             parameters: dict[str, Any] = {
                 "type": "object",
                 "properties": {
@@ -896,7 +939,7 @@ def build_llm_tool_specs(
         )
     specs.append(
         GatewayToolSpec(
-            name="read_skill",
+            name=_READ_SKILL_BUILTIN,
             description="Read the body of an instruction skill assigned to this agent.",
             parameters={
                 "type": "object",

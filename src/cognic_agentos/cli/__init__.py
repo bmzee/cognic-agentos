@@ -1106,7 +1106,11 @@ def skill_eval(
         help="Bearer token (prefer COGNIC_SKILL_EVAL_TOKEN).",
     ),
     agent_id: str = typer.Option(
-        "bank-analyst",
+        # REQUIRED, deliberately no default: the OS ships no agents, so any
+        # default here would be one deployment's pack id baked into the
+        # platform CLI. A missing --agent-id must fail loud, never silently
+        # evaluate against an agent this deployment may not even have.
+        ...,
         "--agent-id",
         envvar="COGNIC_SKILL_EVAL_AGENT_ID",
         help="Agent with the skill assigned.",
